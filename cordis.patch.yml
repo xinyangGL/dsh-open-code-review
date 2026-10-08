@@ -1,0 +1,13 @@
+# ============================================================================
+# dsh-open-code-review —— bundle patch
+# 安装后由 DSH 在启动/热加载时把下面这个条目插进 web profile 的插件树。
+#
+# 安装（本地目录开发态）：
+#   dsh plugin --profile web add link:C:\Users\吴礼凯\.dsh\plugins\dsh-open-code-review
+# 卸载：
+#   dsh plugin --profile web remove dsh-open-code-review
+# ============================================================================
+
+- insert:
+    - id: dsh-open-code-review
+      name: dsh-open-code-review

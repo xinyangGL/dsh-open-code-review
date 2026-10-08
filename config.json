@@ -1,0 +1,35 @@
+{
+  "_readme": [
+    "这个文件是可选的第 2 层配置（优先级：设置页 > 本文件 > 插件内置默认值，详见 README 的「配置」一节）。",
+    "这里适合放设置页没有的键：ocrCandidates / autoEngine / maxTimeoutMinutes / extraArgs / env / includeDiffMaxBytes / maxIssuesInText / llm.apiKey（字面密钥）。",
+    "改本文件即时生效（按 mtime 热读）；设置页改动也是即时生效。",
+    "默认 LLM 走 CommandCode 的 DeepSeek v4.1（OpenAI 兼容路由，实测可用）；密钥不写在这里，用 llm.apiKeyRef 指向 DSH 凭据库里的 COMMANDCODE_API_KEY。"
+  ],
+  "ocrPath": "",
+  "ocrCandidates": [],
+  "enabled": true,
+  "engine": "auto",
+  "autoEngine": "",
+  "audience": "agent",
+  "timeoutMinutes": 15,
+  "maxTimeoutMinutes": 60,
+  "extraArgs": [],
+  "env": {},
+  "llm": {
+    "baseUrl": "https://api.commandcode.ai/provider/v1",
+    "protocol": "openai",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "apiKeyRef": "COMMANDCODE_API_KEY",
+    "apiKey": ""
+  },
+  "auto": "adaptive",
+  "autoScope": "workspace",
+  "autoSkipSubagents": true,
+  "autoMaxPerSession": 3,
+  "autoMinReviewableFiles": 1,
+  "autoMinIntervalMs": 60000,
+  "autoIncludeDiff": true,
+  "includeDiffMaxBytes": 120000,
+  "maxIssuesInText": 40,
+  "verbose": false
+}
