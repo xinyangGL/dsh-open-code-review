@@ -56,12 +56,57 @@ function useState(initial) {
   return [store.values[i], set];
 }
 
+/* useEffect / useRef：效果先入队，渲染结束后由 flushEffects() 统一执行（带 deps 比较）。 */
+const effectSlots = new WeakMap();
+let pendingEffects = [];
+
+function useEffect(fn, deps) {
+  const store = current;
+  const i = store.index++;
+  let slots = effectSlots.get(store);
+  if (!slots) {
+    slots = [];
+    effectSlots.set(store, slots);
+  }
+  const prev = slots[i];
+  const same =
+    prev && Array.isArray(deps) && Array.isArray(prev.deps) && deps.length === prev.deps.length && deps.every((d, k) => Object.is(d, prev.deps[k]));
+  if (same) return;
+  slots[i] = { deps: Array.isArray(deps) ? deps.slice() : null, cleanup: prev ? prev.cleanup : undefined, fn };
+  pendingEffects.push({ store, i });
+}
+
+function useRef(initial) {
+  const store = current;
+  const i = store.index++;
+  if (!store.refs) store.refs = [];
+  if (!(i in store.refs)) store.refs[i] = { current: initial === undefined ? null : initial };
+  return store.refs[i];
+}
+
+function flushEffects() {
+  const queue = pendingEffects;
+  pendingEffects = [];
+  for (const { store, i } of queue) {
+    const slots = effectSlots.get(store);
+    const rec = slots && slots[i];
+    if (!rec || typeof rec.fn !== "function") continue;
+    if (typeof rec.cleanup === "function") rec.cleanup();
+    const fn = rec.fn;
+    rec.fn = null;
+    const cleanup = fn();
+    rec.cleanup = typeof cleanup === "function" ? cleanup : undefined;
+  }
+}
+
 const miniReact = {
   createElement: (type, props, ...children) => ({
     type,
     props: { ...(props || {}), children: children.length === 0 ? undefined : children.length === 1 ? children[0] : children },
   }),
   useState,
+  useEffect,
+  useRef,
   useMemo: (fn) => fn(),
   useCallback: (fn) => fn,
   useSyncExternalStore: (subscribe, read) => {
@@ -202,7 +247,11 @@ fakeCtx.form = {
 };
 
 const props = { view: "page" };
-const render = () => expand(miniReact.createElement(reg.component, props));
+const render = () => {
+  const built = expand(miniReact.createElement(reg.component, props));
+  flushEffects();
+  return built;
+};
 const tree = render();
 const html = textOf(tree);
 for (const label of ["总开关", "默认引擎", "输出受众", "ocr 可执行文件", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔（毫秒）", "跳过子代理会话", "委派时带 diff", "端点 Base URL", "端点协议", "模型名", "API Key 引用", "单次超时（分钟）", "调试日志"]) {
@@ -215,12 +264,20 @@ check("带出数字字段值", hosts(tree).some((n) => n.tag === "input" && n.pr
 check("已改字段有标记", html.includes("已改"));
 check("enabled 勾选", hosts(tree).some((n) => n.tag === "input" && n.props.type === "checkbox" && n.props.checked === true));
 
-/** 控件行：直接含 input/select，且子孙里有 button。 */
+/** 控件行：client.js 每行都带 data-ocr-field-row 标记，行内第一个 input/select 就是控件。 */
 function controlRows(node, out = []) {
-  const kids = kidsOf(node);
-  const field = kids.find((c) => c && (c.tag === "input" || c.tag === "select"));
-  if (field) out.push({ row: node, field, buttons: hosts(node).filter((n) => n.tag === "button") });
-  for (const c of kids) if (c && c.tag === "div") controlRows(c, out);
+  if (!node) return out;
+  if (node.props && typeof node.props["data-ocr-field-row"] === "string") {
+    const all = hosts(node);
+    out.push({
+      key: node.props["data-ocr-field-row"],
+      row: node,
+      field: all.find((n) => n.tag === "input" || n.tag === "select"),
+      buttons: all.filter((n) => n.tag === "button"),
+    });
+    return out;
+  }
+  for (const c of kidsOf(node)) controlRows(c, out);
   return out;
 }
 const rows = controlRows(tree);
@@ -257,6 +314,98 @@ if (maxRow) {
   if (reset) await reset.props.onClick();
   check("「恢复默认」调用 form.unset", writes.some((w) => w.op === "unset" && w.key === "autoMaxPerSession"), JSON.stringify(writes));
 }
+
+/* ------------------------------------------------------------ 模型名：可搜索下拉 */
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const modelInputNode = (t) => hosts(t).find((n) => n.tag === "input" && n.props["data-ocr-model-input"] === true);
+const modelMenuNode = (t) => hosts(t).find((n) => n.props && n.props["data-ocr-model-menu"] === true);
+const modelItemNodes = (t) => hosts(t).filter((n) => n.props && n.props["data-ocr-model-item"] === true);
+
+fakeCtx.remote = {
+  session: {
+    modelCatalog: async () => ({
+      ok: true,
+      value: {
+        default: { provider: "commandcode", model: "deepseek/deepseek-v4.1-flash" },
+        routableProviders: ["commandcode", "other"],
+        groups: [
+          {
+            id: "commandcode",
+            name: "Command Code",
+            models: [
+              { id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek v4.1 Flash", description: "部署默认" },
+              { id: "glm-5.3-flashx", name: "GLM-5.3 FlashX" },
+              { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
+            ],
+          },
+          { id: "other", name: "其它提供方", models: [{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna" }] },
+        ],
+        failures: [{ id: "broken", name: "Broken", message: "timeout" }],
+      },
+    }),
+  },
+};
+render();
+await tick();
+const catalogTree = render();
+check("模型目录读完后给出候选数量", textOf(catalogTree).includes("4 个模型"), textOf(catalogTree).slice(-140));
+check("目录读取失败也如实提示", textOf(catalogTree).includes("1 个提供方没读出来"));
+check("带出当前模型的友好名", textOf(catalogTree).includes("当前：DeepSeek v4.1 Flash（Command Code）"), textOf(catalogTree).slice(-160));
+
+const mi = modelInputNode(catalogTree);
+check("模型名仍是可编辑输入框", Boolean(mi) && mi.props.disabled !== true && mi.props.value === "deepseek/deepseek-v4.1-flash");
+check("默认收起候选列表", !modelMenuNode(catalogTree));
+check("模型目录来自 ctx.remote.session", textOf(catalogTree).includes("候选来自 DSH 自己的模型目录"));
+
+mi.props.onFocus();
+const openTree = render();
+check("聚焦后展开候选列表", Boolean(modelMenuNode(openTree)));
+check("候选带提供方名", textOf(modelMenuNode(openTree)).includes("Command Code") && textOf(modelMenuNode(openTree)).includes("其它提供方"));
+check("候选同时给名称与 id", textOf(modelMenuNode(openTree)).includes("GLM-5.3 FlashX") && textOf(modelMenuNode(openTree)).includes("kimi-k2.7-code"));
+check("展开时列出全部 4 个模型（不被当前值筛掉）", modelItemNodes(openTree).length === 4, `n=${modelItemNodes(openTree).length}`);
+
+modelInputNode(openTree).props.onChange({ target: { value: "glm" } });
+const filteredTree = render();
+check("输入即过滤", modelItemNodes(filteredTree).length === 1 && textOf(modelItemNodes(filteredTree)[0]).includes("GLM-5.3 FlashX"), `n=${modelItemNodes(filteredTree).length}`);
+
+modelItemNodes(filteredTree)[0].props.onMouseDown({ preventDefault() {} });
+const picked = controlRows(render()).find((r) => r.key === "llmModel");
+check("点候选写入草稿", Boolean(picked) && picked.field.props.value === "glm-5.3-flashx", picked ? String(picked.field.props.value) : "没有该行");
+const saveModel = picked && picked.buttons.find((b) => textOf(b) === "保存");
+check("选中后出现「保存」", Boolean(saveModel));
+if (saveModel) {
+  await saveModel.props.onClick();
+  check("保存模型名调用 form.set(llmModel)", writes.some((w) => w.op === "set" && w.key === "llmModel" && w.value === "glm-5.3-flashx"), JSON.stringify(writes.slice(-2)));
+}
+
+/* 键盘：输入过滤成唯一匹配后回车选中 */
+const afterSave = render();
+modelInputNode(afterSave).props.onFocus();
+modelInputNode(afterSave).props.onChange({ target: { value: "kimi" } });
+const oneMatch = render();
+modelInputNode(oneMatch).props.onKeyDown({ key: "ArrowDown", preventDefault() {} });
+modelInputNode(oneMatch).props.onKeyDown({ key: "Enter", preventDefault() {} });
+const kbPicked = controlRows(render()).find((r) => r.key === "llmModel");
+check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.value === "kimi-k2.7-code", kbPicked ? String(kbPicked.field.props.value) : "没有该行");
+
+/* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
+fakeCtx.remote.session.modelCatalog = async () => ({ ok: false, error: { code: "peer-unavailable", message: "peer 断了" } });
+render();
+await tick();
+const errTree = render();
+check("Remote 信封失败时给出诊断", textOf(errTree).includes("读取 DSH 模型目录失败") && textOf(errTree).includes("peer 断了"), textOf(errTree).slice(-140));
+
+/* 取不到 ctx.remote 时退化成纯文本输入 */
+fakeCtx.remote = undefined;
+render();
+const noCatalog = render();
+check("取不到模型目录时给出诊断", textOf(noCatalog).includes("直接手输模型名即可"));
+check("退化后输入框仍可编辑", (() => {
+  const n = modelInputNode(noCatalog);
+  return Boolean(n) && n.props.disabled !== true;
+})());
+check("退化后不再渲染候选列表", !modelMenuNode(noCatalog));
 
 check("summary 视图渲染为 null", reg.component({ view: "summary" }) === null);
 

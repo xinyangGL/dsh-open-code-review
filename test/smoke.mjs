@@ -5,7 +5,8 @@
  * 用法：node test/smoke.mjs [被测仓库路径]
  */
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { mkdtempSync, existsSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -249,7 +250,10 @@ check(
 const bad = await tools.get("ocr_review").execute({ scope: "commit" }, exec);
 check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.summary.includes("需要 commit"), bad.summary);
 
-const notRepo = await tools.get("ocr_review").execute({ preview: true, repo: fileURLToPath(new URL("../", import.meta.url)) }, exec);
+/* 用全新空目录当"非 git 仓库"样本：插件自己现在是个 git 仓库（用户要求建 GitHub 仓库时 git init 过），
+   不能再拿它当反例。 */
+const nonRepoDir = mkdtempSync(join(tmpdir(), "ocr-nongit-"));
+const notRepo = await tools.get("ocr_review").execute({ preview: true, repo: nonRepoDir }, exec);
 check("非 git 仓库：给出可读诊断而不是裸 stderr", notRepo.ok === false && notRepo.summary.includes("不是 git 仓库") && notRepo.configHint.length > 0, notRepo.summary);
 
 const status = await tools.get("ocr_status").execute({}, exec);
