@@ -156,28 +156,66 @@ const plugin = descriptor.factory((spec) => {
   throw new Error(`client.js 依赖了额外模块：${spec}`);
 });
 check("插件导出 apply", typeof plugin.apply === "function");
-check("插件 inject 含 slots", Array.isArray(plugin.inject) && plugin.inject.includes("slots"), JSON.stringify(plugin.inject));
+const inject = Array.isArray(plugin.inject) ? plugin.inject : [];
+check("插件 inject 含 slots", inject.includes("slots"), JSON.stringify(plugin.inject));
+/* cordis 的注入是全有全无：inject 里只要有一个服务没人 provide，整个 fiber 就是 INACTIVE、
+   apply 根本不跑（设置页整块消失）。所以插件本身不硬依赖 remote，
+   remote/remote.session 声明在 apply 内部的子 fiber 上（见下面的子注入断言）。 */
+check(
+  "插件 inject 不硬依赖 remote",
+  inject.includes("slots") && !inject.includes("remote") && !inject.includes("remote.session"),
+  JSON.stringify(plugin.inject),
+);
 
 /* ------------------------------------------------------------ 注册契约 */
 
 const registrations = [];
-const fakeCtx = {
-  injectCalls: [],
-  slotInjectCalls: [],
+
+/**
+ * 造一个「宿主 ctx」桩：主夹具、没有 Remote 桥、服务迟到三个场景共用同一套
+ * inject / slots / configForms 表面，注入契约改了只改这一处（评审 #5、#6）。
+ * 场景差异一律走 overrides：注册表数组、get / inject 的具体行为。
+ */
+function makeCtx(overrides = {}) {
+  const ctx = {
+    injectCalls: [],
+    slotInjectCalls: [],
+    getCalls: [],
+    registrations, /* 默认写进主夹具的注册表 */
+    /* cordis 的服务守卫拦下属性访问时的兜底读取口（ReflectService.get）。 */
+    get(name) {
+      ctx.getCalls.push(name);
+      return undefined;
+    },
+    inject(deps, cb) {
+      ctx.injectCalls.push(deps);
+      return cb(ctx);
+    },
+    slots: {
+      inject(name, cb) {
+        ctx.slotInjectCalls.push(name);
+        return cb();
+      },
+      register(options, component) {
+        ctx.registrations.push({ options, component });
+        return () => {};
+      },
+    },
+    configForms: { get: () => ctx.form },
+    ...overrides,
+  };
+  return ctx;
+}
+
+const fakeCtx = makeCtx({
   formIds: [],
-  inject(deps, cb) {
-    fakeCtx.injectCalls.push(deps);
-    return cb(fakeCtx);
-  },
-  slots: {
-    inject(name, cb) {
-      fakeCtx.slotInjectCalls.push(name);
-      return cb();
-    },
-    register(options, component) {
-      registrations.push({ options, component });
-      return () => {};
-    },
+  get(name) {
+    fakeCtx.getCalls.push(name);
+    if (name === "remote") {
+      if (fakeCtx.remoteThrows) throw new Error('cannot get property "remote" without inject');
+      return fakeCtx.getFallback;
+    }
+    return undefined;
   },
   configForms: {
     get(id) {
@@ -186,13 +224,18 @@ const fakeCtx = {
       return fakeCtx.form;
     },
   },
-};
+});
 
 plugin.apply(fakeCtx);
 check("apply 注入 configForms", fakeCtx.injectCalls.some((d) => d.includes("configForms")), JSON.stringify(fakeCtx.injectCalls));
 check("注册进 plugins.bundle.config", fakeCtx.slotInjectCalls.includes("plugins.bundle.config"), JSON.stringify(fakeCtx.slotInjectCalls));
 check("注册进 settings.section", fakeCtx.slotInjectCalls.includes("settings.section"), JSON.stringify(fakeCtx.slotInjectCalls));
 check("共注册两个 cell", registrations.length === 2, `n=${registrations.length}`);
+check(
+  "apply 为模型目录单独声明 remote 子注入",
+  fakeCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("remote") && d.includes("remote.session")),
+  JSON.stringify(fakeCtx.injectCalls),
+);
 const reg = registrations.find((r) => r.options.name === "plugins.bundle.config") || { options: {}, component: () => null };
 const sectionReg = registrations.find((r) => r.options.name === "settings.section") || { options: {}, component: () => null };
 check("key = 包名", reg.options.key === "dsh-open-code-review", String(reg.options.key));
@@ -322,30 +365,29 @@ const modelInputNode = (t) => hosts(t).find((n) => n.tag === "input" && n.props[
 const modelMenuNode = (t) => hosts(t).find((n) => n.props && n.props["data-ocr-model-menu"] === true);
 const modelItemNodes = (t) => hosts(t).filter((n) => n.props && n.props["data-ocr-model-item"] === true);
 
-fakeCtx.remote = {
-  session: {
-    modelCatalog: async () => ({
-      ok: true,
-      value: {
-        default: { provider: "commandcode", model: "deepseek/deepseek-v4.1-flash" },
-        routableProviders: ["commandcode", "other"],
-        groups: [
-          {
-            id: "commandcode",
-            name: "Command Code",
-            models: [
-              { id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek v4.1 Flash", description: "部署默认" },
-              { id: "glm-5.3-flashx", name: "GLM-5.3 FlashX" },
-              { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
-            ],
-          },
-          { id: "other", name: "其它提供方", models: [{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna" }] },
-        ],
-        failures: [{ id: "broken", name: "Broken", message: "timeout" }],
-      },
-    }),
+/* 共用的模型清单：两处目录夹具都从这里取，改内容时只改这一处。 */
+const CATALOG_MODELS = [
+  { id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek v4.1 Flash", description: "部署默认" },
+  { id: "glm-5.3-flashx", name: "GLM-5.3 FlashX" },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
+];
+
+/* 服务齐全时的目录响应：兜底读取口、服务迟到两个场景也复用这份夹具，别抄第三份。 */
+const fullCatalogResponse = async () => ({
+  ok: true,
+  value: {
+    default: { provider: "commandcode", model: "deepseek/deepseek-v4.1-flash" },
+    routableProviders: ["commandcode", "other"],
+    groups: [
+      { id: "commandcode", name: "Command Code", models: CATALOG_MODELS },
+      { id: "other", name: "其它提供方", models: [{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna" }] },
+    ],
+    failures: [{ id: "broken", name: "Broken", message: "timeout" }],
   },
-};
+});
+fakeCtx.remote = { session: { modelCatalog: fullCatalogResponse } };
+/* 后面的降级场景会改写 fakeCtx.remote：收尾时按这份快照恢复，别把共享夹具留在坏状态（评审 #5）。 */
+const healthyRemote = fakeCtx.remote;
 render();
 await tick();
 const catalogTree = render();
@@ -407,6 +449,62 @@ check("退化后输入框仍可编辑", (() => {
 })());
 check("退化后不再渲染候选列表", !modelMenuNode(noCatalog));
 
+/* ctx.remote 属性访问被守卫拦下（cannot get property "remote" without inject）时退回 ctx.get("remote") */
+fakeCtx.getFallback = {
+  session: {
+    modelCatalog: async () => ({
+      ok: true,
+      value: {
+        groups: [
+          {
+            id: "commandcode",
+            name: "Command Code",
+            models: [CATALOG_MODELS[0]],
+          },
+        ],
+      },
+    }),
+  },
+};
+fakeCtx.getCalls.length = 0; /* 只统计这次场景读了哪些兜底名字 */
+Object.defineProperty(fakeCtx, "remote", {
+  configurable: true,
+  get() {
+    throw new Error('cannot get property "remote" without inject');
+  },
+});
+render();
+await tick();
+const guardedTree = render();
+const guardedText = textOf(guardedTree);
+check(
+  "守卫拦下 ctx.remote 时用 ctx.get 兜底",
+  /* 只认状态行那句动态文案（lib/client.js:501）；静态 hint（lib/client.js:86）里也有
+     "候选来自 DSH 自己的模型目录"，拿它当断言等于恒真（评审 #10）。 */
+  guardedText.includes("候选来自 DSH 自己的模型目录：1 个模型"),
+  guardedText.slice(-140),
+);
+check("兜底路径确实读了 ctx.get(\"remote\")", fakeCtx.getCalls.includes("remote"), JSON.stringify(fakeCtx.getCalls.slice(-3)));
+check("守卫的原文不再出现在页面上", !guardedText.includes("without inject"), guardedText.slice(-140));
+delete fakeCtx.remote; /* 只删 getter；下面的场景仍要"没有目录"的状态 */
+fakeCtx.remote = undefined;
+fakeCtx.getFallback = undefined;
+
+/* 守卫拦下属性访问、兜底读取口也抛（remote 桥真的没有）时：只降级成诊断，不崩 */
+fakeCtx.remoteThrows = true;
+render();
+await tick();
+const deadTree = render();
+const deadText = textOf(deadTree);
+check("兜底读取口也失败时给出诊断", deadText.includes("读不到 ctx.remote"), deadText.slice(-160));
+check("兜底读取口也失败时输入框仍可编辑", (() => {
+  const n = modelInputNode(deadTree);
+  return Boolean(n) && n.props.disabled !== true;
+})());
+check("兜底读取口也失败时不渲染候选列表", !modelMenuNode(deadTree));
+fakeCtx.remoteThrows = false;
+fakeCtx.remote = healthyRemote; /* 共享夹具恢复健康：后面设置页/条目回退场景还要用它 */
+
 check("summary 视图渲染为 null", reg.component({ view: "summary" }) === null);
 
 snapshot = { ...snapshot, status: "loading", writable: false };
@@ -435,6 +533,101 @@ const sectionHtml = textOf(sectionTree);
 check("设置页渲染标题", sectionHtml.includes("代码评审（阿里 OpenCodeReview）"));
 check("设置页也带 17 个控件行", controlRows(sectionTree).length === 17, `n=${controlRows(sectionTree).length}`);
 check("设置页照样带出条目 id", sectionHtml.includes("include:dsh-open-code-review"));
+
+/* ------------------------------------------------------------ 宿主没有 Remote 桥 */
+
+/* remote 子 fiber 声明在 apply 内部，所以"宿主没提供 remote(.*)"只会让子 fiber 不激活
+   （cordis 的 INACTIVE），插件本身照样 active：设置页仍在、输入框仍能编辑，只是没有候选列表。 */
+const noRemoteRegs = [];
+const noRemoteCtx = makeCtx({
+  registrations: noRemoteRegs,
+  form: fakeCtx.form, /* 本场景在 fakeCtx.form 赋值（260 行）之后才构造 */
+  inject(deps, cb) {
+    noRemoteCtx.injectCalls.push(deps);
+    /* 模拟"服务没人 provide"：cordis 不会调用回调，子 fiber 保持 INACTIVE */
+    if (Array.isArray(deps) && deps.includes("remote.session")) return undefined;
+    return cb(noRemoteCtx);
+  },
+});
+plugin.apply(noRemoteCtx);
+check(
+  "宿主没有 Remote 桥时插件照样 apply 并注册两个 cell",
+  noRemoteRegs.length === 2 && noRemoteCtx.slotInjectCalls.includes("settings.section"),
+  `regs=${noRemoteRegs.length}`,
+);
+check(
+  "宿主没有 Remote 桥时确实尝试过 remote 子注入",
+  noRemoteCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("remote.session")),
+  JSON.stringify(noRemoteCtx.injectCalls),
+);
+const noRemoteCell = noRemoteRegs.find((r) => r.options.name === "settings.section");
+/** 渲染一个独立 cell：跑 effect → 等异步 setState → 用新状态重渲染。 */
+const bareRender = async (cell) => {
+  const el = () => miniReact.createElement(cell.component, {});
+  expand(el());
+  flushEffects();
+  await tick();
+  expand(el());
+  flushEffects();
+  return expand(el());
+};
+const bareTree = noRemoteCell ? await bareRender(noRemoteCell) : null;
+const bareText = bareTree ? textOf(bareTree) : "";
+check("宿主没有 Remote 桥时设置页仍渲染模型名", bareText.includes("模型名"), bareText.slice(-160));
+check("宿主没有 Remote 桥时给出降级说明", bareText.includes("直接手输模型名即可"), bareText.slice(-160));
+check("宿主没有 Remote 桥时读不到目录也读了兜底口", noRemoteCtx.getCalls.includes("remote"), JSON.stringify(noRemoteCtx.getCalls.slice(-3)));
+check("宿主没有 Remote 桥时输入框仍可编辑", (() => {
+  const n = bareTree ? modelInputNode(bareTree) : null;
+  return Boolean(n) && n.props.disabled !== true;
+})());
+check("宿主没有 Remote 桥时不渲染候选列表", !(bareTree && modelMenuNode(bareTree)));
+
+/* ------------------------------------------------------------ 服务迟到：子 fiber 晚于设置页激活 */
+
+/* 真实 GUI 里设置页可能先渲染，remote 服务随后才到；订阅必须能把候选刷新出来。
+   两条路径故意给不同目录（兜底 4 个模型 / 子 fiber 1 个模型），这样文案能证明用了哪条。 */
+const lateRegs = [];
+let lateFire = null;
+const lateRemote = {
+  session: {
+    modelCatalog: async () => ({
+      ok: true,
+      value: { groups: [{ id: "late", name: "迟到的提供方", models: [{ id: "late-model", name: "Late Model" }] }] },
+    }),
+  },
+};
+const lateCtx = makeCtx({
+  registrations: lateRegs,
+  form: fakeCtx.form, /* 本场景在 fakeCtx.form 赋值（260 行）之后才构造 */
+  get(name) {
+    lateCtx.getCalls.push(name);
+    return name === "remote" ? fakeCtx.lateFallback : undefined;
+  },
+  inject(deps, cb) {
+    if (Array.isArray(deps) && deps.includes("remote.session")) {
+      lateFire = cb; /* 先记住回调：模拟"服务还没 provide，子 fiber 还没激活" */
+      return undefined;
+    }
+    return cb(lateCtx);
+  },
+});
+fakeCtx.lateFallback = { session: { modelCatalog: fullCatalogResponse } };
+plugin.apply(lateCtx);
+check("服务迟到场景确实拦下了 remote 子注入（下面的 lateFire 依赖它）", typeof lateFire === "function", String(lateFire));
+const lateCell = lateRegs.find((r) => r.options.name === "settings.section");
+const beforeLate = lateCell ? await bareRender(lateCell) : null;
+check(
+  "子 fiber 没激活时先用兜底读取口的目录",
+  Boolean(beforeLate) && textOf(beforeLate).includes("4 个模型"),
+  beforeLate ? textOf(beforeLate).slice(-160) : "没有 cell",
+);
+if (typeof lateFire === "function") lateFire({ remote: lateRemote });
+const afterLate = lateCell ? await bareRender(lateCell) : null;
+check(
+  "服务迟到、子 fiber 激活后订阅刷新成官方读法的目录",
+  Boolean(afterLate) && textOf(afterLate).includes("1 个模型") && !textOf(afterLate).includes("4 个模型"),
+  afterLate ? textOf(afterLate).slice(-160) : "没有 cell",
+);
 
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 if (failures > 0) process.exitCode = 1;
