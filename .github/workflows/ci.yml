@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 插件没有运行时依赖，测试也不需要装依赖（用的都是 node 内置模块）。
+      - name: Syntax check
+        shell: bash
+        run: |
+          for f in lib/*.js; do
+            node --check "$f"
+          done
+
+      - name: Offline test suites
+        shell: bash
+        run: |
+          node test/smoke.mjs
+          node test/job-smoke.mjs
+          node test/reviewer-smoke.mjs
+          node test/bridge-smoke.mjs
+          node test/client-smoke.mjs
+
+      # cordis-inject 需要 DSH 自带的 cordis（asar 里取不出来，仓库不 vendor 它）：
+      # 拿不到就退出 2 = 跳过（跳过 ≠ 通过，所以这里只容忍 0 和 2）。
+      - name: Cordis injection regression (exit 2 = skipped on CI)
+        shell: bash
+        run: |
+          set +e
+          node test/cordis-inject.mjs
+          code=$?
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi

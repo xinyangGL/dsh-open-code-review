@@ -1,5 +1,8 @@
-﻿node_modules/
+node_modules/
 *.log
 npm-debug.log*
 .DS_Store
 
+# 插件配置文件只属于当前机器：里面可能写着 API key、本机 ocr 路径。
+# 仓库里放 config.example.json（模板），真实值写 <DSH_HOME>/dsh-open-code-review.json。
+config.json

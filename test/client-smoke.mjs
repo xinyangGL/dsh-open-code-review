@@ -275,7 +275,14 @@ const enDict = (localeReg.pairs && localeReg.pairs.en) || {};
 check("locale 服务收到本插件的词典（zh + en）", Boolean(localeReg.pairs && zhDict && enDict));
 check("文案注册走 ctx.effect（随 fiber 撤销）", fakeCtx.effectCalls.some((l) => typeof l === "string" && l.includes("文案")), JSON.stringify(fakeCtx.effectCalls));
 check("zh 词典含生成的字段文案", String(zhDict["field.llmModel.hint"] || "").includes("候选来自 DSH 自己的模型目录"), String(zhDict["field.llmModel.hint"]).slice(0, 60));
-check("zh 词典含选项文案与分组名", String(zhDict["choice.llmMode.dsh"] || "").startsWith("dsh —") && zhDict["group.llm"] === "LLM 路由（ocr 引擎）", JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.llm"]]));
+check(
+  "zh 词典含选项文案与分组名",
+  String(zhDict["choice.llmMode.dsh"] || "").startsWith("dsh —")
+    && zhDict["group.basic"] === "基础"
+    && zhDict["group.tuning"] === "调优"
+    && zhDict["group.runtime"] === "运行与诊断",
+  JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.tuning"], zhDict["group.runtime"]]),
+);
 check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
 check("三个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
 const reg = registrations.find((r) => r.options.name === "plugins.bundle.config") || { options: {}, component: () => null };
@@ -343,9 +350,21 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-for (const label of ["总开关", "默认引擎", "输出受众", "ocr 可执行文件", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔（毫秒）", "跳过子代理会话", "委派时带 diff", "LLM 路由", "模型名", "提供方（provider）", "单次超时（分钟）", "评审进度", "调试日志"]) {
-  check(`渲染字段「${label}」`, html.includes(label));
+/* 主页只放「要做的决定」这 6 行；12 个参数项收进「高级设置」，默认不渲染。 */
+const BASIC_LABELS = ["总开关", "默认引擎", "自动评审", "独立评审 agent", "LLM 路由", "模型名"];
+/* 调优 6 + 运行与诊断 6；provider 行只在 dsh 模式下渲染，所以它在 12 项里。 */
+const ADVANCED_LABELS = ["自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "结果详细程度", "ocr 可执行文件", "提供方（provider）", "单次超时（分钟）", "评审进度", "调试日志"];
+const ADVANCED_KEYS = ["autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "audience", "ocrPath", "llmProvider", "timeoutMinutes", "progress", "verbose"];
+for (const label of BASIC_LABELS) {
+  check(`基础组渲染字段「${label}」`, html.includes(label));
 }
+for (const label of ADVANCED_LABELS) {
+  check(`高级项「${label}」默认收起`, !html.includes(label));
+}
+check("高级设置标题显示项数（收起时也显示）", html.includes("高级设置（12 项）"), html.slice(0, 180));
+check("高级设置默认收起（aria-expanded=false）", hosts(tree).some((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1" && n.props["aria-expanded"] === "false"));
+check("收起时说明怎么展开", html.includes("已收起"), html.slice(0, 180));
+check("主页说明字段来源徽标", html.includes("设置页已改"));
 /* dsh 模式（默认）不需要地址与 key：静态端点那三行不该出现 */
 for (const label of ["端点 Base URL", "端点协议", "API Key 引用"]) {
   check(`dsh 模式不渲染「${label}」`, !html.includes(label));
@@ -353,7 +372,7 @@ for (const label of ["端点 Base URL", "端点协议", "API Key 引用"]) {
 check("带出条目 id", html.includes("include:dsh-open-code-review"));
 check("状态行含 ready/可写", html.includes("状态 ready") && html.includes("可写"));
 check("带出模型当前值", hosts(tree).some((n) => n.tag === "input" && n.props.value === "deepseek/deepseek-v4.1-flash"));
-check("带出数字字段值", hosts(tree).some((n) => n.tag === "input" && n.props.type === "number" && n.props.value === "3"));
+check("收起时高级数字字段不在 DOM 里", !hosts(tree).some((n) => n.tag === "input" && n.props.type === "number" && n.props.value === "3"));
 check("已改字段有标记", html.includes("已改"));
 check("enabled 勾选", hosts(tree).some((n) => n.tag === "input" && n.props.type === "checkbox" && n.props.checked === true));
 
@@ -374,12 +393,37 @@ function controlRows(node, out = []) {
   return out;
 }
 const rows = controlRows(tree);
-check("dsh 模式下 18 个控件行（静态端点三行不渲染、独立评审 agent 只显一行）", rows.length === 18, `n=${rows.length}`);
+/** 只数高级区的行（展开后整棵树里 = 基础组 + 高级区）。 */
+const advancedRows = (t) => controlRows(t).filter((r) => ADVANCED_KEYS.includes(r.key));
+check("基础组 6 个控件行（dsh 模式、独立评审 agent=off）", rows.length === 6, `n=${rows.length}`);
+
+/* 高级设置：默认收起 → 点标题展开 → 再点收起（折叠只是不渲染，草稿仍由 saveAll 一起保存） */
+const advToggle = (t) => hosts(t).find((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1");
+function setAdvanced(open) {
+  const btn = advToggle(render());
+  if (btn && (btn.props["aria-expanded"] === "true") !== open) btn.props.onClick();
+}
+check("高级设置有可点的标题", Boolean(advToggle(tree)));
+setAdvanced(true);
+const advTree = render();
+const advRows = controlRows(advTree);
+check("展开后高级项 12 行（调优 6 + 运行与诊断 6）", advancedRows(advTree).length === 12, `n=${advancedRows(advTree).length}`);
+check("展开后 aria-expanded=true", advToggle(advTree).props["aria-expanded"] === "true");
+check("展开后不再显示收起提示", !textOf(advTree).includes("已收起"));
+check(
+  "展开后每个高级项都渲染出来",
+  ADVANCED_LABELS.every((label) => textOf(advTree).includes(label)),
+  ADVANCED_LABELS.filter((l) => !textOf(advTree).includes(l)).join(" / "),
+);
+check("展开后高级数字字段带出当前值", hosts(advTree).some((n) => n.tag === "input" && n.props.type === "number" && n.props.value === "3"));
+check("高级项也有「恢复默认」", advRows.every((r) => r.buttons.some((b) => textOf(b) === "恢复默认")));
+setAdvanced(false);
+check("再点一次收起、DOM 里没有高级行", advancedRows(render()).length === 0 && controlRows(render()).length === 6, `n=${controlRows(render()).length}`);
 
 const modeRow = rows.find((r) => r.key === "llmMode");
 check("找到 LLM 路由行", Boolean(modeRow) && modeRow.field.tag === "select");
 check("LLM 路由行只给 dsh / endpoint 两个选项", Boolean(modeRow) && hosts(modeRow.row).filter((n) => n.tag === "option").length === 2);
-check("dsh 模式下有 provider 行", rows.some((r) => r.key === "llmProvider"));
+check("dsh 模式下收起时 provider 行不渲染（它在高级区）", !rows.some((r) => r.key === "llmProvider"));
 check("dsh 模式下没有 Base URL 行", !rows.some((r) => r.field.props.value === "https://api.commandcode.ai/provider/v1"));
 check("dsh 模式状态行说明走本机桥", html.includes("LLM 走 DSH 本机桥"));
 
@@ -391,8 +435,11 @@ check("每行都有「恢复默认」", rows.every((r) => r.buttons.some((b) => 
 modeRow.field.props.onChange({ target: { value: "endpoint" } });
 const endpointTree = render();
 const endpointRows = controlRows(endpointTree);
-check("endpoint 模式下 20 个控件行", endpointRows.length === 20, `n=${endpointRows.length}`);
-check("endpoint 模式下藏掉 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
+check("endpoint 模式下基础组 9 行（多出静态端点三行）", endpointRows.length === 9, `n=${endpointRows.length}`);
+check("endpoint 模式下收起时不渲染 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
+setAdvanced(true);
+check("endpoint 模式下高级区 11 行（provider 项只在 dsh 模式渲染）", advancedRows(render()).length === 11, `n=${advancedRows(render()).length}`);
+setAdvanced(false);
 check("endpoint 模式状态行说明直连", textOf(endpointTree).includes("LLM 直连静态端点"));
 
 const urlRow = endpointRows.find((r) => r.field.props.value === "https://api.commandcode.ai/provider/v1");
@@ -411,21 +458,74 @@ if (save2) {
 controlRows(render()).find((r) => r.key === "llmMode").field.props.onChange({ target: { value: "dsh" } });
 render();
 
-const maxRow = controlRows(render()).find((r) => r.field.props.type === "number" && r.field.props.value === "3");
-check("找到数字字段行", Boolean(maxRow));
+/* ---------- 高级区：数字上限、档位下拉、折叠态徽标 ---------- */
+setAdvanced(true);
+const maxRow = controlRows(render()).find((r) => r.key === "autoMaxPerSession");
+check("找到「每会话上限」数字行", Boolean(maxRow) && maxRow.field.props.type === "number" && maxRow.field.props.value === "3");
 if (maxRow) {
   maxRow.field.props.onChange({ target: { value: "5" } });
-  const maxRow3 = controlRows(render()).find((r) => r.field.props.type === "number" && r.field.props.value === "5");
+  const maxRow3 = controlRows(render()).find((r) => r.key === "autoMaxPerSession");
   const save3 = maxRow3 && maxRow3.buttons.find((b) => textOf(b) === "保存");
   check("数字改动后出现「保存」", Boolean(save3));
   if (save3) await save3.props.onClick();
   check("数字字段写成 number", writes.some((w) => w.op === "set" && w.key === "autoMaxPerSession" && w.value === 5), JSON.stringify(writes));
   const reset = controlRows(render())
-    .find((r) => r.field.props.type === "number" && r.field.props.value === "3")
+    .find((r) => r.key === "autoMaxPerSession")
     ?.buttons.find((b) => textOf(b) === "恢复默认");
+  check("改动后该行有「恢复默认」", Boolean(reset));
   if (reset) await reset.props.onClick();
   check("「恢复默认」调用 form.unset", writes.some((w) => w.op === "unset" && w.key === "autoMaxPerSession"), JSON.stringify(writes));
 }
+
+/* 冷却间隔：裸毫秒换成档位下拉，存储仍是毫秒数字 */
+const intervalRow = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
+const intervalSelect = intervalRow && hosts(intervalRow.row).find((n) => n.props && n.props["data-ocr-preset-select"] === "autoMinIntervalMs");
+const intervalOptions = intervalRow ? hosts(intervalRow.row).filter((n) => n.tag === "option").map(textOf) : [];
+check("最小间隔渲染成档位下拉", Boolean(intervalSelect) && intervalSelect.tag === "select", intervalSelect ? intervalSelect.tag : "没有该行");
+check("下拉含四档 + 自定义", ["30 秒", "1 分钟（默认）", "5 分钟", "10 分钟", "自定义…"].every((text) => intervalOptions.some((o) => o.includes(text))), JSON.stringify(intervalOptions));
+check("当前值 60000 选中「1 分钟（默认）」", Boolean(intervalSelect) && intervalSelect.props.value === "60000", intervalSelect ? String(intervalSelect.props.value) : "没有该行");
+if (intervalSelect) {
+  intervalSelect.props.onChange({ target: { value: "300000" } });
+  const pickedRow = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
+  const saveInterval = pickedRow && pickedRow.buttons.find((b) => textOf(b) === "保存");
+  check("选档位后出现「保存」", Boolean(saveInterval));
+  if (saveInterval) {
+    await saveInterval.props.onClick();
+    check("档位按毫秒数字保存（300000）", writes.some((w) => w.op === "set" && w.key === "autoMinIntervalMs" && w.value === 300000), JSON.stringify(writes.slice(-2)));
+  }
+  /* 选「自定义…」→ 出现手填毫秒的数字框 */
+  intervalSelect.props.onChange({ target: { value: "custom" } });
+  const customRow = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
+  const customInput = customRow && hosts(customRow.row).find((n) => n.props && n.props["data-ocr-preset-input"] === "autoMinIntervalMs");
+  check("选「自定义…」后出现数字输入框", Boolean(customInput) && customInput.props.type === "number");
+  if (customInput) {
+    customInput.props.onChange({ target: { value: "45000" } });
+    const customRow2 = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
+    const saveCustom = customRow2 && customRow2.buttons.find((b) => textOf(b) === "保存");
+    check("自定义值也出现「保存」", Boolean(saveCustom));
+    if (saveCustom) {
+      await saveCustom.props.onClick();
+      check("自定义值按毫秒数字保存（45000）", writes.some((w) => w.op === "set" && w.key === "autoMinIntervalMs" && w.value === 45000), JSON.stringify(writes.slice(-2)));
+    }
+  }
+}
+
+/* 折叠态也要能看见「高级区里有待保存的改动」，并且能逐字段撤销 */
+const timeoutRow = controlRows(render()).find((r) => r.key === "timeoutMinutes");
+check("找到「单次超时」行", Boolean(timeoutRow));
+if (timeoutRow) timeoutRow.field.props.onChange({ target: { value: "20" } });
+setAdvanced(false);
+const collapsedDirty = render();
+check("折叠后标题显示「1 项待保存」", textOf(collapsedDirty).includes("1 项待保存"), textOf(collapsedDirty).slice(0, 160));
+check("折叠后高级行不在 DOM 里", controlRows(collapsedDirty).length === 6, `n=${controlRows(collapsedDirty).length}`);
+setAdvanced(true);
+const undoRow = controlRows(render()).find((r) => r.key === "timeoutMinutes");
+const undoBtn = undoRow && undoRow.buttons.find((b) => textOf(b) === "撤销");
+check("折叠期间草稿还在，展开后能逐字段撤销", Boolean(undoBtn));
+if (undoBtn) undoBtn.props.onClick();
+check("撤销后该行不再算脏（值已回到已存值）", !controlRows(render()).find((r) => r.key === "timeoutMinutes").buttons.some((b) => textOf(b) === "保存"));
+setAdvanced(false);
+check("撤销后待保存徽标消失", !textOf(render()).includes("项待保存"));
 
 /* ------------------------------------------------------------ 模型名：可搜索下拉 */
 
@@ -495,7 +595,8 @@ if (saveModel) {
   check("保存模型名调用 form.set(llmModel)", writes.some((w) => w.op === "set" && w.key === "llmModel" && w.value === "glm-5.3-flashx"), JSON.stringify(writes.slice(-2)));
 }
 
-/* dsh 路由要 provider：选中候选顺手把它写进 llm.provider */
+/* dsh 路由要 provider：选中候选顺手把它写进 llm.provider（provider 行在高级区里） */
+setAdvanced(true);
 const provRow = controlRows(render()).find((r) => r.key === "llmProvider");
 check("选中候选后 provider 行带出该提供方", Boolean(provRow) && provRow.field.props.value === "commandcode", provRow ? String(provRow.field.props.value) : "没有该行");
 const saveProv = provRow && provRow.buttons.find((b) => textOf(b) === "保存");
@@ -504,6 +605,7 @@ if (saveProv) {
   await saveProv.props.onClick();
   check("保存 provider 调用 form.set(llmProvider)", writes.some((w) => w.op === "set" && w.key === "llmProvider" && w.value === "commandcode"), JSON.stringify(writes.slice(-3)));
 }
+setAdvanced(false);
 
 /* 键盘：输入过滤成唯一匹配后回车选中 */
 const afterSave = render();
@@ -520,7 +622,7 @@ check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.v
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "spawn" } });
 const spawnTree = render();
 const spawnRows = controlRows(spawnTree);
-check("reviewer=spawn 时 dsh 模式 21 个控件行（多出子 agent 三行）", spawnRows.length === 21, `n=${spawnRows.length}`);
+check("reviewer=spawn 时基础组 9 行（多出子 agent 三行）", spawnRows.length === 9, `n=${spawnRows.length}`);
 check("reviewerAgent 只有 off / spawn 两个选项", (() => {
   const row = spawnRows.find((r) => r.key === "reviewerAgent");
   return Boolean(row) && hosts(row.row).filter((n) => n.tag === "option").length === 2;
@@ -561,7 +663,7 @@ if (reviewInput) {
 /* 切回 off：后面的降级场景与行数断言按默认（不启用）算 */
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "off" } });
 const offAgain = controlRows(render());
-check("切回 off 后子 agent 三行消失、行数回到 18", offAgain.length === 18 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
+check("切回 off 后子 agent 三行消失、行数回到 6", offAgain.length === 6 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
 check("切回 off 后状态行不再提独立 agent", !textOf(render()).includes("评审走独立 agent"));
 
 /* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
@@ -638,7 +740,16 @@ check("兜底读取口也失败时不渲染候选列表", !modelMenuNode(deadTre
 fakeCtx.remoteThrows = false;
 fakeCtx.remote = healthyRemote; /* 共享夹具恢复健康：后面设置页/条目回退场景还要用它 */
 
-check("summary 视图渲染为 null", reg.component({ view: "summary" }) === null);
+/* 插件卡片（plugins.bundle.config 的 summary 视图）：不再渲染整张表单，改成只读摘要 + 去设置页 */
+const cardTree = expand(miniReact.createElement(reg.component, { view: "summary" }));
+flushEffects();
+const cardHtml = textOf(cardTree);
+const cardRows = hosts(cardTree).filter((n) => n.props && typeof n.props["data-ocr-summary-row"] === "string");
+check("卡片渲染只读摘要（不再是 null）", Boolean(hosts(cardTree).find((n) => n.props && n.props["data-ocr-card-summary"] === "1")), cardHtml.slice(0, 160));
+check("摘要只列基础项（不重复整张表单）", cardRows.length === 6, `n=${cardRows.length}`);
+check("摘要行带出当前值（开 / 关 / 选项文案）", cardHtml.includes("开") && cardHtml.includes("关") && cardHtml.includes("auto — "), cardHtml.slice(0, 220));
+check("摘要给出完整设置的入口", cardHtml.includes("设置 → 代码评审"), cardHtml.slice(0, 220));
+check("摘要里没有可编辑控件", !hosts(cardTree).some((n) => n.tag === "input" || n.tag === "select"));
 
 snapshot = { ...snapshot, status: "loading", writable: false };
 check("loading + 不可写时不崩", textOf(render()).includes("正在从宿主读取"));
@@ -649,7 +760,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 /* 条目 id 回退：主 id 查不到时用备用 id */
 fakeCtx.rejectIds = ["include:dsh-open-code-review"];
 const fbTree = render();
-check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 18, JSON.stringify(fakeCtx.formIds.slice(-2)));
+check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 6, JSON.stringify(fakeCtx.formIds.slice(-2)));
 check("回退后字段仍可编辑", controlRows(fbTree).every((r) => r.field.props.disabled !== true));
 
 /* 两个 id 都查不到：给出诊断而不是崩掉 */
@@ -664,7 +775,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 const sectionTree = expand(miniReact.createElement(sectionReg.component, {}));
 const sectionHtml = textOf(sectionTree);
 check("设置页渲染标题", sectionHtml.includes("代码评审（阿里 OpenCodeReview）"));
-check("设置页也带 18 个控件行", controlRows(sectionTree).length === 18, `n=${controlRows(sectionTree).length}`);
+check("设置页也带 6 个基础控件行（高级区另算）", controlRows(sectionTree).length === 6, `n=${controlRows(sectionTree).length}`);
 check("设置页照样带出条目 id", sectionHtml.includes("include:dsh-open-code-review"));
 
 /* ------------------------------------------------------------ 会话内进度行（conversation.input.dock） */
@@ -863,7 +974,8 @@ check(
 check(
   "英文词典下状态行、分组标题与按钮也是英文",
   enHtml.includes("LLM through the DSH local bridge") &&
-    enHtml.includes("LLM routing (ocr engine)") &&
+    enHtml.includes("Basics") &&
+    enHtml.includes("Advanced settings") &&
     enHtml.includes("Auto review") &&
     enHtml.includes("Reset everything"),
   enHtml.slice(0, 300),

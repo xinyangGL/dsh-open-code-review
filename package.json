@@ -1,6 +1,6 @@
 {
   "name": "dsh-open-code-review",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "private": true,
   "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、回合结束自动评审（ocr 流水线 / delegate 委派 / 独立的只读评审子 agent 三档引擎），每次评审都有实时进度（Jobs 面板 + 会话内进度行、可停止）。",
   "keywords": [
@@ -11,6 +11,18 @@
     "open-code-review",
     "ocr"
   ],
+  "author": "xinyangGL",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xinyangGL/dsh-open-code-review.git"
+  },
+  "homepage": "https://github.com/xinyangGL/dsh-open-code-review#readme",
+  "bugs": {
+    "url": "https://github.com/xinyangGL/dsh-open-code-review/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "main": "lib/index.js",
   "icon": "./icon.svg",
@@ -27,11 +39,17 @@
   "files": [
     "lib",
     "cordis.patch.yml",
-    "config.json",
+    "config.example.json",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "README.zh.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
+  "scripts": {
+    "test": "node test/smoke.mjs && node test/job-smoke.mjs && node test/reviewer-smoke.mjs && node test/bridge-smoke.mjs && node test/client-smoke.mjs && node test/cordis-inject.mjs"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

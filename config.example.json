@@ -1,0 +1,51 @@
+{
+  "_readme": [
+    "模板：把本文件复制到 <DSH_HOME>/dsh-open-code-review.json（默认 ~/.dsh/dsh-open-code-review.json）再改。",
+    "配置优先级：出厂默认 < 外部配置文件（本文件） < 设置页（当前 profile）；但设置页表单里有值的键（enabled / engine / timeoutMinutes / llm.* / auto* …）总是以设置页为准 —— 这些键请直接在设置页改，写在本文件里不会生效（空的键除外：llmModel / ocrPath / reviewer.persona 留空时才算「未设置」，会回落到本文件）。",
+    "解析顺序：环境变量 DSH_OPEN_CODE_REVIEW_CONFIG 指定的文件 → <DSH_HOME>/dsh-open-code-review.json → 插件目录里的 config.json（源码安装才有意义，git 安装时它在 node_modules 里、升级会被覆盖）。",
+    "这里适合放设置页没有的键：ocrCandidates / autoEngine / maxTimeoutMinutes / extraArgs / env / includeDiffMaxBytes / maxIssuesInText / llm.apiKey / reviewer.persona（persona 在设置页 schema 里但默认空串，空串算未设置）。",
+    "不要写明文密钥：密钥用 llm.apiKeyRef 指向 DSH 凭据库；llm.apiKey 只是不想用凭据库时的最后手段，且本文件不该被提交到任何仓库。",
+    "改本文件即时生效（按 mtime 热读），不用重启；lib/*.js 的改动才需要重启。",
+    "LLM 默认走 dsh 路由：插件在 127.0.0.1 起一个只认随机 token 的 OpenAI 兼容小桥，把 ocr 的请求转给 DSH 的 ctx.llm.stream —— 模型 / provider / 密钥 / 配额全由 DSH 决定，下面的 baseUrl / protocol / apiKeyRef 只在 llm.mode=endpoint 时才用。",
+    "llm.provider 与 llm.model 留空 = 跟随 DSH 的默认模型；换了供应商务必同步改 llm.baseUrl（地址还是出厂默认值时，ocr_status 与评审正文会点名提醒）。",
+    "timeoutMinutes 同时决定 ocr 的 --timeout 和插件侧硬超时（同一个来源），并被 maxTimeoutMinutes 夹住；maxTimeoutMinutes 自身有 24 小时硬上界。",
+    "reviewer.agent=spawn（默认 off）时评审改由独立子 agent 执行：每轮起一个只读子 agent（只有 read/grep/glob），把结构化 findings 回传，改完自动开下一轮复审，直到没有问题或到 reviewer.rounds 上限。"
+  ],
+  "enabled": true,
+  "engine": "auto",
+  "autoEngine": "",
+  "audience": "agent",
+  "ocrPath": "",
+  "ocrCandidates": [],
+  "timeoutMinutes": 15,
+  "maxTimeoutMinutes": 60,
+  "extraArgs": [],
+  "env": {},
+  "llm": {
+    "mode": "dsh",
+    "provider": "",
+    "baseUrl": "https://api.commandcode.ai/provider/v1",
+    "protocol": "openai",
+    "model": "",
+    "apiKeyRef": "COMMANDCODE_API_KEY",
+    "apiKey": ""
+  },
+  "reviewer": {
+    "agent": "off",
+    "provider": "spawn",
+    "model": "",
+    "rounds": 3,
+    "persona": ""
+  },
+  "auto": "adaptive",
+  "autoScope": "workspace",
+  "autoSkipSubagents": true,
+  "autoMaxPerSession": 3,
+  "autoMinReviewableFiles": 1,
+  "autoMinIntervalMs": 60000,
+  "autoIncludeDiff": true,
+  "includeDiffMaxBytes": 120000,
+  "maxIssuesInText": 40,
+  "progress": true,
+  "verbose": false
+}

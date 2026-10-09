@@ -4,14 +4,61 @@
  *
  * 用法：node test/smoke.mjs [被测仓库路径]
  */
-import { spawn } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertToolContract, assertToolPayload, assertToolSchemas, losslessViolations, payloadViolations, schemaViolations, snapshotJsonValue } from "./schema-subset.mjs";
 
-const REPO = process.argv[2] ?? "C:\\Users\\吴礼凯\\.dsh\\tmp-ocr-test";
+/** 夹具仓库的基线版本（已提交）。 */
+const FIXTURE_BASE = `export function add(a, b) {
+  return a + b
+}
+
+export function divide(a, b) {
+  return a / b
+}
+`;
+
+/** 夹具仓库的工作区版本（未提交改动：修了除零、加了一个函数）。 */
+const FIXTURE_CHANGED = `export function add(a, b) {
+  return a + b
+}
+
+export function divide(a, b) {
+  if (b === 0) throw new Error('division by zero')
+  return a / b
+}
+
+export function parseConfig(raw) {
+  return JSON.parse(raw)
+}
+`;
+
+/**
+ * 离线测试夹具：一个「有未提交改动」的 git 仓库，在系统临时目录里自建。
+ * 这样测试不依赖任何机器上的既有目录；传 argv[2] 可以改用别的仓库。
+ */
+function ensureFixtureRepo() {
+  const dir = join(tmpdir(), "ocr-smoke-repo");
+  const file = join(dir, "calc.js");
+  const git = (...args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  if (!existsSync(join(dir, ".git"))) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, FIXTURE_BASE, "utf8");
+    git("init", "-q");
+    git("config", "user.email", "ocr-smoke@example.invalid");
+    git("config", "user.name", "ocr smoke");
+    git("add", "calc.js");
+    git("commit", "-q", "-m", "fixture: baseline");
+  }
+  // 保证「有未提交改动」这个前提始终成立（重复跑、上次被谁改过都能自愈）。
+  writeFileSync(file, FIXTURE_CHANGED, "utf8");
+  return dir;
+}
+
+const REPO = process.argv[2] ?? ensureFixtureRepo();
 const results = [];
 let failures = 0;
 

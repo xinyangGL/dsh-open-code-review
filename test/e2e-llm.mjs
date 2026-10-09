@@ -7,11 +7,12 @@
  */
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 
-const REPO = process.argv[2] ?? "C:\\Users\\吴礼凯\\.dsh\\tmp-ocr-test";
+const REPO = process.argv[2] ?? process.cwd();
 const STATUS_ONLY = process.argv.slice(2).includes("status-only");
-const CRED = "C:\\Users\\吴礼凯\\.dsh\\.credentials.yaml";
+const CRED = process.env.DSH_CREDENTIALS ?? join(homedir(), ".dsh", ".credentials.yaml");
 
 function readCredential(name) {
   if (!existsSync(CRED)) return "";
