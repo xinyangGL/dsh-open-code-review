@@ -247,11 +247,12 @@ With `progress = true` (default) every review is registered as a background job 
 | The settings-page dropdowns are unreadable (white-on-white, or dark text on a dark theme) | Fixed in 0.5.0: the `<select>` / `<option>` colours now come from the host theme tokens and the widget declares `color-scheme`, so the native popup follows light/dark. Upgrade (and refresh the page after the host restart). |
 | The result says “0 file(s) reviewed, N issue(s) found” | Fixed in 0.5.0. The file count now comes from `files[]` / `total_files` / `reviewable_count`, falling back to the distinct files the findings mention, so a summary without a file list can no longer report 0 files next to N findings. |
 | Token counters look inconsistent (`total` > prompt + completion) | Expected when an upstream call reports only a total: `bridge.tokens.partial` counts those calls and the line adds “其中 N 次上游只报了总数”. The plugin never fabricates the missing halves. |
+| A status call right after install/restart says the bridge is not ready | Fixed in 0.5.2: the bridge listens asynchronously, so `resolveLlmRoute()` now waits for that start (at most 2 s) before computing the route. The first `ocr_status` already routes through the bridge; `llmRoute`, `llmEndpoint` and `bridge` are consistent with each other. |
 | The plugin is missing entirely (`ocr_review` becomes an unknown tool) | The host fiber failed to load — most often an unsupported JSON-Schema construct in a tool schema, or a `lib/*.js` edit without a host restart. Check the DSH log, then restart. |
 
 ## Hardening history
 
-The v0.3.0 → v0.5.0 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md).
+The v0.3.0 → v0.5.2 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md).
 
 ## Development & tests
 
@@ -259,7 +260,7 @@ Six dependency-free suites (`node test/<name>.mjs`), item counts as actually run
 
 | Suite | Items | Covers |
 | --- | --- | --- |
-| `node test/smoke.mjs` | 160 | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, config layering/sources, per-line findings. |
+| `node test/smoke.mjs` | 161 | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, config layering/sources, per-line findings, bridge readiness. |
 | `node test/job-smoke.mjs` | 51 | Review progress: registration, progress line, output stream, stop → cancel, idempotent settlement. |
 | `node test/reviewer-smoke.mjs` | 45 | Reviewer subagent logic: prompt, structured parsing, rounds, failure/timeout (aborts the in-flight child). |
 | `node test/bridge-smoke.mjs` | 77 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams, client disconnects and token accounting. |

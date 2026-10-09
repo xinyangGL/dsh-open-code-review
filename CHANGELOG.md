@@ -3,6 +3,23 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.2] — 2026-10-09
+
+### Fixed
+
+- **`ocr_status` / `ocr_review` no longer report a missing bridge just because it is still starting.**
+  The local bridge listens asynchronously, so a status call made right after the plugin loaded could
+  see `bridge: null` and silently fall back to the static `llm.baseUrl` endpoint (the note in `notes`
+  explained it, but the route was already the fallback). `resolveLlmRoute()` now waits for the
+  in-flight bridge start (at most 2 s) before computing the route, so the first call already routes
+  through the bridge. This also removes a real race for users on slow machines and for the CI runner,
+  where the bridge took longer to listen than the fixed 150 ms the test used to wait.
+- The test that covered this no longer gambles on a `setTimeout`: it asserts the bridge is available
+  on an **immediate** status call (the ports are still checked for a stray 401 / a closed listener),
+  and the two raw `bridge.url` fetches are guarded so a missing bridge fails the assertions instead
+  of crashing the suite mid-run. `test/smoke.mjs` is 161 assertions in both environments
+  (with and without `@deepseek-ai/schemastery`, with and without `ocr` on `PATH`).
+
 ## [0.5.1] — 2026-10-09
 
 ### Fixed

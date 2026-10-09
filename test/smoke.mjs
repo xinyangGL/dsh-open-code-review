@@ -613,9 +613,15 @@ const llmStub = fakeLlmService((options) => {
 });
 const bridgeCtx = makeCtx({ llm: llmStub });
 mod.apply(bridgeCtx, mkConfig({ llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash" }));
-await new Promise((resolve) => setTimeout(resolve, 150)); // 等桥 listen 完成（startLlmBridge 是异步的）
 
+// 立刻查（不再 sleep）：桥是异步 listen 的，插件内部会等它就绪再算路由 —— 这条断言就是钉这件事。
+// 之前这里靠 `setTimeout(150)` 赌 timing，CI 上桥 listen 慢过 150ms 就拿到 bridge=null 并崩在下面。
 const bridgeStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "v0.5.2：apply 之后立刻查 ocr_status 也拿得到桥（内部等桥就绪，不再赌 sleep）",
+  bridgeStatus.llmMode === "dsh" && Boolean(bridgeStatus.bridge),
+  `bridge=${JSON.stringify(bridgeStatus.bridge)} route=${bridgeStatus.llmRoute}`,
+);
 check(
   "dsh 路由：宿主有 llm 服务时桥自动就绪（只监听 127.0.0.1）",
   bridgeStatus.llmMode === "dsh" && Boolean(bridgeStatus.bridge) && String(bridgeStatus.bridge.url).startsWith("http://127.0.0.1:"),
@@ -672,11 +678,15 @@ check(
   JSON.stringify(bridgeStatus.llmEnv),
 );
 
-const badAuth = await fetch(bridgeStatus.bridge.url + "/chat/completions", {
-  method: "POST",
-  headers: { "content-type": "application/json", authorization: "Bearer not-the-token" },
-  body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
-});
+// bridge 为空时不要崩（上面那条断言已经会 FAIL）；这里只是别把「桥没起来」变成进程级异常。
+let badAuth = { status: 0 };
+if (bridgeStatus.bridge) {
+  badAuth = await fetch(bridgeStatus.bridge.url + "/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer not-the-token" },
+    body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+  });
+}
 check("dsh 路由：桥校验随机 token（错 token → 401）", badAuth.status === 401, String(badAuth.status));
 
 if (which("ocr")) {
@@ -707,7 +717,7 @@ for (const entry of bridgeCtx.effects) {
   if (typeof entry.dispose === "function") entry.dispose();
 }
 await new Promise((resolve) => setTimeout(resolve, 50));
-let bridgeClosed = false;
+let bridgeClosed = !bridgeStatus.bridge; // 桥本来就没起来 = 没有端口可泄漏（上面已有断言盯这件事）
 try {
   await fetch(bridgeStatus.bridge.url + "/chat/completions", {
     method: "POST",
