@@ -67,6 +67,12 @@ Layout of the page:
 - Rows the settings page has touched carry a 「设置页已改」 badge.
 - Values are stored per profile (they do not follow you to another profile or machine). `ocr_status` shows where each key actually came from.
 
+![Settings page — basics](docs/settings-basic.png)
+
+![Settings page — advanced section expanded](docs/settings-advanced.png)
+
+*Real screenshots (DSH on Windows, sidebar cropped out): the basics group, and the advanced section after expanding it.*
+
 ### Config sources
 
 `resolveConfigFile()` (`lib/config.js`) reads **one** file — the first that exists:
