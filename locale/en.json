@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Code review (OpenCodeReview)",
-    "description": "Brings Alibaba OpenCodeReview (ocr) into DSH: the model-callable ocr_review / ocr_status tools, the /ocr-review command and auto review when a turn ends. By default the LLM goes through a plugin-local bridge into DSH, so model, credentials and quota all stay with DSH. Optionally the review itself runs in a separate read-only subagent that hands structured findings back to the coding agent to fix."
+    "description": "Brings Alibaba OpenCodeReview (ocr) into DSH: the model-callable ocr_review / ocr_status tools, the /ocr-review command, and on-demand review (a \"Start code review\" button at the end of every completed turn plus a runtime skill the model can call; nothing is reviewed automatically by default). By default the LLM goes through a plugin-local bridge into DSH, so model, credentials and quota all stay with DSH. Optionally the review itself runs in a separate read-only subagent that hands structured findings back to the coding agent to fix."
   }
 }

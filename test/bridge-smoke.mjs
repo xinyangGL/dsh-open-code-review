@@ -457,6 +457,13 @@ check(
 
 const describe = happyBridge.describe();
 check("桥：describe() 报请求数/最近路由，且不吐明文 token", describe.requests >= 1 && describe.lastProvider === "commandcode" && describe.tokenMasked !== happyBridge.token && describe.tokenMasked.includes("…"), text(describe));
+check(
+  "桥（v0.5.0）：describe().tokens 恒四键（含 partial），宿主 schema 与界面文案都靠它",
+  describe.tokens &&
+    Object.keys(describe.tokens).sort().join(",") === "completion_tokens,partial,prompt_tokens,total_tokens" &&
+    Number.isFinite(describe.tokens.partial),
+  text(describe.tokens),
+);
 check("桥：logger.warn 收到过鉴权/协议类噪音（说明有可观测性）", seen.some((line) => line.startsWith("warn:") || line.startsWith("debug:")), text(seen.slice(0, 3)));
 
 /* 上游瞬时故障自动重试。
@@ -597,6 +604,28 @@ for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge
       totals.total_tokens === 10 &&
       fromScratch.total_tokens === 3,
     JSON.stringify(totals),
+  );
+}
+/* v0.5.0 步骤 5：token 口径 —— 上游只报 total 的次数单独计数（真机「累计 415736（输入 40882 / 输出 52550）」的缺口来源）。 */
+{
+  const totals = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, partial: 0 };
+  accumulateUsage(totals, { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 });
+  accumulateUsage(totals, { total_tokens: 100 });
+  accumulateUsage(totals, { prompt_tokens: 2, total_tokens: 5 });
+  accumulateUsage(totals, { completion_tokens: 4, total_tokens: 6 });
+  check(
+    "桥（v0.5.0）：只有 total 的上游调用记进 partial（输入/输出缺一项也算），三字段各自累加不缺位",
+    totals.partial === 3 &&
+      totals.prompt_tokens === 9 &&
+      totals.completion_tokens === 7 &&
+      totals.total_tokens === 121,
+    JSON.stringify(totals),
+  );
+  const fromScratch = accumulateUsage(undefined, { total_tokens: 42 });
+  check(
+    "桥（v0.5.0）：accumulateUsage 从零开始时也把 partial 初始化出来（describe() 的 tokens 恒四键）",
+    fromScratch.partial === 1 && fromScratch.total_tokens === 42 && fromScratch.prompt_tokens === 0,
+    JSON.stringify(fromScratch),
   );
 }
 {

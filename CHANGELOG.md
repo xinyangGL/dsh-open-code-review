@@ -3,7 +3,60 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.0] — 2026-10-09
+
+**Behaviour change: the plugin no longer reviews on its own.** The factory default for `auto`
+(the settings-page `autoReview`) is now `off`. Reviews start when you ask for one — the button at
+the end of a completed turn, the runtime skill the model can call, the `/ocr-review` command, or
+`ocr_review` directly. Set `autoReview` back to `adaptive` / `inject` / `followup` if you want the
+old behaviour. The **Step 3 default-off check** in `test/smoke.mjs` pins this down.
+
+### Added
+
+- **On-demand review** (`onDemand`, default `true`). Two entry points that cost nothing until used:
+  - a **Start code review** button at the end of every completed turn
+    (`conversation.chat.turnTail`, `lib/client.js`). It executes `/ocr-review` for that session
+    through the host's remote-command service, shows **Reviewing…** and disables itself while a
+    review for that session is running, and prints the failure reason inline on error. If the host
+    does not expose `remote.commands`, the button is simply absent.
+  - the runtime skill **`ocr-on-demand-review`**: when you say “review this” / “verify the change”,
+    the model can run `ocr_review` and report findings itself. `ocr_status` reports `onDemand` and
+    `skill.registered` so you can confirm the registration.
+- **Findings are listed line by line.** `ocr_review`'s text result, the job log and the delivered
+  message now group findings per file and print `- <line|line range> [severity] message (rule)`,
+  including `endLine` / `column` / `rule` / `suggestion` from ocr when it provides them.
+- **Token accounting is honest.** `bridge.tokens.partial` counts upstream calls that reported only
+  a total, and the status/job lines add “其中 N 次上游只报了总数” instead of showing a `total` that
+  does not equal input + output.
+- **Configuration is validated in depth.** `normalizeConfig` now also normalises the nested
+  `llm` / `reviewer` / `env` blocks (enum values, trimmed strings, `reviewer.rounds` 1–10) and
+  clamps the numeric keys to the same bounds the settings schema uses — values above the maximum are
+  clamped, values below the minimum fall back to the default. `mergeLayers` deep-merges **before**
+  normalising and guards every nested block with `Array.isArray`.
+
+### Fixed
+
+- **`0 file(s) reviewed, N issue(s) found`.** The file count now falls back to
+  `total_files` / `reviewable_count`, and then to the distinct files mentioned by the findings, so a
+  summary without a file list can no longer contradict the findings next to it.
+- **Settings-page dropdowns were unreadable** on the light theme and on dark themes: `<select>` and
+  `<option>` now use host theme tokens (`--dsw-alias-label-primary`, `--dsw-alias-bg-layer-2`,
+  `--dsw-alias-bg-overlay`) and declare `color-scheme` from the live theme, refreshed on
+  `theme/change`.
+- **`DSH_OPEN_CODE_REVIEW_CONFIG` pointing at a missing file** used to stop resolution silently (the
+  plugin kept running on defaults). It now falls back to `<DSH_HOME>/dsh-open-code-review.json`,
+  then the plugin directory, and `ocr_status` spells out what happened
+  (`__configSourceHint`, “指向的 … 不存在，已回落到 …”). `externalConfigPath()` was shadowing the
+  home candidate with the env path; the fallback now uses `homeConfigPath()`.
+- **Hot-reload cache** now keys on `mtimeMs + ctimeMs + size`, so a file that changes while keeping
+  its timestamp and size is picked up. A blank `DSH_OPEN_CODE_REVIEW_CONFIG` no longer counts as set.
+- `envConfigPath()` is the single place that reads the environment variable (it was implemented
+  twice, in `externalConfigPath()` and `resolveConfigFile()`).
+
 ## [0.4.0] — 2026-10-09
+
+> Internal release: the settings-page rebuild, cost visibility and the publishing material.
+> Superseded by 0.5.0, which is the first version published for general use.
 
 First release prepared for public use. Two themes: **a first-time user can get it working and
 understand the cost**, and **every failure says what actually happened**.

@@ -93,7 +93,8 @@ That file layer holds the keys the settings page does not have (`ocrCandidates`,
 | --- | --- | --- | --- |
 | `enabled` | `true` | Basics | Master switch. `false` stops automatic review and makes `ocr_review` / `/ocr-review` refuse to run (`ocr_status` still works). |
 | `engine` | `"auto"` | Basics | Default engine: `auto` / `ocr` / `delegate`. A tool call can override it. |
-| `auto` | `"adaptive"` | Basics (`autoReview`) | Settings-page key `autoReview` writes here. `adaptive` / `inject` / `followup` / `off`. |
+| `auto` | `"off"` | Basics (`autoReview`) | Settings-page key `autoReview` writes here. `off` (the default since 0.5.0) / `adaptive` / `inject` / `followup`. |
+| `onDemand` | `true` | Basics (`onDemand`) | On-demand review: a **Start code review** button at the end of every completed turn, plus the runtime skill `ocr-on-demand-review` (so the model itself can start a review when you ask it to verify something). |
 | `reviewer.agent` | `"off"` | Basics (`reviewerAgent`) | `off` / `spawn` — run reviews through an independent read-only reviewer subagent. |
 | `llm.mode` | `"dsh"` | Basics (`llmMode`) | `dsh` / `endpoint` — see [LLM routing](#llm-routing). |
 | `llm.model` | `""` | Basics (`llmModel`) | → `OCR_LLM_MODEL`; empty = follow DSH’s default model. |
@@ -182,9 +183,18 @@ Diagnostics for one call: resolved `executable` + `version`, `configPath` / `con
 
 Runs a review from the input box: it injects a follow-up instruction into the current session, which then calls `ocr_review` (default `scope = workspace`) and works through the findings one by one. It accepts optional free text after the command — extra requirements such as “only review changes under `src/`, focus on concurrency and error handling”. If the plugin is switched off (`enabled = false`), the command returns an error pointing at the settings page; `ocr_status` still works.
 
-### Automatic review
+### On-demand review (the default since 0.5.0)
 
-Trigger: **the end of a turn** *and* that turn wrote at least one file. Before running, the plugin checks, in order:
+Nothing runs on its own. Two ways to start a review when **you** decide the change is ready:
+
+1. **The button at the end of a turn.** Every completed turn gets a **Start code review** button in the conversation tail. One click runs the same thing as `/ocr-review` for that session; while a review for that session is running the button turns into **Reviewing…** and is disabled (so double-clicking cannot stack two reviews), and a failure shows the reason inline and can be retried. It is rendered by `lib/client.js` (`conversation.chat.turnTail`); if the host does not expose the remote-command service the button simply is not there, and everything else keeps working.
+2. **The runtime skill `ocr-on-demand-review`.** With `onDemand = true` the plugin registers it with the host, so when you say “review this”, “verify the change” or “跑一次评审” the model can call `ocr_review` itself and report file-by-file findings. `ocr_status` reports `onDemand` and `skill.registered`, which is how you confirm the registration.
+
+Turn both off (`onDemand = false`, or `enabled = false`) and the plugin is reduced to the tools plus the `/ocr-review` command — nothing is ever injected or auto-started. `onDemand = false` also removes the skill registration; the tail button disappears with it.
+
+### Automatic review (opt-in, off by default)
+
+Trigger: **the end of a turn** *and* that turn wrote at least one file — *and* you turned it back on (`autoReview` set to `adaptive` / `inject` / `followup`; the factory default is `off` since 0.5.0). Before running, the plugin checks, in order:
 
 - `enabled` is not `false` and `auto` (the settings-page `autoReview`) is not `off`;
 - the session has had fewer than `autoMaxPerSession` automatic reviews (`0` = never);
@@ -231,23 +241,27 @@ With `progress = true` (default) every review is registered as a background job 
 | `OCR_OUTPUT_SHAPE_UNKNOWN` | The plugin does not recognise this ocr output shape and fails closed on purpose rather than reporting “no issues”. Report `ocr_status.version` together with `rawJson`. |
 | `OCR_REVIEWER_UNCERTAIN` | The round limit was reached with findings still open: raise `reviewer.rounds` (max 10) or review the leftovers manually. |
 | A field seems ignored | `ocr_status` reports `configSource`, `configPath` and `fileValues`; precedence is settings page > config file > defaults, and only one config file is read (the first that exists). |
+| `DSH_OPEN_CODE_REVIEW_CONFIG` points at a file that does not exist | Since 0.5.0 the plugin no longer stops there: it falls back to `<DSH_HOME>/dsh-open-code-review.json`, then to the plugin directory, and `ocr_status` says so (“指向的 … 不存在，已回落到 …”). Before 0.5.0 that path silently kept running on defaults. |
+| The settings-page dropdowns are unreadable (white-on-white, or dark text on a dark theme) | Fixed in 0.5.0: the `<select>` / `<option>` colours now come from the host theme tokens and the widget declares `color-scheme`, so the native popup follows light/dark. Upgrade (and refresh the page after the host restart). |
+| The result says “0 file(s) reviewed, N issue(s) found” | Fixed in 0.5.0. The file count now comes from `files[]` / `total_files` / `reviewable_count`, falling back to the distinct files the findings mention, so a summary without a file list can no longer report 0 files next to N findings. |
+| Token counters look inconsistent (`total` > prompt + completion) | Expected when an upstream call reports only a total: `bridge.tokens.partial` counts those calls and the line adds “其中 N 次上游只报了总数”. The plugin never fabricates the missing halves. |
 | The plugin is missing entirely (`ocr_review` becomes an unknown tool) | The host fiber failed to load — most often an unsupported JSON-Schema construct in a tool schema, or a `lib/*.js` edit without a host restart. Check the DSH log, then restart. |
 
 ## Hardening history
 
-The v0.3.0 → v0.4.0 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md).
+The v0.3.0 → v0.5.0 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md).
 
 ## Development & tests
 
-Six dependency-free suites (`node test/<name>.mjs`), item counts as actually run:
+Six dependency-free suites (`node test/<name>.mjs`), item counts as actually run (`npm test` runs all six):
 
 | Suite | Items | Covers |
 | --- | --- | --- |
-| `node test/smoke.mjs` | 137 | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, config layering. |
+| `node test/smoke.mjs` | 160 | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, config layering/sources, per-line findings. |
 | `node test/job-smoke.mjs` | 51 | Review progress: registration, progress line, output stream, stop → cancel, idempotent settlement. |
 | `node test/reviewer-smoke.mjs` | 45 | Reviewer subagent logic: prompt, structured parsing, rounds, failure/timeout (aborts the in-flight child). |
-| `node test/bridge-smoke.mjs` | 74 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams and client disconnects. |
-| `node test/client-smoke.mjs` | 178 | Browser half with a mini React: settings form, card summary, in-session progress row. |
+| `node test/bridge-smoke.mjs` | 77 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams, client disconnects and token accounting. |
+| `node test/client-smoke.mjs` | 206 | Browser half with a mini React: settings form (basics + collapsible advanced), card summary, in-session progress row, turn-tail review button. |
 | `node test/cordis-inject.mjs` | 26 | Real-cordis regression across three host shapes (all services / remote.session missing / no remote). |
 
 `node test/cordis-inject.mjs` exits **2 (skipped)** when `OCR_TEST_CORDIS` points at no cordis checkout — a skip is not a pass. There are no runtime dependencies, and the tests need no install either.

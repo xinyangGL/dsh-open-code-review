@@ -65,7 +65,10 @@ let failures = 0;
 function check(name, ok, detail = "") {
   results.push(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
   if (!ok) failures += 1;
+  // 默认不打印（结果统一在文件末尾输出，保持输出整洁）；排查卡死时用 OCR_SMOKE_TRACE=1 看进度。
+  if (process.env.OCR_SMOKE_TRACE === "1") console.log(`      [trace ${Date.now() - startedAt}ms] ${ok ? "PASS" : "FAIL"} ${name}`);
 }
+const startedAt = Date.now();
 
 function log(message) {
   console.log(`      · ${message}`);
@@ -491,10 +494,36 @@ check(
 const rendered = tools.get("ocr_review").output.render({}, delegated)[0].text;
 check("render 输出人类/模型可读文本", rendered.includes("委派审查规格") && rendered.includes("engine=delegate"), `${rendered.length} 字符`);
 
-/* ------------------------------------------------------------- 端到端：自动 */
+/* v0.5.0 步骤 3：按需评审（按钮 + skill）的状态必须在 ocr_status 里可见；
+   这个实例的宿主没有 skills 服务 → registered=false 且给出原因（真机核验时必须是 true）。 */
+check(
+  "ocr_status（v0.5.0 步骤 3）：报出 onDemand 与 skill 状态（没有 skills 服务时说明原因）",
+  status.onDemand === true &&
+    status.skill?.name === "ocr-on-demand-review" &&
+    status.skill?.registered === false &&
+    String(status.skill?.reason).includes("skills 服务") &&
+    status.notes.some((n) => n.includes("按需评审")),
+  `onDemand=${status.onDemand} skill=${JSON.stringify(status.skill)}`,
+);
 
+/* ------------------------------------------------------------- 端到端：按需 / 自动 */
+
+/* v0.5.0 起出厂默认 auto=off（按需评审：回合尾部按钮 + skill）：写完文件的回合结束**不该**自动注入。
+   这条以前是「默认就会注入」，默认改了以后它变成第一道断言。 */
 const autoAgent = makeAgent();
 emit("tools/result", { name: "edit", agent: autoAgent, callId: "c2", arguments: {} }, { isError: false });
+emit("agent/turn-stopping", { agent: autoAgent, turn: 7, signal: undefined });
+await new Promise((resolve) => setTimeout(resolve, 3000));
+check(
+  "默认按需（auto=off）：写文件后回合结束不自动注入评审",
+  deliver.followed.length === 0 && deliver.injected.length === 0,
+  `followup=${deliver.followed.length} inject=${deliver.injected.length}（期望都是 0）`,
+);
+
+/* 显式打开自动档（老行为）后照旧：另起一个 auto=adaptive 的实例，
+   证明四档自动模式仍然可用，只是不再默认替用户打开。 */
+mod.apply(makeCtx(), cfgMod.Config({ autoReview: "adaptive", autoMaxPerSession: 3, autoMinIntervalMs: 0 }));
+emit("tools/result", { name: "edit", agent: autoAgent, callId: "c2b", arguments: {} }, { isError: false });
 emit("agent/turn-stopping", { agent: autoAgent, turn: 7, signal: undefined });
 const deadline = Date.now() + 120000;
 while (deliver.followed.length === 0 && deliver.injected.length === 0 && Date.now() < deadline) {
@@ -502,7 +531,7 @@ while (deliver.followed.length === 0 && deliver.injected.length === 0 && Date.no
 }
 const autoText = textOf(deliver.followed[0] ?? deliver.injected[0]);
 check(
-  "自动评审：写文件后回合结束自动注入评审结果",
+  "自动档（显式 auto=adaptive）：写文件后回合结束自动注入评审结果",
   autoText.includes("自动代码评审") && autoText.includes("OpenCodeReview") && /engine=(delegate|ocr)/.test(autoText),
   `followup=${deliver.followed.length} inject=${deliver.injected.length} 长度=${autoText.length}`,
 );
@@ -568,6 +597,13 @@ check(
   "ocr_status：bridge 对象恰好是 schema 声明的 13 个键（否则宿主调用期拒收）",
   bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,requests,retries,retrySkipReason,retrySkips,tokenMasked,tokens,uptimeMs,url",
   bridgeKeys,
+);
+check(
+  "v0.5.0 步骤 5：bridge.tokens 四个键（含 partial），桥刚起来时四键都是 0",
+  bridgeStatus.bridge?.tokens &&
+    Object.keys(bridgeStatus.bridge.tokens).sort().join(",") === "completion_tokens,partial,prompt_tokens,total_tokens" &&
+    bridgeStatus.bridge.tokens.partial === 0,
+  JSON.stringify(bridgeStatus.bridge?.tokens ?? null),
 );
 {
   const declared = tools.get("ocr_status")?.output?.schema?.properties?.bridge?.oneOf?.[0]?.properties ?? {};
@@ -842,6 +878,79 @@ check(
   "正常路径：issue 数组被解析出来",
   issueRun.ok === true && issueRun.issues.length === 1 && issueRun.issues[0].line === 9 && issueRun.code === "",
   `${issueRun.summary} | issues=${JSON.stringify(issueRun.issues)}`,
+);
+
+/* 步骤 2（v0.5.0）：问题逐条列到「文件 → 行 [severity] 问题」，摘要不再出现「0 个文件却有 N 条问题」。 */
+const listJobs = makeJobsRegistry();
+const listCase = cannedHarness(
+  [
+    {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        /* 真机复现：整文件扫描的正式结果里文件清单是空的，问题条目各自带 file。 */
+        files: [],
+        total_files: 2,
+        issues: [
+          { file: "lib/b.js", line: 42, severity: "low", message: "变量名太短", rule: "naming" },
+          { file: "lib/a.js", line: 12, severity: "high", message: "空指针风险", suggestion: "先判空", rule: "null-check", end_line: 14, column: 3 },
+          { file: "lib/a.js", line: 7, severity: "medium", message: "缺少错误处理" },
+        ],
+      }),
+    },
+  ],
+  {},
+  { jobs: listJobs },
+);
+const listRun = await listCase.call({ engine: "ocr" });
+check(
+  "0 文件口径（真机回归）：文件清单空但有 total_files → 摘要报 2 个文件",
+  listRun.ok === true && listRun.summary.includes("审查 2 个文件") && listRun.summary.includes("发现 3 条问题"),
+  `${listRun.code} | ${listRun.summary}`,
+);
+const listText = review.valueToText(listRun, {});
+check(
+  "逐条展示：按文件分组 + 组内按行号升序 + 严重程度/规则名",
+  listText.includes("发现问题 3 条（涉及 2 个文件）：") &&
+    listText.includes("\n  lib/a.js") &&
+    listText.includes("\n  lib/b.js") &&
+    listText.indexOf("- 7 [medium]") < listText.indexOf("- 12-14 [high]") &&
+    listText.includes("- 12-14 [high] 空指针风险（null-check）"),
+  listText.split("\n").slice(-5).join(" / "),
+);
+const listJobText = (listJobs.records.get("ocr-review-1")?.output ?? []).map((o) => o.text).join("");
+check(
+  "job 行也逐条列出问题（文件 → 行 [severity] 问题）",
+  listJobText.includes("lib/a.js") &&
+    listJobText.includes("- 12-14 [high] 空指针风险（null-check）") &&
+    listJobText.includes("lib/b.js") &&
+    listJobText.includes("2 个文件 · 3 条问题"),
+  listJobText.split("\n").slice(-6).join(" / "),
+);
+const capped = review.issuesToLines(
+  [
+    { file: "a.js", line: 1, severity: "low", message: "m" },
+    { file: "b.js", line: 2, severity: "low", message: "m" },
+    { file: "b.js", line: 3, severity: "low", message: "m" },
+  ],
+  { max: 2 },
+);
+check("issuesToLines：超上限只列 max 条并回报 hidden", capped.shown === 2 && capped.hidden === 1 && capped.files === 2, JSON.stringify(capped));
+check(
+  "groupIssues：按首次出现顺序分组",
+  review.groupIssues([{ file: "b.js" }, { file: "a.js" }, { file: "b.js" }]).map((g) => g.file).join(",") === "b.js,a.js",
+  JSON.stringify(review.groupIssues([{ file: "b.js" }, { file: "a.js" }]).map((g) => g.file)),
+);
+const detailed = review.extractIssuesDetailed({
+  issues: [
+    { file: "a.js", line: 1, severity: "low", message: "m", end_line: 3, column: 2, rule: "r", suggestion: "s" },
+    { file: "a.js", line: 2, severity: "low", message: "m2" },
+  ],
+}).issues;
+check(
+  "extractIssuesDetailed：有值才写 endLine/column/rule/suggestion（旧键集合不变）",
+  Object.keys(detailed[0]).join(",") === "file,line,severity,message,endLine,column,rule,suggestion" &&
+    Object.keys(detailed[1]).join(",") === "file,line,severity,message",
+  JSON.stringify(detailed),
 );
 
 /* 取消（工具调用被中断 / 插件卸载）：signal 一 abort，子进程立刻被终结。 */
@@ -1193,7 +1302,7 @@ const fbCase = cannedHarness(
     { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
     { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], issues: [] }) },
   ],
-  { engine: "ocr", reviewerAgent: "spawn", autoMinIntervalMs: 0 },
+  { engine: "ocr", reviewerAgent: "spawn", autoReview: "adaptive", autoMinIntervalMs: 0 },
   { listeners: fbMap },
 );
 emitOn(fbMap, "tools/result", { name: "edit", agent: fbAgent }, { isError: false });
@@ -1284,7 +1393,7 @@ const autoCase = cannedHarness(
     { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
     ...reviewerSpecRuns(),
   ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoMinIntervalMs: 0 },
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoReview: "adaptive", autoMinIntervalMs: 0 },
   { subagents: autoSub.runtime, listeners: autoMap },
 );
 emitOn(autoMap, "tools/result", { name: "edit", agent: revAutoAgent }, { isError: false });
@@ -1292,8 +1401,12 @@ emitOn(autoMap, "agent/turn-stopping", { agent: revAutoAgent, reason: "test" });
 await waitUntil(() => autoSink.length > 0);
 const revAutoText = autoSink.length > 0 ? textOf(autoSink[0]) : "";
 check(
-  "自动档第 1 轮：交付带轮次 + findings 清单 + 「请逐条修复或说明理由」",
-  autoSink.length === 1 && revAutoText.includes("【独立评审 agent · 第 1/3 轮】") && revAutoText.includes("lib/a.js:12") && revAutoText.includes("[major]") && revAutoText.includes("请逐条修复或说明理由"),
+  "自动档第 1 轮：交付带轮次 + 按文件分组的 findings 清单 + 「请逐条修复或说明理由」",
+  autoSink.length === 1 &&
+    revAutoText.includes("【独立评审 agent · 第 1/3 轮】") &&
+    revAutoText.includes("lib/a.js") &&
+    revAutoText.includes("- 12 [major]") &&
+    revAutoText.includes("请逐条修复或说明理由"),
   autoSink.length + " 条 | " + revAutoText.slice(0, 200).replace(/\n/g, " / "),
 );
 check(
@@ -1314,7 +1427,7 @@ const cleanRoundCase = cannedHarness(
     { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
     ...reviewerSpecRuns([{ path: "lib/a.js", insertions: 9, deletions: 1 }]),
   ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoMinIntervalMs: 0 },
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoReview: "adaptive", autoMinIntervalMs: 0 },
   { subagents: cleanSub.runtime, listeners: cleanMap },
 );
 emitOn(cleanMap, "tools/result", { name: "edit", agent: cleanAgent }, { isError: false });
@@ -1342,7 +1455,7 @@ const capCase = cannedHarness(
     ...reviewerSpecRuns(),
     { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
   ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoMinIntervalMs: 0 },
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoReview: "adaptive", autoMinIntervalMs: 0 },
   { subagents: capSub.runtime, listeners: capMap },
 );
 emitOn(capMap, "tools/result", { name: "edit", agent: capAgent }, { isError: false });
@@ -1448,7 +1561,7 @@ const hrCapCase = cannedHarness(
     ...reviewerSpecRuns(),
     { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
   ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoMinIntervalMs: 0 },
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoReview: "adaptive", autoMinIntervalMs: 0 },
   { subagents: hrCapSub.runtime, listeners: hrCapMap, jobs: hrCapJobs },
 );
 emitOn(hrCapMap, "tools/result", { name: "edit", agent: hrCapAgent }, { isError: false });
@@ -1497,6 +1610,29 @@ check(
   "配置（P2 回归）：'true' / 'OFF' 这类写法认得出来",
   hrCfgTrue.enabled === true && hrCfgTrue.auto === "off",
   JSON.stringify({ enabled: hrCfgTrue.enabled, auto: hrCfgTrue.auto }),
+);
+
+/* v0.5.0 步骤 3：默认改成「按需」—— auto 出厂 off，onDemand 出厂 true（回合尾部按钮 + runtime skill）。 */
+check(
+  "配置（v0.5.0 步骤 3）：出厂 auto=off、onDemand=true",
+  cfgMod.DEFAULTS.auto === "off" && cfgMod.DEFAULTS.onDemand === true,
+  `auto=${cfgMod.DEFAULTS.auto} onDemand=${cfgMod.DEFAULTS.onDemand}`,
+);
+check(
+  "配置（v0.5.0 步骤 3）：onDemand 的 'false' / false 都归一成 false，缺省 true",
+  cfgMod.loadConfig({ onDemand: "false" }).onDemand === false &&
+    cfgMod.loadConfig({ onDemand: false }).onDemand === false &&
+    cfgMod.loadConfig({}).onDemand === true,
+  JSON.stringify({
+    str: cfgMod.loadConfig({ onDemand: "false" }).onDemand,
+    bool: cfgMod.loadConfig({ onDemand: false }).onDemand,
+    dflt: cfgMod.loadConfig({}).onDemand,
+  }),
+);
+check(
+  "配置（v0.5.0 步骤 3）：设置页 schema 的 auto / onDemand 默认值引用 DEFAULTS（不写死）",
+  schema?.dict?.autoReview?.meta?.default === cfgMod.DEFAULTS.auto && schema?.dict?.onDemand?.meta?.default === cfgMod.DEFAULTS.onDemand,
+  JSON.stringify({ autoReview: schema?.dict?.autoReview?.meta?.default, onDemand: schema?.dict?.onDemand?.meta?.default }),
 );
 
 /* v0.3.5：真机 `ocr scan` 评审 lib/config.js 报出来的 6 条，这里守住其中可断言的部分。 */
@@ -1723,6 +1859,106 @@ check(
   );
 }
 {
+  /* v0.5.0 步骤 5：env 指定的文件不存在时**不再终止解析**，继续回落 home → 插件目录。
+     老行为（OCR 真机扫描报的第 1 条）：路径写错时静默按「出厂默认 + 设置页」跑，用户以为配置生效了。 */
+  const dir = mkdtempSync(join(tmpdir(), "ocr-cfg-env-"));
+  const homeFile = join(dir, "dsh-open-code-review.json");
+  const missing = join(dir, "nope.json");
+  writeFileSync(homeFile, JSON.stringify({ audience: "human" }));
+  const beforeHome = process.env.DSH_HOME;
+  const beforeExplicit = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+  try {
+    process.env.DSH_HOME = dir;
+    process.env.DSH_OPEN_CODE_REVIEW_CONFIG = missing;
+    const resolved = cfgMod.resolveConfigFile();
+    const cfg = cfgMod.loadConfig();
+    check(
+      "v0.5.0 步骤 5：DSH_OPEN_CODE_REVIEW_CONFIG 指向不存在的文件时回落到 home（不再当成 env 命中）",
+      resolved.source === "home" &&
+        resolved.path === homeFile &&
+        resolved.envMissing === true &&
+        resolved.envPath === missing &&
+        cfg.audience === "human" &&
+        cfg.__envConfigMissing === true &&
+        String(cfg.__configSourceHint).includes("不存在"),
+      JSON.stringify({ source: resolved.source, envMissing: resolved.envMissing, hint: cfg.__configSourceHint }),
+    );
+    check(
+      "v0.5.0 步骤 5：envConfigPath() 只认非空白的 DSH_OPEN_CODE_REVIEW_CONFIG，configSourceText 覆盖四种来源",
+      cfgMod.envConfigPath() === missing &&
+        cfgMod.configSourceText("env").includes("DSH_OPEN_CODE_REVIEW_CONFIG") &&
+        cfgMod.configSourceText("home").includes("DSH_HOME") &&
+        cfgMod.configSourceText("plugin").includes("config.json") &&
+        cfgMod.configSourceText("none").includes("出厂默认"),
+      `${cfgMod.envConfigPath()} · ${cfgMod.configSourceText("home")}`,
+    );
+    process.env.DSH_OPEN_CODE_REVIEW_CONFIG = "   ";
+    check("v0.5.0 步骤 5：env 变量是空白串时等同于没设置（不会去找一个叫空的文件）", cfgMod.envConfigPath() === "", JSON.stringify(cfgMod.envConfigPath()));
+  } finally {
+    if (beforeHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = beforeHome;
+    if (beforeExplicit === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+    else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = beforeExplicit;
+  }
+}
+{
+  /* v0.5.0 步骤 5：三层合并必须**先深合并、再归一**，否则合并进来的坏类型会原样漏过去；
+     数值再夹一层上下界（config.json 能绕过设置页 schema 的 min/max）。 */
+  const merged = cfgMod.mergeLayers(
+    { llm: { model: "from-file", protocol: "OpenAI " }, env: { A: "1" }, reviewer: { rounds: "3" } },
+    { llm: { mode: "Endpoint" }, reviewer: { agent: "SPAWN" } },
+  );
+  check(
+    "v0.5.0 步骤 5：mergeLayers 先深合并再归一（file 的 llm/env/reviewer 与 patch 的键都在，坏类型被收敛）",
+    merged.llm.model === "from-file" &&
+      merged.llm.mode === "endpoint" &&
+      merged.llm.protocol === "openai" &&
+      merged.env.A === "1" &&
+      merged.reviewer.agent === "spawn" &&
+      merged.reviewer.rounds === 3,
+    JSON.stringify({ llm: merged.llm, env: merged.env, reviewer: merged.reviewer }),
+  );
+  const guarded = cfgMod.mergeLayers({ llm: ["x"] }, { reviewer: ["y"], env: "nope" });
+  check(
+    "v0.5.0 步骤 5：嵌套块传数组/字符串时整块回落默认（不会展开成数字键对象污染配置）",
+    guarded.llm.mode === "dsh" &&
+      guarded.reviewer.agent === "off" &&
+      Object.keys(guarded.llm).every((key) => !/^\d+$/.test(key)) &&
+      JSON.stringify(guarded.env) === "{}",
+    JSON.stringify({ llm: guarded.llm, reviewer: guarded.reviewer, env: guarded.env }),
+  );
+  const clamped = cfgMod.normalizeConfig({
+    engine: "OCR",
+    audience: "nope",
+    autoMaxPerSession: 99999,
+    autoMinReviewableFiles: 0,
+    autoMinIntervalMs: -1,
+    timeoutMinutes: 0,
+    maxTimeoutMinutes: 99999,
+    llm: { mode: "Endpoint", protocol: "Anthropic " },
+    reviewer: { agent: "Spawn", rounds: 99 },
+  });
+  check(
+    "v0.5.0 步骤 5：越界值 — 大于上界夹住，小于下界回落到默认（负数不是「要更小」而是写错）",
+    clamped.autoMaxPerSession === 50 &&
+      clamped.autoMinReviewableFiles === 1 &&
+      clamped.autoMinIntervalMs === 60000 &&
+      clamped.timeoutMinutes === 15 &&
+      clamped.maxTimeoutMinutes === 1440,
+    JSON.stringify({ autoMaxPerSession: clamped.autoMaxPerSession, autoMinReviewableFiles: clamped.autoMinReviewableFiles, autoMinIntervalMs: clamped.autoMinIntervalMs, timeoutMinutes: clamped.timeoutMinutes, maxTimeoutMinutes: clamped.maxTimeoutMinutes }),
+  );
+  check(
+    "v0.5.0 步骤 5：枚举非法值回落默认、合法值去空白小写（engine/audience/llm.mode/llm.protocol/reviewer.agent）",
+    clamped.engine === "ocr" &&
+      clamped.audience === "agent" &&
+      clamped.llm.mode === "endpoint" &&
+      clamped.llm.protocol === "anthropic" &&
+      clamped.reviewer.agent === "spawn" &&
+      clamped.reviewer.rounds === 10,
+    JSON.stringify({ engine: clamped.engine, audience: clamped.audience, llm: clamped.llm, reviewer: clamped.reviewer }),
+  );
+}
+{
   const statusForM1 = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
   check(
     "M1：ocr_status 报出配置文件的来源与「文件层实际设了哪些键」，installHint 字段恒在（找不到 ocr 时才有内容）",
@@ -1744,10 +1980,11 @@ check(
   const reviewSchema = tools.get("ocr_review")?.output?.schema ?? {};
   const usageSchema = reviewSchema?.properties?.usage ?? null;
   check(
-    "M1：ocr_review 的返回值声明了 usage（四个数字键），且不在 required 里（endpoint 路由没有桥数据时不写）",
+    "M1：ocr_review 的返回值声明了 usage（四个数字键 + 可选的 partial），且不在 required 里（endpoint 路由没有桥数据时不写）",
     Boolean(usageSchema) &&
-      Object.keys(usageSchema.properties ?? {}).sort().join(",") === "completion_tokens,prompt_tokens,requests,total_tokens" &&
-      !(reviewSchema.required ?? []).includes("usage"),
+      Object.keys(usageSchema.properties ?? {}).sort().join(",") === "completion_tokens,partial,prompt_tokens,requests,total_tokens" &&
+      !(reviewSchema.required ?? []).includes("usage") &&
+      !(usageSchema.required ?? []).includes("partial"),
     JSON.stringify(usageSchema).slice(0, 200),
   );
   const statusSchema = tools.get("ocr_status")?.output?.schema ?? {};
@@ -1758,9 +1995,72 @@ check(
     bridgeDecl.slice(0, 120),
   );
   check(
+    "v0.5.0 步骤 5：bridge.tokens 的 schema 也声明了 partial（additionalProperties:false，漏声明 = 真机拒收）",
+    bridgeDecl.includes("\"partial\"") &&
+      (statusSchema?.properties?.bridge?.oneOf?.[0]?.properties?.tokens?.required ?? []).includes("partial"),
+    bridgeDecl.slice(0, 200),
+  );
+  check(
     "M1：ocr_status 的 schema 声明了 configPath / configSource / fileValues / installHint",
     ["configPath", "configSource", "fileValues", "installHint"].every((key) => Boolean(statusSchema?.properties?.[key])),
     Object.keys(statusSchema.properties ?? {}).join(","),
+  );
+  check(
+    "v0.5.0 步骤 3：ocr_status 的 schema 声明了 onDemand 与 skill（返回值多键会被宿主拒收）",
+    statusSchema?.properties?.onDemand?.type === "boolean" &&
+      statusSchema?.properties?.skill?.type === "object" &&
+      ["name", "registered", "reason"].every((key) => Boolean(statusSchema?.properties?.skill?.properties?.[key])) &&
+      (statusSchema?.required ?? []).includes("onDemand") &&
+      (statusSchema?.required ?? []).includes("skill"),
+    `${JSON.stringify(statusSchema?.properties?.skill).slice(0, 160)} | required=${(statusSchema?.required ?? []).join(",")}`,
+  );
+}
+
+/* v0.5.0 步骤 3：按需评审 skill —— 宿主有 skills 服务时注册，关掉 onDemand 时不注册。
+   它是「模型自己判断该验证」那条路径：注册了，模型才知道用户说「验证一下」时该跑 ocr_review。 */
+{
+  const registered = [];
+  const skillCtx = makeCtx();
+  skillCtx.skills = {
+    register(def) {
+      registered.push(def);
+      return () => {};
+    },
+  };
+  mod.apply(skillCtx, cfgMod.Config({ onDemand: true }));
+  const onDemandStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+  const def = registered[0];
+  check(
+    "v0.5.0 步骤 3：有 skills 服务时注册 ocr-on-demand-review（描述/触发条件/汇报格式齐全，ocr_status 报 registered=true）",
+    registered.length === 1 &&
+      def?.name === "ocr-on-demand-review" &&
+      typeof def.description === "string" &&
+      def.description.length > 0 &&
+      typeof def.whenToUse === "string" &&
+      def.whenToUse.length > 0 &&
+      typeof def.content === "string" &&
+      def.content.includes("ocr_review") &&
+      def.content.includes("[severity]") &&
+      onDemandStatus.onDemand === true &&
+      onDemandStatus.skill?.registered === true &&
+      onDemandStatus.skill?.reason === "",
+    `registered=${registered.length} name=${def?.name} status=${JSON.stringify(onDemandStatus.skill)}`,
+  );
+
+  const registeredOff = [];
+  const offCtx = makeCtx();
+  offCtx.skills = {
+    register(def2) {
+      registeredOff.push(def2);
+      return () => {};
+    },
+  };
+  mod.apply(offCtx, cfgMod.Config({ onDemand: false }));
+  const offStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+  check(
+    "v0.5.0 步骤 3：onDemand=false 时不注册 skill，reason 说明是「按需评审已关闭」",
+    registeredOff.length === 0 && offStatus.onDemand === false && offStatus.skill?.registered === false && String(offStatus.skill?.reason).includes("按需评审已关闭"),
+    `registered=${registeredOff.length} status=${JSON.stringify(offStatus.skill)}`,
   );
 }
 

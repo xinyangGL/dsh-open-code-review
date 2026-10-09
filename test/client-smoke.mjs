@@ -228,12 +228,20 @@ function makeCtx(overrides = {}) {
 
 const fakeCtx = makeCtx({
   formIds: [],
+  onCalls: [],
+  /* 主题切换订阅：v0.5.0 起用来催一次重渲染（见下面的 colorScheme 断言）。 */
+  on(event, cb) {
+    fakeCtx.onCalls.push(event);
+    return () => {};
+  },
   get(name) {
     fakeCtx.getCalls.push(name);
     if (name === "remote") {
       if (fakeCtx.remoteThrows) throw new Error('cannot get property "remote" without inject');
       return fakeCtx.getFallback;
     }
+    /* 主题服务：v0.5.0 起用来决定原生下拉弹出层的配色（见 selectionScheme 断言）。 */
+    if (name === "theme") return fakeCtx.themeValue;
     return undefined;
   },
   configForms: {
@@ -249,7 +257,7 @@ plugin.apply(fakeCtx);
 check("apply 注入 configForms", fakeCtx.injectCalls.some((d) => d.includes("configForms")), JSON.stringify(fakeCtx.injectCalls));
 check("注册进 plugins.bundle.config", fakeCtx.slotInjectCalls.includes("plugins.bundle.config"), JSON.stringify(fakeCtx.slotInjectCalls));
 check("注册进 settings.section", fakeCtx.slotInjectCalls.includes("settings.section"), JSON.stringify(fakeCtx.slotInjectCalls));
-check("注册三个 cell（设置页两处 + 输入框上方的进度行）", registrations.length === 3, `n=${registrations.length}`);
+check("注册四个 cell（设置页两处 + 进度行 + 回合尾部按钮）", registrations.length === 4, `n=${registrations.length}`);
 const dockReg = registrations.find((r) => r.options.name === "conversation.input.dock");
 check("进度行注册到 conversation.input.dock", Boolean(dockReg), JSON.stringify(registrations.map((r) => r.options.name)));
 check(
@@ -284,7 +292,7 @@ check(
   JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.tuning"], zhDict["group.runtime"]]),
 );
 check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
-check("三个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
+check("四个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
 const reg = registrations.find((r) => r.options.name === "plugins.bundle.config") || { options: {}, component: () => null };
 const sectionReg = registrations.find((r) => r.options.name === "settings.section") || { options: {}, component: () => null };
 check("key = 包名", reg.options.key === "dsh-open-code-review", String(reg.options.key));
@@ -350,8 +358,8 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-/* 主页只放「要做的决定」这 6 行；12 个参数项收进「高级设置」，默认不渲染。 */
-const BASIC_LABELS = ["总开关", "默认引擎", "自动评审", "独立评审 agent", "LLM 路由", "模型名"];
+/* 主页只放「要做的决定」这 7 行；12 个参数项收进「高级设置」，默认不渲染。 */
+const BASIC_LABELS = ["总开关", "默认引擎", "自动评审", "按需评审", "独立评审 agent", "LLM 路由", "模型名"];
 /* 调优 6 + 运行与诊断 6；provider 行只在 dsh 模式下渲染，所以它在 12 项里。 */
 const ADVANCED_LABELS = ["自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "结果详细程度", "ocr 可执行文件", "提供方（provider）", "单次超时（分钟）", "评审进度", "调试日志"];
 const ADVANCED_KEYS = ["autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "audience", "ocrPath", "llmProvider", "timeoutMinutes", "progress", "verbose"];
@@ -395,7 +403,21 @@ function controlRows(node, out = []) {
 const rows = controlRows(tree);
 /** 只数高级区的行（展开后整棵树里 = 基础组 + 高级区）。 */
 const advancedRows = (t) => controlRows(t).filter((r) => ADVANCED_KEYS.includes(r.key));
-check("基础组 6 个控件行（dsh 模式、独立评审 agent=off）", rows.length === 6, `n=${rows.length}`);
+check("基础组 7 个控件行（dsh 模式、独立评审 agent=off，含按需评审）", rows.length === 7, `n=${rows.length}`);
+/* v0.5.0 步骤 3：默认不自动评审，改成「按需」——这两个决定必须能从主页一眼看出来。 */
+const onDemandRow = rows.find((r) => r.key === "onDemand");
+check(
+  "新增「按需评审」行（基础组，默认勾选）",
+  Boolean(onDemandRow) && onDemandRow.field.tag === "input" && onDemandRow.field.props.type === "checkbox" && onDemandRow.field.props.checked === true,
+  onDemandRow ? `${onDemandRow.field.tag}/${onDemandRow.field.props.type}/${onDemandRow.field.props.checked}` : "没有该行",
+);
+const autoReviewOptionTexts = rows.find((r) => r.key === "autoReview") ? hosts(rows.find((r) => r.key === "autoReview").row).filter((n) => n.tag === "option").map(textOf) : [];
+check(
+  "「自动评审」下拉保留四档，且 off 档写明 v0.5.0 起是默认",
+  [...["adaptive", "inject", "followup", "off"]].every((v) => autoReviewOptionTexts.some((o) => o.includes(v))) && autoReviewOptionTexts.some((o) => o.includes("v0.5.0 起默认")),
+  JSON.stringify(autoReviewOptionTexts),
+);
+check("「自动评审」的说明指向下一行按需评审", html.includes("出厂默认 off") && html.includes("见下一行"));
 
 /* 高级设置：默认收起 → 点标题展开 → 再点收起（折叠只是不渲染，草稿仍由 saveAll 一起保存） */
 const advToggle = (t) => hosts(t).find((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1");
@@ -418,7 +440,7 @@ check(
 check("展开后高级数字字段带出当前值", hosts(advTree).some((n) => n.tag === "input" && n.props.type === "number" && n.props.value === "3"));
 check("高级项也有「恢复默认」", advRows.every((r) => r.buttons.some((b) => textOf(b) === "恢复默认")));
 setAdvanced(false);
-check("再点一次收起、DOM 里没有高级行", advancedRows(render()).length === 0 && controlRows(render()).length === 6, `n=${controlRows(render()).length}`);
+check("再点一次收起、DOM 里没有高级行", advancedRows(render()).length === 0 && controlRows(render()).length === 7, `n=${controlRows(render()).length}`);
 
 const modeRow = rows.find((r) => r.key === "llmMode");
 check("找到 LLM 路由行", Boolean(modeRow) && modeRow.field.tag === "select");
@@ -435,7 +457,7 @@ check("每行都有「恢复默认」", rows.every((r) => r.buttons.some((b) => 
 modeRow.field.props.onChange({ target: { value: "endpoint" } });
 const endpointTree = render();
 const endpointRows = controlRows(endpointTree);
-check("endpoint 模式下基础组 9 行（多出静态端点三行）", endpointRows.length === 9, `n=${endpointRows.length}`);
+check("endpoint 模式下基础组 10 行（多出静态端点三行）", endpointRows.length === 10, `n=${endpointRows.length}`);
 check("endpoint 模式下收起时不渲染 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
 setAdvanced(true);
 check("endpoint 模式下高级区 11 行（provider 项只在 dsh 模式渲染）", advancedRows(render()).length === 11, `n=${advancedRows(render()).length}`);
@@ -517,7 +539,7 @@ if (timeoutRow) timeoutRow.field.props.onChange({ target: { value: "20" } });
 setAdvanced(false);
 const collapsedDirty = render();
 check("折叠后标题显示「1 项待保存」", textOf(collapsedDirty).includes("1 项待保存"), textOf(collapsedDirty).slice(0, 160));
-check("折叠后高级行不在 DOM 里", controlRows(collapsedDirty).length === 6, `n=${controlRows(collapsedDirty).length}`);
+check("折叠后高级行不在 DOM 里", controlRows(collapsedDirty).length === 7, `n=${controlRows(collapsedDirty).length}`);
 setAdvanced(true);
 const undoRow = controlRows(render()).find((r) => r.key === "timeoutMinutes");
 const undoBtn = undoRow && undoRow.buttons.find((b) => textOf(b) === "撤销");
@@ -622,7 +644,7 @@ check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.v
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "spawn" } });
 const spawnTree = render();
 const spawnRows = controlRows(spawnTree);
-check("reviewer=spawn 时基础组 9 行（多出子 agent 三行）", spawnRows.length === 9, `n=${spawnRows.length}`);
+check("reviewer=spawn 时基础组 10 行（多出子 agent 三行）", spawnRows.length === 10, `n=${spawnRows.length}`);
 check("reviewerAgent 只有 off / spawn 两个选项", (() => {
   const row = spawnRows.find((r) => r.key === "reviewerAgent");
   return Boolean(row) && hosts(row.row).filter((n) => n.tag === "option").length === 2;
@@ -663,7 +685,7 @@ if (reviewInput) {
 /* 切回 off：后面的降级场景与行数断言按默认（不启用）算 */
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "off" } });
 const offAgain = controlRows(render());
-check("切回 off 后子 agent 三行消失、行数回到 6", offAgain.length === 6 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
+check("切回 off 后子 agent 三行消失、行数回到 7", offAgain.length === 7 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
 check("切回 off 后状态行不再提独立 agent", !textOf(render()).includes("评审走独立 agent"));
 
 /* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
@@ -746,7 +768,7 @@ flushEffects();
 const cardHtml = textOf(cardTree);
 const cardRows = hosts(cardTree).filter((n) => n.props && typeof n.props["data-ocr-summary-row"] === "string");
 check("卡片渲染只读摘要（不再是 null）", Boolean(hosts(cardTree).find((n) => n.props && n.props["data-ocr-card-summary"] === "1")), cardHtml.slice(0, 160));
-check("摘要只列基础项（不重复整张表单）", cardRows.length === 6, `n=${cardRows.length}`);
+check("摘要只列基础项（不重复整张表单）", cardRows.length === 7, `n=${cardRows.length}`);
 check("摘要行带出当前值（开 / 关 / 选项文案）", cardHtml.includes("开") && cardHtml.includes("关") && cardHtml.includes("auto — "), cardHtml.slice(0, 220));
 check("摘要给出完整设置的入口", cardHtml.includes("设置 → 代码评审"), cardHtml.slice(0, 220));
 check("摘要里没有可编辑控件", !hosts(cardTree).some((n) => n.tag === "input" || n.tag === "select"));
@@ -760,7 +782,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 /* 条目 id 回退：主 id 查不到时用备用 id */
 fakeCtx.rejectIds = ["include:dsh-open-code-review"];
 const fbTree = render();
-check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 6, JSON.stringify(fakeCtx.formIds.slice(-2)));
+check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 7, JSON.stringify(fakeCtx.formIds.slice(-2)));
 check("回退后字段仍可编辑", controlRows(fbTree).every((r) => r.field.props.disabled !== true));
 
 /* 两个 id 都查不到：给出诊断而不是崩掉 */
@@ -775,7 +797,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 const sectionTree = expand(miniReact.createElement(sectionReg.component, {}));
 const sectionHtml = textOf(sectionTree);
 check("设置页渲染标题", sectionHtml.includes("代码评审（阿里 OpenCodeReview）"));
-check("设置页也带 6 个基础控件行（高级区另算）", controlRows(sectionTree).length === 6, `n=${controlRows(sectionTree).length}`);
+check("设置页也带 7 个基础控件行（高级区另算）", controlRows(sectionTree).length === 7, `n=${controlRows(sectionTree).length}`);
 check("设置页照样带出条目 id", sectionHtml.includes("include:dsh-open-code-review"));
 
 /* ------------------------------------------------------------ 会话内进度行（conversation.input.dock） */
@@ -861,20 +883,24 @@ const noRemoteCtx = makeCtx({
   form: fakeCtx.form, /* 本场景在 fakeCtx.form 赋值（260 行）之后才构造 */
   inject(deps, cb) {
     noRemoteCtx.injectCalls.push(deps);
-    /* 模拟"服务没人 provide"：cordis 不会调用回调，子 fiber 保持 INACTIVE */
-    if (Array.isArray(deps) && deps.includes("remote.session")) return undefined;
+    /* 模拟"服务没人 provide"：cordis 不会调用回调，子 fiber 保持 INACTIVE。
+       没有 Remote 桥时 remote.session 与 remote.commands 都不在，按钮 fiber 同样不激活。 */
+    if (Array.isArray(deps) && (deps.includes("remote.session") || deps.includes("remote.commands"))) return undefined;
     return cb(noRemoteCtx);
   },
 });
 plugin.apply(noRemoteCtx);
 check(
-  "宿主没有 Remote 桥时插件照样 apply 并注册三个 cell（进度行不依赖 remote）",
-  noRemoteRegs.length === 3 && noRemoteCtx.slotInjectCalls.includes("settings.section"),
-  `regs=${noRemoteRegs.length}`,
+  "宿主没有 Remote 桥时插件照样 apply 并注册三个 cell（设置页两处 + 进度行；按钮 fiber 保持 pending）",
+  noRemoteRegs.length === 3
+    && noRemoteCtx.slotInjectCalls.includes("settings.section")
+    && !noRemoteRegs.some((r) => r.options.name === "conversation.chat.turnTail"),
+  `regs=${noRemoteRegs.length} · ${JSON.stringify(noRemoteRegs.map((r) => r.options.name))}`,
 );
 check(
-  "宿主没有 Remote 桥时确实尝试过 remote 子注入",
-  noRemoteCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("remote.session")),
+  "宿主没有 Remote 桥时确实尝试过 remote 子注入（目录与命令两条）",
+  noRemoteCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("remote.session"))
+    && noRemoteCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("remote.commands")),
   JSON.stringify(noRemoteCtx.injectCalls),
 );
 const noRemoteCell = noRemoteRegs.find((r) => r.options.name === "settings.section");
@@ -980,6 +1006,192 @@ check(
     enHtml.includes("Reset everything"),
   enHtml.slice(0, 300),
 );
+
+/* ------------------------------------ v0.5.0 步骤 1：原生下拉弹出层的可读性 */
+
+const LABEL_TOKEN = "var(--dsw-alias-label-primary)";
+const BG_TOKEN = "var(--dsw-alias-bg-layer-2)";
+const OPTION_BG_TOKEN = "var(--dsw-alias-bg-overlay)";
+const selectsOf = (t) => hosts(t).filter((n) => n.tag === "select");
+const optionsOf = (t) => hosts(t).filter((n) => n.tag === "option");
+
+setAdvanced(false);
+const noThemeTree = render();
+const noThemeSelects = selectsOf(noThemeTree);
+check("基础组四个原生下拉都在（引擎/自动评审/独立评审 agent/LLM 路由）", noThemeSelects.length === 4, `n=${noThemeSelects.length}`);
+check(
+  "下拉不再靠继承配色：文字/底色/边框都走主题 token",
+  noThemeSelects.every(
+    (n) =>
+      n.props.style &&
+      n.props.style.color === LABEL_TOKEN &&
+      n.props.style.background === BG_TOKEN &&
+      String(n.props.style.border).includes("--dsw-alias-border-l1"),
+  ),
+  JSON.stringify(noThemeSelects.map((n) => n.props.style)),
+);
+const noThemeOptions = optionsOf(noThemeTree);
+check(
+  "每个 option 都显式给了文字色与底色（白底白字的根因）",
+  noThemeOptions.length >= 11 &&
+    noThemeOptions.every((n) => n.props.style && n.props.style.color === LABEL_TOKEN && n.props.style.background === OPTION_BG_TOKEN),
+  `n=${noThemeOptions.length}`,
+);
+check(
+  "拿不到主题服务时不写 colorScheme（维持旧行为、也不抛）",
+  noThemeSelects.every((n) => !Object.prototype.hasOwnProperty.call(n.props.style, "colorScheme")),
+  JSON.stringify(noThemeSelects.map((n) => n.props.style.colorScheme)),
+);
+fakeCtx.themeValue = { getTheme: () => ({ active: { colorScheme: "light" } }) };
+const lightSelects = selectsOf(render());
+check(
+  "浅色主题下下拉声明 colorScheme=light",
+  lightSelects.length === 4 && lightSelects.every((n) => n.props.style.colorScheme === "light"),
+  JSON.stringify(lightSelects.map((n) => n.props.style.colorScheme)),
+);
+fakeCtx.themeValue = { getTheme: () => ({ active: { colorScheme: "dark" } }) };
+const darkSelects = selectsOf(render());
+check(
+  "深色主题下下拉声明 colorScheme=dark",
+  darkSelects.length === 4 && darkSelects.every((n) => n.props.style.colorScheme === "dark"),
+  JSON.stringify(darkSelects.map((n) => n.props.style.colorScheme)),
+);
+fakeCtx.themeValue = { getTheme: () => ({ active: {} }) };
+check(
+  "主题服务形状不对（没有 colorScheme）也只当作没有",
+  selectsOf(render()).every((n) => n.props.style.colorScheme === undefined),
+  JSON.stringify(selectsOf(render()).map((n) => n.props.style.colorScheme)),
+);
+check("订阅 theme/change（切主题时催一次重渲染）", fakeCtx.onCalls.includes("theme/change"), JSON.stringify(fakeCtx.onCalls.slice(0, 4)));
+fakeCtx.themeValue = { getTheme: () => ({ active: { colorScheme: "light" } }) };
+setAdvanced(true);
+const presetTree = render();
+const presetSelect = hosts(presetTree).find((n) => n.props && n.props["data-ocr-preset-select"] === "autoMinIntervalMs");
+check(
+  "「最小间隔」档位下拉也走 token 样式 + colorScheme",
+  Boolean(presetSelect) && presetSelect.props.style.color === LABEL_TOKEN && presetSelect.props.style.colorScheme === "light",
+  JSON.stringify(presetSelect ? presetSelect.props.style : null),
+);
+const presetOptions = presetSelect ? hosts(presetSelect).filter((n) => n.tag === "option") : [];
+check(
+  "档位下拉的六个 option 也显式配色（默认/四档/自定义…）",
+  presetOptions.length === 6 && presetOptions.every((n) => n.props.style && n.props.style.color === LABEL_TOKEN && n.props.style.background === OPTION_BG_TOKEN),
+  `n=${presetOptions.length}`,
+);
+setAdvanced(false);
+fakeCtx.themeValue = undefined;
+
+/* ---------------------------- v0.5.0 步骤 4：回合尾部的「启动代码审核」按钮 */
+
+/* 依赖齐全的 ctx：jobs 快照 + remote.commands.execute 桩（真机契约见 lib/client.js 的注释）。 */
+const tailRegs = [];
+const executed = [];
+const tailWatched = [];
+let tailResult = { ok: true, value: { commandId: "cmd-1", result: { kind: "success", text: "评审完成：审查 2 个文件，发现 1 条问题。" } } };
+const tailCtx = makeCtx({
+  registrations: tailRegs,
+  form: fakeCtx.form, /* 复用主夹具的表单：直接改 snapshot 就能模拟开关变化 */
+  jobs: {
+    state: { rows: {}, observed: {} },
+    watchRows: (sessionId) => {
+      tailWatched.push(sessionId);
+      return () => {};
+    },
+  },
+  remote: {
+    commands: {
+      execute: async (sessionId, line, attachments) => {
+        executed.push([sessionId, line, attachments]);
+        return tailResult;
+      },
+    },
+  },
+});
+plugin.apply(tailCtx);
+const tailReg = tailRegs.find((r) => r.options.name === "conversation.chat.turnTail");
+check(
+  "按钮注册进 conversation.chat.turnTail（id/order 自取，不与内置 todo/plan 撞）",
+  Boolean(tailReg) && tailReg.options.id === "ocr-review-on-demand" && tailReg.options.order === 30,
+  tailReg ? JSON.stringify(tailReg.options) : JSON.stringify(tailRegs.map((r) => r.options.name)),
+);
+const tailInjected = tailReg && typeof tailReg.options.inject === "function" ? tailReg.options.inject() : {};
+check(
+  "注入面齐全（cfgCtx / jobs hooks / watchRows / runReview / t）",
+  Boolean(tailInjected.cfgCtx)
+    && Boolean(tailInjected.hooks && tailInjected.hooks.jobs)
+    && typeof tailInjected.watchRows === "function"
+    && typeof tailInjected.runReview === "function"
+    && typeof tailInjected.t === "function",
+  JSON.stringify(Object.keys(tailInjected)),
+);
+const tailProps = (rows, props = {}) => ({
+  sessionId: "s1",
+  ...tailInjected,
+  useJobs: (select) => select({ rows: { s1: rows }, observed: {} }),
+  t: (key, fallback) => fallback,
+  ...props,
+});
+const renderTail = (rows, props = {}) => {
+  const built = expand(miniReact.createElement(tailReg.component, tailProps(rows, props)));
+  flushEffects();
+  return built;
+};
+const tailButton = (tree) => (tree ? hosts(tree).find((n) => n.tag === "button") : undefined);
+check(
+  "没有 useJobs（宿主没给 jobs 的 hook）时返回 null",
+  expand(miniReact.createElement(tailReg.component, { sessionId: "s1" })) === null,
+);
+check(
+  "没有 sessionId 时返回 null",
+  expand(miniReact.createElement(tailReg.component, { useJobs: tailProps([]).useJobs })) === null,
+);
+
+const idleTree = renderTail([]);
+check("默认（总开关/按需评审都开）显示「启动代码审核」", textOf(idleTree).includes("启动代码审核"), textOf(idleTree));
+check("按钮订阅了本会话的任务行", tailWatched.includes("s1"), JSON.stringify(tailWatched));
+
+tailButton(idleTree).props.onClick();
+await tick();
+check(
+  '点击走宿主命令：execute(sessionId, "/ocr-review", [])',
+  executed.length === 1 && executed[0][0] === "s1" && executed[0][1] === "/ocr-review" && Array.isArray(executed[0][2]) && executed[0][2].length === 0,
+  JSON.stringify(executed),
+);
+const doneText = textOf(renderTail([]));
+check("成功后把命令返回的文本显示出来", doneText.includes("审查 2 个文件"), doneText);
+
+/* 同一会话已有 running 的评审：按钮禁用 + 显示「正在评审…」（数据源同进度行，天然防重复点击） */
+const runningTree = renderTail([liveJob]);
+check(
+  "同会话已有 running 的评审时禁用并显示「正在评审…」",
+  textOf(runningTree).includes("正在评审…") && tailButton(runningTree).props.disabled === true,
+  textOf(runningTree),
+);
+
+/* 失败三条路径，逐条都要有可见文案 */
+tailResult = { ok: false, error: { code: "peer-unavailable", message: "peer 断了" } };
+tailButton(renderTail([])).props.onClick();
+await tick();
+check("命令调用失败（ok:false）时显示原因", textOf(renderTail([])).includes("peer 断了"), textOf(renderTail([])));
+
+tailResult = { ok: true, value: { commandId: "cmd-2", result: { kind: "error", text: "插件已关闭（enabled=false）" } } };
+tailButton(renderTail([])).props.onClick();
+await tick();
+check("命令返回 error 时显示命令给的错误文本", textOf(renderTail([])).includes("插件已关闭"), textOf(renderTail([])));
+
+tailResult = { ok: true, value: undefined };
+tailButton(renderTail([])).props.onClick();
+await tick();
+check("命令没被执行（value 为空）时给出提示", textOf(renderTail([])).includes("宿主没有执行这条命令"), textOf(renderTail([])));
+
+/* 两个开关任一关掉：整块不渲染 */
+tailResult = { ok: true, value: { commandId: "cmd-3", result: { kind: "success", text: "" } } };
+const snapshotKept = snapshot;
+snapshot = { ...snapshot, value: { ...snapshot.value, onDemand: false } };
+check("onDemand=false 时按钮整块不出现", renderTail([]) === null);
+snapshot = { ...snapshot, value: { ...snapshot.value, onDemand: undefined, enabled: false } };
+check("enabled=false 时按钮整块不出现", renderTail([]) === null);
+snapshot = snapshotKept;
 
 console.log(failures === 0 ? `\n全部通过（共 ${total} 项）` : `\n${failures} 项失败（共 ${total} 项）`);
 if (failures > 0) process.exitCode = 1;

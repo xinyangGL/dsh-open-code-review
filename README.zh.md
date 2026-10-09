@@ -118,7 +118,8 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 | `llm.protocol` | `"openai"` | 从属（`endpoint`） | `endpoint` 路由才用：→ `OCR_LLM_PROTOCOL`。CommandCode 的 DeepSeek v4.1 **只能**走 `openai`；Anthropic 协议端点用 `anthropic` |
 | `llm.apiKeyRef` | `COMMANDCODE_API_KEY` | 从属（`endpoint`） | `endpoint` 路由才用：→ `OCR_LLM_TOKEN`。**这里是「凭据引用」不是密钥本身**：运行时用 `ctx.credentials.resolve()` 从 DSH 凭据库/环境变量取值 |
 | `llm.apiKey` | `""` | 仅文件层 | 字面密钥（优先级高于上面的引用；不想把密钥放进 DSH 凭据库时才用，只建议写在配置文件里） |
-| `auto` | `"adaptive"` | 基础（表单键名 `autoReview`） | 自动评审开关：`off` 关闭；`adaptive` 模型在跑就 `inject`、空闲就 `followup`；`inject` 只注入上下文；`followup` 直接开新回合 |
+| `auto` | `"off"` | 基础（表单键名 `autoReview`） | 自动评审开关（v0.5.0 起出厂默认 `off`）：`off` 关闭；`adaptive` 模型在跑就 `inject`、空闲就 `followup`；`inject` 只注入上下文；`followup` 直接开新回合 |
+| `onDemand` | `true` | 基础（表单键名 `onDemand`） | 按需评审：每条已完成回合尾部的「启动代码审核」按钮 + runtime skill `ocr-on-demand-review`（用户说「验证/评审」时模型可自己发起） |
 | `autoScope` | `"workspace"` | 高级·调优 | 自动评审的范围 |
 | `autoSkipSubagents` | `true` | 高级·调优 | 子代理会话不触发自动评审 |
 | `autoMaxPerSession` | `3` | 高级·调优 | 每个会话最多自动评审几次（防「改—评—改」死循环） |
@@ -216,7 +217,18 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 在输入框敲 `/ocr-review`（可在后面跟要求，例如 `/ocr-review 只审 src/ 下的改动`）→ 插件立刻给当前会话注入一段指令，让模型调用 `ocr_review` 并按结果逐条处理（真实缺陷就改，误报说明理由）。
 
-### 自动评审
+### 按需评审（v0.5.0 起的默认方式）
+
+默认**什么都不自动跑**。你决定要评的时候有两种入口：
+
+1. **每条已完成回合尾部的「启动代码审核」按钮**（`conversation.chat.turnTail`，实现在 `lib/client.js`）。点一下等于对这个会话执行一次 `/ocr-review`；该会话有评审在跑时按钮变成「正在评审…」并禁用（天然防重复点击），失败会把原因显示在按钮旁边并可重试。宿主没有暴露 `remote.commands` 时按钮直接不出现，其余功能不受影响。
+2. **runtime skill `ocr-on-demand-review`**（`onDemand = true` 时注册）。你说「评审一下」「验证这批改动」时，模型可以自己调 `ocr_review` 并**逐条**汇报「文件 → 行 [严重程度] 问题」。`ocr_status` 会报 `onDemand` 与 `skill.registered`，可用来确认注册成功。
+
+把 `onDemand` 设为 `false`（或 `enabled = false`）就只剩模型工具与 `/ocr-review` 命令：不注册 skill、没有按钮。
+
+### 自动评审（opt-in，出厂默认已关闭）
+
+> v0.5.0 起 `auto`（设置页「自动评审」）的出厂默认是 **`off`** —— 老用户升级后不会再被自动评审打扰；想要旧行为把它改回 `adaptive`。`lib/index.js` 的两处触发点（`tools/result`、`agent/turn-stopping`）第一行就是 `if (String(cfg.auto) === "off") return;`。
 
 只要有文件写入工具成功执行（`write`/`edit`/`apply_patch` 等），且回合即将结束，插件就会：
 
@@ -285,7 +297,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 137 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 160 项）。
 
 ---
 
@@ -313,6 +325,24 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | `ocr_status` 说「本机桥没有就绪」，状态行也显示回落 | `dsh` 路由需要宿主加载了提供 `llm` 服务的插件（本机是 `llm-commandcode` / `llm-pi-ai` 之类）。缺它就自动回落 `endpoint` 路由：要么修好 profile 里的提供方插件，要么把「LLM 路由」切成 `endpoint` 填好地址与凭据引用 |
 | 设置页文案变成英文 | 界面文案走 Client locale 服务（跟随 DSH 语言）：`locale/*.json` 只放卡片标题与描述，界面文案在 `lib\client.js` 的 `TEXT_ZH`/`TEXT_EN`；没有 locale 服务或词典缺键时自动回落中文 |
 | 插件卡片没有图标 / 标题显示成包名 | 清单读取失败：确认 `package.json` 的 `icon` 是相对路径且文件存在、`exports` 含 `"./locale/*.json"`、`locale/{zh,en}.json` 有 `meta.title/description`（`node test/smoke.mjs` 会校验这几条） |
+| `DSH_OPEN_CODE_REVIEW_CONFIG` 指向的文件不存在 | v0.5.0 起不再就此停住：继续回落 `<DSH_HOME>\dsh-open-code-review.json` → 插件目录，并在 `ocr_status` 的备注里明说「指向的 … 不存在，已回落到 …」。升级前那种「静默按出厂默认跑」的情况没有了 |
+| 设置页下拉框看不清（白底白字，或深色主题下深字） | v0.5.0 已修：`<select>` / `<option>` 的颜色改用宿主主题 token（`--dsw-alias-label-primary` / `--dsw-alias-bg-layer-2` / `--dsw-alias-bg-overlay`）并按当前主题声明 `color-scheme`（跟随 `theme/change` 热更新），原生下拉弹层在深浅主题下都可读。升级后若还不对，先刷新页面 |
+| 结果里写着「审查 0 个文件，发现 N 条问题」 | v0.5.0 已修：文件数在 `files[]` 之后继续认 `total_files` / `reviewable_count`，最后回落到「问题里出现过的不同文件数」，摘要不再和问题清单自相矛盾 |
+| 桥的 token 统计自相矛盾（`total` 大于输入+输出） | 上游部分调用只报了总数：`bridge.tokens.partial` 记下这种调用次数，桥那行与 job 行会补「其中 N 次上游只报了总数」。缺失的输入/输出**不会**被编造出来 |
+| 回合尾部没有「启动代码审核」按钮 | 先看 `ocr_status` 的 `onDemand`（应为 `true`）与 `skill.registered`；按钮由宿主槽位 `conversation.chat.turnTail` + `remote.commands` 提供，宿主没暴露远端命令服务时按钮不出现（这是设计好的降级，不影响其它入口）。改过 `lib\client.js` 后要刷新页面 |
+
+### 加固（v0.5.0：按需评审 + 逐条列问题 + 配置收敛）
+
+| 现象（升级前的旧行为） | 现在 |
+| --- | --- |
+| 每轮只要有文件改动就被自动评审 | 出厂默认 `auto`（设置页「自动评审」）改成 `off`：不自动注入、不开新回合、不烧配额。要评审就点回合尾部的「启动代码审核」按钮、让模型按 `ocr-on-demand-review` 这个 skill 自己发起，或直接 `/ocr-review`。想要旧行为把「自动评审」改回 `adaptive` |
+| 结果只说「发现 N 条问题」，还得自己翻 `rawJson` 找位置 | 结果正文、job 行、投递消息都按文件分组逐条列 `- 行号或行区间 [severity] 问题（规则）`，并带上 ocr 给的 `endLine`/`column`/`rule`/`suggestion`；job 行只列前 12 条再补「其余 N 条见评审结果」 |
+| 「审查 0 个文件，发现 6 条问题」 | 文件数只认 `files[]` 时，摘要没有文件清单就会算成 0。现在依次回落 `total_files` / `reviewable_count` / 问题里出现过的文件数，不再自相矛盾 |
+| 设置页下拉框在浅色主题下白底白字、深色主题下深字 | 颜色改用宿主主题 token 并按当前主题声明 `color-scheme`（跟随 `theme/change`），原生弹层在深浅主题下都可读 |
+| `DSH_OPEN_CODE_REVIEW_CONFIG` 写错路径 → 静默按出厂默认跑 | 回落链 continue：env 不存在 → `<DSH_HOME>` → 插件目录，`ocr_status` 备注明说回落到了哪里（`__configSourceHint`）；`externalConfigPath()` 不再把 env 路径当成 home 候选 |
+| 三层配置的嵌套块（`llm` / `reviewer` / `env`）能塞进坏类型 | `mergeLayers` 改成先深合并、再 `normalizeConfig`：枚举去空白小写并校验白名单、字符串 trim、`reviewer.rounds` 1–10、数值夹进设置页同一组上下界（大于上界夹住，小于下界回落默认；`autoMaxPerSession: 0` 这种显式 0 仍合法） |
+| 桥的 token 统计 `total` ≠ 输入+输出 | `accumulateUsage` 多记一个 `partial`（上游只报总数的次数），`describe().tokens` / `ocr_review.usage` / `ocr_status` 文案与 schema 同步，缺口如实说明而不是编数字 |
+| 改配置文件后偶尔不重读 | 热读缓存键从 `mtime + size` 改成 `mtime + ctime + size`（内容变了但大小与 mtime 被保持住的情况也能发现） |
 
 ### 加固（v0.3.4：一轮针对「稳定性/健壮性」的审计与修复）
 
@@ -379,12 +409,12 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，137 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、配置分层与默认值单一来源、超时同源与上限夹取、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，160 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
-   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，74 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游」「上游流被截断要自动重试一次且不重复写内容」这四条真机事故回归）：node test/bridge-smoke.mjs
-   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，178 项断言，含会话内进度行）：node test/client-smoke.mjs
+   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，77 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游」「上游流被截断要自动重试一次且不重复写内容」这四条真机事故回归，以及 token 只报总数时的 partial 计数）：node test/bridge-smoke.mjs
+   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，206 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
    ├─ zprobe3.mjs        # schema 预检：25 个字段是否都带 volatile/description/default

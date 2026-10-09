@@ -9,6 +9,7 @@
     "LLM 默认走 dsh 路由：插件在 127.0.0.1 起一个只认随机 token 的 OpenAI 兼容小桥，把 ocr 的请求转给 DSH 的 ctx.llm.stream —— 模型 / provider / 密钥 / 配额全由 DSH 决定，下面的 baseUrl / protocol / apiKeyRef 只在 llm.mode=endpoint 时才用。",
     "llm.provider 与 llm.model 留空 = 跟随 DSH 的默认模型；换了供应商务必同步改 llm.baseUrl（地址还是出厂默认值时，ocr_status 与评审正文会点名提醒）。",
     "timeoutMinutes 同时决定 ocr 的 --timeout 和插件侧硬超时（同一个来源），并被 maxTimeoutMinutes 夹住；maxTimeoutMinutes 自身有 24 小时硬上界。",
+    "v0.5.0 起 auto 的出厂默认是 off：默认不自动评审，改成「按需」——每条已完成回合尾部有「启动代码审核」按钮，模型也能通过 runtime skill ocr-on-demand-review 自己发起。想恢复旧的自动评审就把 auto 改成 adaptive / inject / followup；onDemand=false 会同时关掉按钮与 skill。",
     "reviewer.agent=spawn（默认 off）时评审改由独立子 agent 执行：每轮起一个只读子 agent（只有 read/grep/glob），把结构化 findings 回传，改完自动开下一轮复审，直到没有问题或到 reviewer.rounds 上限。"
   ],
   "enabled": true,
@@ -37,7 +38,8 @@
     "rounds": 3,
     "persona": ""
   },
-  "auto": "adaptive",
+  "auto": "off",
+  "onDemand": true,
   "autoScope": "workspace",
   "autoSkipSubagents": true,
   "autoMaxPerSession": 3,
