@@ -5,7 +5,7 @@
  * 用法：node test/smoke.mjs [被测仓库路径]
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -513,14 +513,24 @@ check(
   String(bridgeStatus.llmEndpoint).includes("127.0.0.1") && !String(bridgeStatus.llmEndpoint).includes("api.commandcode.ai"),
   bridgeStatus.llmEndpoint,
 );
-/* ocr_status.bridge 在 schema 里声明了 10 个键（且 additionalProperties:false）：多一个键
-   宿主会在调用期拒收整个返回值——这一支以前零覆盖。 */
+/* ocr_status.bridge 在 schema 里声明的键（且 additionalProperties:false）：多一个键
+   宿主会在调用期拒收整个返回值——这一支以前零覆盖。M1（v0.4.0）给 describe() 加了
+   retrySkips/retrySkipReason/tokens 三个键，所以这里从 10 个键变成 13 个。 */
 const bridgeKeys = Object.keys(bridgeStatus.bridge ?? {}).sort().join(",");
 check(
-  "ocr_status：bridge 对象恰好是 schema 声明的 10 个键（否则宿主调用期拒收）",
-  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,requests,retries,tokenMasked,uptimeMs,url",
+  "ocr_status：bridge 对象恰好是 schema 声明的 13 个键（否则宿主调用期拒收）",
+  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,requests,retries,retrySkipReason,retrySkips,tokenMasked,tokens,uptimeMs,url",
   bridgeKeys,
 );
+{
+  const declared = tools.get("ocr_status")?.output?.schema?.properties?.bridge?.oneOf?.[0]?.properties ?? {};
+  const declaredKeys = Object.keys(declared).sort().join(",");
+  check(
+    "M1：bridge 的 schema 声明与实际返回值逐键对齐（漏声明 = 真机 additionalProperties 拒收）",
+    declaredKeys === bridgeKeys,
+    declaredKeys,
+  );
+}
 check(
   "ocr_status：bridge schema 也声明了 retries（返回值多键会被宿主拒收）",
   JSON.stringify(tools.get("ocr_status")?.output?.schema ?? null).includes("\"retries\""),
@@ -1587,6 +1597,119 @@ check(
   Boolean(hrJsonl) && Array.isArray(hrJsonl.issues),
   JSON.stringify(hrJsonl),
 );
+
+/* M1（v0.4.0）：成本可见、未重试原因、ocr 安装指引、外部配置文件。
+   这四样都来自「真跑一次才发现」的缺口：桥在丢 token、该重试却没重试、新手装不上 ocr、
+   从 GitHub 安装后改包内 config.json 会被升级覆盖 —— 工具输出里当时一个字都没有。 */
+{
+  const hintWin = cli.installHint("win32");
+  const hintNix = cli.installHint("darwin");
+  check(
+    "M1：installHint（Windows）是一份能照着做的指引（npm 包名 + 真 exe + .cmd shim 的 EINVAL 坑）",
+    hintWin.includes("@alibaba-group/open-code-review") &&
+      hintWin.includes("opencodereview.exe") &&
+      hintWin.includes(".cmd") &&
+      hintWin.includes("EINVAL") &&
+      hintWin.split("\n").length >= 5,
+    `${hintWin.split("\n").length} 行`,
+  );
+  check(
+    "M1：installHint 按平台分叉（macOS/Linux 说 which opencodereview，不提 Windows 的 .cmd 坑）",
+    hintNix.includes("which opencodereview") && !hintNix.includes("EINVAL"),
+    hintNix.split("\n")[2] ?? "",
+  );
+}
+{
+  /* 配置文件解析顺序：env DSH_OPEN_CODE_REVIEW_CONFIG > <DSH_HOME>/dsh-open-code-review.json
+     > <插件目录>/config.json。修的是真机上的隐形坑：从 GitHub（git）安装后，包内 config.json
+     落在 node_modules 里，用户改它、下次升级就被覆盖。 */
+  const dir = mkdtempSync(join(tmpdir(), "ocr-cfg-"));
+  const homeFile = join(dir, "dsh-open-code-review.json");
+  const envFile = join(dir, "custom.json");
+  writeFileSync(homeFile, JSON.stringify({ timeoutMinutes: 42 }));
+  writeFileSync(envFile, JSON.stringify({ timeoutMinutes: 7 }));
+  const beforeHome = process.env.DSH_HOME;
+  const beforeExplicit = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+  try {
+    process.env.DSH_HOME = dir;
+    delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+    const resolvedHome = cfgMod.resolveConfigFile();
+    const cfgHome = cfgMod.loadConfig();
+    process.env.DSH_OPEN_CODE_REVIEW_CONFIG = envFile;
+    const resolvedEnv = cfgMod.resolveConfigFile();
+    const cfgEnv = cfgMod.loadConfig();
+    check(
+      "M1：配置文件解析顺序 —— <DSH_HOME>/dsh-open-code-review.json 优先于插件目录，env 指定则只认它",
+      resolvedHome.source === "home" &&
+        resolvedHome.path === homeFile &&
+        cfgHome.timeoutMinutes === 42 &&
+        cfgHome.__configSource === "home" &&
+        cfgHome.__fileKeys.includes("timeoutMinutes") &&
+        resolvedEnv.source === "env" &&
+        resolvedEnv.path === envFile &&
+        cfgEnv.timeoutMinutes === 7,
+      JSON.stringify({ home: resolvedHome.source, env: resolvedEnv.source, t1: cfgHome.timeoutMinutes, t2: cfgEnv.timeoutMinutes }),
+    );
+  } finally {
+    if (beforeHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = beforeHome;
+    if (beforeExplicit === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+    else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = beforeExplicit;
+  }
+  const back = cfgMod.resolveConfigFile();
+  check(
+    "M1：撤掉 env 后回到插件目录里的 config.json；reportPath 也报得出来（没有文件时报推荐位置）",
+    (back.source === "plugin" || back.source === "none") && typeof back.path === "string" && back.path.length > 0,
+    `${back.source} ${back.path}`,
+  );
+  const sample = { _readme: "x", timeoutMinutes: 30, llm: { model: "m", baseUrl: "u" }, env: { A: "1" } };
+  check(
+    "M1：fileValuePaths 把 llm/env 这类对象展开成点号路径、跳过 _ 注释、排序稳定",
+    JSON.stringify(cfgMod.fileValuePaths(sample)) === JSON.stringify(["env.A", "llm.baseUrl", "llm.model", "timeoutMinutes"]),
+    JSON.stringify(cfgMod.fileValuePaths(sample)),
+  );
+}
+{
+  const statusForM1 = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+  check(
+    "M1：ocr_status 报出配置文件的来源与「文件层实际设了哪些键」，installHint 字段恒在（找不到 ocr 时才有内容）",
+    typeof statusForM1.configPath === "string" &&
+      statusForM1.configPath.length > 0 &&
+      ["env", "home", "plugin", "none"].includes(statusForM1.configSource) &&
+      Array.isArray(statusForM1.fileValues) &&
+      typeof statusForM1.installHint === "string",
+    `${statusForM1.configSource} · ${statusForM1.configPath} · fileValues=${JSON.stringify(statusForM1.fileValues)}`,
+  );
+  check(
+    "M1：来源是插件目录时，notes 里提醒「git 安装后会随升级被覆盖」并给出推荐路径",
+    statusForM1.configSource !== "plugin" ||
+      statusForM1.notes.some((line) => line.includes("node_modules") && line.includes("dsh-open-code-review.json")),
+    String(statusForM1.notes.find((line) => line.includes("node_modules")) ?? "").slice(0, 120),
+  );
+}
+{
+  const reviewSchema = tools.get("ocr_review")?.output?.schema ?? {};
+  const usageSchema = reviewSchema?.properties?.usage ?? null;
+  check(
+    "M1：ocr_review 的返回值声明了 usage（四个数字键），且不在 required 里（endpoint 路由没有桥数据时不写）",
+    Boolean(usageSchema) &&
+      Object.keys(usageSchema.properties ?? {}).sort().join(",") === "completion_tokens,prompt_tokens,requests,total_tokens" &&
+      !(reviewSchema.required ?? []).includes("usage"),
+    JSON.stringify(usageSchema).slice(0, 200),
+  );
+  const statusSchema = tools.get("ocr_status")?.output?.schema ?? {};
+  const bridgeDecl = JSON.stringify(statusSchema?.properties?.bridge ?? null);
+  check(
+    "M1：ocr_status 的 bridge schema 声明了 tokens / retrySkips / retrySkipReason（返回值多键会被宿主拒收）",
+    bridgeDecl.includes("\"tokens\"") && bridgeDecl.includes("\"retrySkips\"") && bridgeDecl.includes("\"retrySkipReason\""),
+    bridgeDecl.slice(0, 120),
+  );
+  check(
+    "M1：ocr_status 的 schema 声明了 configPath / configSource / fileValues / installHint",
+    ["configPath", "configSource", "fileValues", "installHint"].every((key) => Boolean(statusSchema?.properties?.[key])),
+    Object.keys(statusSchema.properties ?? {}).join(","),
+  );
+}
 
 /* ------------------------------------------------------------------ 汇总 */
 

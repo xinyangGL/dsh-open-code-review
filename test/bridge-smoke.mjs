@@ -8,8 +8,10 @@ import {
   BRIDGE_COMPLETIONS_PATH,
   CLOSE_GRACE_MS,
   MAX_BODY_BYTES,
+  accumulateUsage,
   bearerTokenOf,
   bridgeFailureNote,
+  classifyUpstreamFailure,
   createAccumulator,
   isRetryableUpstreamFailure,
   openAiStreamFrames,
@@ -554,6 +556,64 @@ try {
 check("桥：close() 之后端口关掉、请求失败", closed === true);
 
 for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge, retryBridge, noRetryBridge, retryStreamBridge]) await bridge.close();
+
+/* M1（v0.4.0）：重试闸门的三分支 + token 累计 + 「没重试」的原因。
+   真机踩过的坑：v0.3.7 把 kind==="aborted" 摆在判定最前面，于是上游标成 aborted 的
+   「流被截断」被当成「我方主动中止」，自动重试一次都没发生（真机三次长评审 retries 恒为 0），
+   用户只能看到 ocr 那句通用的「check your LLM configuration and API key」。 */
+{
+  const self = classifyUpstreamFailure({ kind: "aborted", code: "aborted", message: "客户端断开，桥已取消上游调用" });
+  const truncated = classifyUpstreamFailure({
+    kind: "aborted",
+    code: "aborted",
+    message: "OpenAI Responses stream ended before a terminal response event",
+  });
+  const rateLimited = classifyUpstreamFailure({ kind: "error", code: "x", message: "上游 429 rate limit exceeded" });
+  const unknown = classifyUpstreamFailure({ kind: "aborted", code: "aborted", message: "莫名其妙地结束了" });
+  check(
+    "桥（M1）：classifyUpstreamFailure 三分支 —— 我方中止不重试 / 瞬时故障重试 / aborted 但文本不认识也不重试并给原因",
+    self.retryable === false &&
+      self.reason.includes("我方主动中止") &&
+      truncated.retryable === true &&
+      rateLimited.retryable === true &&
+      unknown.retryable === false &&
+      unknown.reason.includes("不在已知的瞬时故障列表") &&
+      classifyUpstreamFailure(null).retryable === false,
+    JSON.stringify({ self, truncated, unknown }),
+  );
+}
+{
+  const totals = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  accumulateUsage(totals, { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 });
+  // 字符串 / 负数 / NaN / Infinity / undefined / null 一律不认（宁可少算，也不能把总数弄成 NaN）。
+  accumulateUsage(totals, { prompt_tokens: "5", completion_tokens: -2, total_tokens: -5 });
+  accumulateUsage(totals, { prompt_tokens: Number.NaN, completion_tokens: Number.POSITIVE_INFINITY, total_tokens: undefined });
+  accumulateUsage(totals, null);
+  const fromScratch = accumulateUsage(undefined, { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 });
+  check(
+    "桥（M1）：accumulateUsage 只累加正有限数（字符串/负数/NaN/Infinity 都不污染总数，缺字段按 0）",
+    totals.prompt_tokens === 7 &&
+      totals.completion_tokens === 3 &&
+      totals.total_tokens === 10 &&
+      fromScratch.total_tokens === 3,
+    JSON.stringify(totals),
+  );
+}
+{
+  const skipped = bridgeFailureNote({
+    requests: 5,
+    failed: 2,
+    retries: 0,
+    retrySkips: 2,
+    retrySkipReason: "客户端已断开或桥已超时",
+    lastError: "OpenAI Responses stream ended before a terminal response event",
+  });
+  check(
+    "桥（M1）：bridgeFailureNote 在「该重试却没重试」时给出次数与原因（否则用户只看到 ocr 的通用提示）",
+    typeof skipped === "string" && skipped.includes("未自动重试 2 次") && skipped.includes("客户端已断开或桥已超时"),
+    String(skipped),
+  );
+}
 
 /* ------------------------------------------------------------------ 汇总 */
 
