@@ -9,7 +9,7 @@ import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertToolSchemas, schemaViolations } from "./schema-subset.mjs";
+import { assertToolPayload, assertToolSchemas, payloadViolations, schemaViolations } from "./schema-subset.mjs";
 
 const REPO = process.argv[2] ?? "C:\\Users\\吴礼凯\\.dsh\\tmp-ocr-test";
 const results = [];
@@ -154,6 +154,19 @@ function makeCtx(overrides = {}) {
         // 违反就抛 JsonSchemaError，让整个插件 fiber 加载失败（v0.3.0 就这么炸过一次）。
         // 这里照同一套规则校验，免得只有真人重启 DSH 才暴露。
         assertToolSchemas(definition.name, definition);
+        // 宿主在**调用期**还会拿 output.schema 校验 execute 的返回值（多一个未声明字段就报
+        // `"value.aborted" is not a declared property`），所以这里也把 execute 包一层。
+        const schema = definition?.output?.schema;
+        const execute = definition?.execute;
+        if (schema && typeof execute === "function") {
+          const wrapped = { ...definition };
+          wrapped.execute = async (...args) => {
+            const value = await execute.apply(wrapped, args);
+            assertToolPayload(definition.name, schema, value);
+            return value;
+          };
+          definition = wrapped;
+        }
         tools.set(definition.name, definition);
         return () => tools.delete(definition.name);
       },
@@ -323,6 +336,39 @@ ctx.jobs = progressRegistry;
 mod.apply(ctx, schemaRefs);
 check("注册了 ocr_review / ocr_status / ocr-review", tools.has("ocr_review") && tools.has("ocr_status") && commands.has("ocr-review"), [...tools.keys()].join(","));
 check("工具声明了 output.schema + render", typeof tools.get("ocr_review").output?.render === "function" && tools.get("ocr_review").output.schema?.type === "object");
+
+/* 调用期的第二道关卡（宿主拿 output.schema 校验 execute 的返回值）：makeCtx 的 register 已经把
+   execute 包了一层（见上面 tools.register），所以本文件里每一次工具调用都真的被校验过。
+   v0.3.1 真机上暴露的 `"value.aborted" is not a declared property` 就是这么被抓出来的。 */
+const payloadSelfCheck = {
+  extra: payloadViolations(
+    { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
+    { ok: true, aborted: true },
+    "value",
+  ),
+  missing: payloadViolations({ type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] }, {}, "value"),
+  wrongType: payloadViolations({ type: "object", properties: { ok: { type: "boolean" } } }, { ok: "yes" }, "value"),
+  nullable: payloadViolations(
+    {
+      type: "object",
+      properties: {
+        bridge: { oneOf: [{ type: "object", properties: { url: { type: "string" } }, required: ["url"], additionalProperties: false }, { type: "null" }] },
+        files: { type: "array", items: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false } },
+      },
+      required: ["bridge"],
+    },
+    { bridge: null, files: [{ path: "a.js" }] },
+    "value",
+  ),
+};
+check(
+  "返回值校验器自检：未声明字段 / 缺必填 / 类型不符能抓出来，oneOf 可空与数组元素不误报",
+  payloadSelfCheck.extra.includes('"value.aborted" is not a declared property (additionalProperties: false)') &&
+    payloadSelfCheck.missing.includes("value.ok is required") &&
+    payloadSelfCheck.wrongType.includes("value.ok must be a boolean, got string") &&
+    payloadSelfCheck.nullable.length === 0,
+  `extra=${payloadSelfCheck.extra.length} missing=${payloadSelfCheck.missing.join("|")} type=${payloadSelfCheck.wrongType.join("|")} nullable=${payloadSelfCheck.nullable.length}`,
+);
 
 /* ------------------------------- 注册的工具 schema 必须属于 DSH 支持的子集 */
 /* v0.3.0 的教训：ocr_status 的 output.schema 里 `bridge: { type: ["object","null"] }`

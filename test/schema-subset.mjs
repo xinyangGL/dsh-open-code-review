@@ -194,6 +194,100 @@ export function schemaViolations(schema, rootPath = "schema") {
   return violations;
 }
 
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null || typeof a !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((entry, index) => deepEqual(entry, b[index]));
+  }
+  const left = Object.keys(a);
+  const right = Object.keys(b);
+  return left.length === right.length && left.every((key) => Object.hasOwn(b, key) && deepEqual(a[key], b[key]));
+}
+
+/** 递归比对「值」与「schema」，把不符之处写进 out。 */
+function collectPayloadViolations(schema, value, path, out) {
+  if (!isRecord(schema)) return;
+  if (Object.hasOwn(schema, "const") && !deepEqual(value, schema.const)) {
+    out.push(`${path} must equal ${JSON.stringify(schema.const)}`);
+    return;
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((entry) => deepEqual(entry, value))) {
+    out.push(`${path} must be one of ${JSON.stringify(schema.enum)}`);
+    return;
+  }
+  if (Array.isArray(schema.oneOf)) {
+    const buckets = schema.oneOf.map((branch) => {
+      const bucket = [];
+      collectPayloadViolations(branch, value, path, bucket);
+      return bucket;
+    });
+    if (!buckets.some((bucket) => bucket.length === 0)) {
+      out.push(`${path} matches no oneOf branch (${buckets.map((bucket) => bucket[0]).join(" / ")})`);
+    }
+    return;
+  }
+  if (value === undefined) return;
+  const type = schema.type;
+  if (type === "object") {
+    if (!isRecord(value)) {
+      out.push(`${path} must be an object`);
+      return;
+    }
+    const declared = isRecord(schema.properties) ? schema.properties : {};
+    for (const key of Array.isArray(schema.required) ? schema.required : []) {
+      if (!Object.hasOwn(value, key)) out.push(`${path}.${key} is required`);
+    }
+    for (const [key, entry] of Object.entries(value)) {
+      if (Object.hasOwn(declared, key)) {
+        collectPayloadViolations(declared[key], entry, `${path}.${key}`, out);
+        continue;
+      }
+      // 宿主原文：`"value.aborted" is not a declared property (additionalProperties: false)`。
+      if (schema.additionalProperties === false) out.push(`"${path}.${key}" is not a declared property (additionalProperties: false)`);
+    }
+    return;
+  }
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      out.push(`${path} must be an array`);
+      return;
+    }
+    if (isRecord(schema.items)) {
+      value.forEach((entry, index) => collectPayloadViolations(schema.items, entry, `${path}[${index}]`, out));
+    }
+    return;
+  }
+  if (typeof type === "string" && !scalarMatches(type, value)) {
+    out.push(`${path} must be a ${type}, got ${Array.isArray(value) ? "array" : typeof value}`);
+  }
+}
+
+/**
+ * 收集「返回值」与 schema 的不符之处（空数组 = 宿主会接受）。
+ *
+ * 宿主不只在 register 时检查 schema，**调用期还会用 output.schema 校验 execute 的返回值**：
+ * 顶层 `additionalProperties: false` 时多一个字段（例如 `aborted`）就会报
+ * `tool "ocr_review" returned invalid output: "value.aborted" is not a declared property`。
+ * @param {unknown} schema 工具的 output.schema。
+ * @param {unknown} value execute 的返回值。
+ * @param {string} [rootPath] 报错前缀（宿主叫 `value`，默认一致）。
+ * @returns {string[]} 违规说明。
+ */
+export function payloadViolations(schema, value, rootPath = "value") {
+  const out = [];
+  collectPayloadViolations(schema, value, rootPath, out);
+  return out;
+}
+
+/** 返回值不符就抛。 */
+export function assertToolPayload(label, schema, value) {
+  const problems = payloadViolations(schema, value, `${label}.value`);
+  if (problems.length > 0) {
+    throw new Error(`tool 返回值不符合 output.schema（宿主会拒收）：\n  - ${problems.join("\n  - ")}`);
+  }
+}
+
 /** 违规就抛，信息里带上工具名与路径，方便定位。 */
 export function assertToolSchemas(label, definition) {
   if (definition === null || definition === undefined || typeof definition !== "object") return;
