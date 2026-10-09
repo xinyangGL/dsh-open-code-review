@@ -181,6 +181,8 @@ function makeCtx(overrides = {}) {
     injectCalls: [],
     slotInjectCalls: [],
     getCalls: [],
+    effectCalls: [],
+    localeRegistrations: [],
     registrations, /* 默认写进主夹具的注册表 */
     /* cordis 的服务守卫拦下属性访问时的兜底读取口（ReflectService.get）。 */
     get(name) {
@@ -190,6 +192,21 @@ function makeCtx(overrides = {}) {
     inject(deps, cb) {
       ctx.injectCalls.push(deps);
       return cb(ctx);
+    },
+    /* 注册类动作都要走 ctx.effect（随 fiber 销毁自动撤销）：立刻执行并记下标签。 */
+    effect(cb, label) {
+      ctx.effectCalls.push(label);
+      return cb();
+    },
+    /* locale 是可选服务：默认桩的 bind 对未知词条返回键名，这样 makeT 会退回内联 zh 文案。 */
+    locale: {
+      register(ns, pairs) {
+        ctx.localeRegistrations.push({ ns, pairs });
+        return () => {};
+      },
+      bind(ns) {
+        return (key) => (Object.prototype.hasOwnProperty.call(ctx.localeTexts || {}, key) ? ctx.localeTexts[key] : key);
+      },
     },
     slots: {
       inject(name, cb) {
@@ -236,6 +253,22 @@ check(
   fakeCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("remote") && d.includes("remote.session")),
   JSON.stringify(fakeCtx.injectCalls),
 );
+check(
+  "apply 为文案单独声明 locale 子注入",
+  fakeCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("locale")),
+  JSON.stringify(fakeCtx.injectCalls),
+);
+
+/* 可见文案必须注册进 Client locale 服务（references/ui-plugin.md 的硬要求）。 */
+const localeReg = fakeCtx.localeRegistrations.find((r) => r.ns === "dsh-open-code-review") || { pairs: null };
+const zhDict = (localeReg.pairs && localeReg.pairs.zh) || {};
+const enDict = (localeReg.pairs && localeReg.pairs.en) || {};
+check("locale 服务收到本插件的词典（zh + en）", Boolean(localeReg.pairs && zhDict && enDict));
+check("文案注册走 ctx.effect（随 fiber 撤销）", fakeCtx.effectCalls.some((l) => typeof l === "string" && l.includes("文案")), JSON.stringify(fakeCtx.effectCalls));
+check("zh 词典含生成的字段文案", String(zhDict["field.llmModel.hint"] || "").includes("候选来自 DSH 自己的模型目录"), String(zhDict["field.llmModel.hint"]).slice(0, 60));
+check("zh 词典含选项文案与分组名", String(zhDict["choice.llmMode.dsh"] || "").startsWith("dsh —") && zhDict["group.llm"] === "LLM 路由（ocr 引擎）", JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.llm"]]));
+check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
+check("两个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
 const reg = registrations.find((r) => r.options.name === "plugins.bundle.config") || { options: {}, component: () => null };
 const sectionReg = registrations.find((r) => r.options.name === "settings.section") || { options: {}, component: () => null };
 check("key = 包名", reg.options.key === "dsh-open-code-review", String(reg.options.key));
@@ -297,8 +330,12 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-for (const label of ["总开关", "默认引擎", "输出受众", "ocr 可执行文件", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔（毫秒）", "跳过子代理会话", "委派时带 diff", "端点 Base URL", "端点协议", "模型名", "API Key 引用", "单次超时（分钟）", "调试日志"]) {
+for (const label of ["总开关", "默认引擎", "输出受众", "ocr 可执行文件", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔（毫秒）", "跳过子代理会话", "委派时带 diff", "LLM 路由", "模型名", "提供方（provider）", "单次超时（分钟）", "调试日志"]) {
   check(`渲染字段「${label}」`, html.includes(label));
+}
+/* dsh 模式（默认）不需要地址与 key：静态端点那三行不该出现 */
+for (const label of ["端点 Base URL", "端点协议", "API Key 引用"]) {
+  check(`dsh 模式不渲染「${label}」`, !html.includes(label));
 }
 check("带出条目 id", html.includes("include:dsh-open-code-review"));
 check("状态行含 ready/可写", html.includes("状态 ready") && html.includes("可写"));
@@ -324,14 +361,29 @@ function controlRows(node, out = []) {
   return out;
 }
 const rows = controlRows(tree);
-check("找到 17 个控件行", rows.length === 17, `n=${rows.length}`);
+check("dsh 模式下 16 个控件行（静态端点三行不渲染）", rows.length === 16, `n=${rows.length}`);
+
+const modeRow = rows.find((r) => r.key === "llmMode");
+check("找到 LLM 路由行", Boolean(modeRow) && modeRow.field.tag === "select");
+check("LLM 路由行只给 dsh / endpoint 两个选项", Boolean(modeRow) && hosts(modeRow.row).filter((n) => n.tag === "option").length === 2);
+check("dsh 模式下有 provider 行", rows.some((r) => r.key === "llmProvider"));
+check("dsh 模式下没有 Base URL 行", !rows.some((r) => r.field.props.value === "https://api.commandcode.ai/provider/v1"));
+check("dsh 模式状态行说明走本机桥", html.includes("LLM 走 DSH 本机桥"));
 
 const modelRow = rows.find((r) => r.field.props.value === "deepseek/deepseek-v4.1-flash");
 check("改动前该行没有「保存」", Boolean(modelRow) && !modelRow.buttons.some((b) => textOf(b) === "保存"));
 check("每行都有「恢复默认」", rows.every((r) => r.buttons.some((b) => textOf(b) === "恢复默认")));
 
-const urlRow = rows.find((r) => r.field.props.value === "https://api.commandcode.ai/provider/v1");
-check("找到 Base URL 行", Boolean(urlRow));
+/* 切到 endpoint：静态端点三行出现、provider 行消失（直连的老行为） */
+modeRow.field.props.onChange({ target: { value: "endpoint" } });
+const endpointTree = render();
+const endpointRows = controlRows(endpointTree);
+check("endpoint 模式下 18 个控件行", endpointRows.length === 18, `n=${endpointRows.length}`);
+check("endpoint 模式下藏掉 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
+check("endpoint 模式状态行说明直连", textOf(endpointTree).includes("LLM 直连静态端点"));
+
+const urlRow = endpointRows.find((r) => r.field.props.value === "https://api.commandcode.ai/provider/v1");
+check("endpoint 模式下找到 Base URL 行", Boolean(urlRow));
 urlRow.field.props.onChange({ target: { value: "https://example.test/v1" } });
 const urlRow2 = controlRows(render()).find((r) => r.field.props.value === "https://example.test/v1");
 check("改动后草稿生效", Boolean(urlRow2));
@@ -341,6 +393,10 @@ if (save2) {
   await save2.props.onClick();
   check("保存调用 form.set(Base URL)", writes.some((w) => w.op === "set" && w.key === "llmBaseUrl" && w.value === "https://example.test/v1"), JSON.stringify(writes));
 }
+
+/* 切回 dsh：后面几段按 dsh 模式的 16 行断言 */
+controlRows(render()).find((r) => r.key === "llmMode").field.props.onChange({ target: { value: "dsh" } });
+render();
 
 const maxRow = controlRows(render()).find((r) => r.field.props.type === "number" && r.field.props.value === "3");
 check("找到数字字段行", Boolean(maxRow));
@@ -419,6 +475,16 @@ check("选中后出现「保存」", Boolean(saveModel));
 if (saveModel) {
   await saveModel.props.onClick();
   check("保存模型名调用 form.set(llmModel)", writes.some((w) => w.op === "set" && w.key === "llmModel" && w.value === "glm-5.3-flashx"), JSON.stringify(writes.slice(-2)));
+}
+
+/* dsh 路由要 provider：选中候选顺手把它写进 llm.provider */
+const provRow = controlRows(render()).find((r) => r.key === "llmProvider");
+check("选中候选后 provider 行带出该提供方", Boolean(provRow) && provRow.field.props.value === "commandcode", provRow ? String(provRow.field.props.value) : "没有该行");
+const saveProv = provRow && provRow.buttons.find((b) => textOf(b) === "保存");
+check("provider 行随即出现「保存」", Boolean(saveProv));
+if (saveProv) {
+  await saveProv.props.onClick();
+  check("保存 provider 调用 form.set(llmProvider)", writes.some((w) => w.op === "set" && w.key === "llmProvider" && w.value === "commandcode"), JSON.stringify(writes.slice(-3)));
 }
 
 /* 键盘：输入过滤成唯一匹配后回车选中 */
@@ -516,7 +582,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 /* 条目 id 回退：主 id 查不到时用备用 id */
 fakeCtx.rejectIds = ["include:dsh-open-code-review"];
 const fbTree = render();
-check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 17, JSON.stringify(fakeCtx.formIds.slice(-2)));
+check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 16, JSON.stringify(fakeCtx.formIds.slice(-2)));
 check("回退后字段仍可编辑", controlRows(fbTree).every((r) => r.field.props.disabled !== true));
 
 /* 两个 id 都查不到：给出诊断而不是崩掉 */
@@ -531,7 +597,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 const sectionTree = expand(miniReact.createElement(sectionReg.component, {}));
 const sectionHtml = textOf(sectionTree);
 check("设置页渲染标题", sectionHtml.includes("代码评审（阿里 OpenCodeReview）"));
-check("设置页也带 17 个控件行", controlRows(sectionTree).length === 17, `n=${controlRows(sectionTree).length}`);
+check("设置页也带 16 个控件行", controlRows(sectionTree).length === 16, `n=${controlRows(sectionTree).length}`);
 check("设置页照样带出条目 id", sectionHtml.includes("include:dsh-open-code-review"));
 
 /* ------------------------------------------------------------ 宿主没有 Remote 桥 */
@@ -627,6 +693,40 @@ check(
   "服务迟到、子 fiber 激活后订阅刷新成官方读法的目录",
   Boolean(afterLate) && textOf(afterLate).includes("1 个模型") && !textOf(afterLate).includes("4 个模型"),
   afterLate ? textOf(afterLate).slice(-160) : "没有 cell",
+);
+
+/* ------------------------------------------------------------ locale 服务给英文词典 */
+
+/* 宿主语言是英文时，插件文案必须跟着走（词典由上面的 localeReg 取，证明用的是注册的那一份）。 */
+const enCtx = makeCtx({
+  registrations: [],
+  form: fakeCtx.form,
+  locale: {
+    register(ns, pairs) {
+      enCtx.localeRegistrations.push({ ns, pairs });
+      return () => {};
+    },
+    bind: () => (key) => (Object.prototype.hasOwnProperty.call(enDict, key) ? enDict[key] : key),
+  },
+});
+plugin.apply(enCtx);
+const enCell = enCtx.registrations.find((r) => r.options.name === "settings.section");
+const enTree = enCell ? await bareRender(enCell) : null;
+const enHtml = enTree ? textOf(enTree) : "";
+check(
+  "英文词典下页面渲染英文标题与标签",
+  enHtml.includes("Code review (Alibaba OpenCodeReview)") &&
+    enHtml.includes("Model") &&
+    (enHtml.includes("Save changes") || enHtml.includes("Save all changes")),
+  enHtml.slice(0, 220),
+);
+check(
+  "英文词典下状态行、分组标题与按钮也是英文",
+  enHtml.includes("LLM through the DSH local bridge") &&
+    enHtml.includes("LLM routing (ocr engine)") &&
+    enHtml.includes("Auto review") &&
+    enHtml.includes("Reset everything"),
+  enHtml.slice(0, 300),
 );
 
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);

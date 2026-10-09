@@ -5,7 +5,7 @@
  * 用法：node test/smoke.mjs [被测仓库路径]
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,8 +86,37 @@ const listeners = new Map();
 const credentialStub = { ref: "", value: "" };
 const resolvedRefs = [];
 
-function makeCtx() {
+/** 假的 llm 服务：脚本化吐 chunk，并记录每次收到的 options（用来验证本机桥的翻译）。 */
+function fakeLlmService(script) {
+  const calls = [];
   return {
+    calls,
+    async *stream(options) {
+      calls.push(options);
+      const chunks = typeof script === "function" ? script(options, calls.length) : script;
+      for (const chunk of chunks) yield chunk;
+    },
+  };
+}
+
+function makeCtx(overrides = {}) {
+  /** ctx.effect / ctx.inject 的替身：effect 立刻执行并记住清理函数，inject 只在服务齐全时回调。 */
+  const effects = [];
+  const ctx = {
+    effects,
+    effect(callback, label) {
+      const dispose = callback();
+      effects.push({ label, dispose });
+      return () => {
+        if (typeof dispose === "function") dispose();
+      };
+    },
+    inject(deps, callback) {
+      const list = Array.isArray(deps) ? deps : [deps];
+      const missing = list.filter((key) => ctx[key] === undefined || ctx[key] === null);
+      if (missing.length > 0) return undefined;
+      return callback(ctx);
+    },
     subprocess: {
       async resolveExecutable(cmd) {
         const found = which(cmd);
@@ -126,6 +155,8 @@ function makeCtx() {
       },
     },
   };
+  if (overrides.llm) ctx.llm = overrides.llm;
+  return ctx;
 }
 
 function emit(name, ...args) {
@@ -154,6 +185,47 @@ const cli = await import(new URL("../lib/ocr-cli.js", import.meta.url));
 const cfgMod = await import(new URL("../lib/config.js", import.meta.url));
 
 check("模块导出 name/inject/apply", mod.name === "dsh-open-code-review" && Array.isArray(mod.inject) && typeof mod.apply === "function", `inject=${JSON.stringify(mod.inject)}`);
+
+/* ------------------------------------------------------------ 清单（Plugin Manager 展示） */
+
+/* 卡片/详情/设置清单不加载插件也要可读：图标与展示文案来自清单本身
+   （references/host-plugin.md：icon 是相对路径、≤256KiB；标题与描述在 locale/<lang>.json 的 meta）。 */
+const pluginDir = fileURLToPath(new URL("..", import.meta.url));
+const pkg = JSON.parse(readFileSync(join(pluginDir, "package.json"), "utf8"));
+const iconPath = typeof pkg.icon === "string" ? join(pluginDir, pkg.icon) : "";
+check(
+  "清单声明了图标且文件存在（相对路径、≤256KiB）",
+  Boolean(iconPath) && pkg.icon.startsWith("./") && existsSync(iconPath) && statSync(iconPath).size <= 256 * 1024,
+  `icon=${pkg.icon}`
+);
+check(
+  "exports/files 覆盖 package.json 与 locale",
+  Boolean(pkg.exports?.["./package.json"]) &&
+    Boolean(pkg.exports?.["./locale/*.json"]) &&
+    Array.isArray(pkg.files) &&
+    pkg.files.includes("locale/*.json") &&
+    pkg.files.includes("icon.svg"),
+  JSON.stringify({ exports: Object.keys(pkg.exports ?? {}), files: pkg.files }),
+);
+const localeMeta = (file) => {
+  try {
+    return JSON.parse(readFileSync(join(pluginDir, "locale", file), "utf8"));
+  } catch {
+    return null;
+  }
+};
+const zhMeta = localeMeta("zh.json");
+const enMeta = localeMeta("en.json");
+check(
+  "locale/{zh,en}.json 带 meta.title/description",
+  Boolean(zhMeta?.meta?.title && zhMeta?.meta?.description && enMeta?.meta?.title && enMeta?.meta?.description),
+  `zh=${zhMeta?.meta?.title} en=${enMeta?.meta?.title}`
+);
+check(
+  "dsh.client 声明 platform/immediately/inject",
+  pkg.dsh?.client?.platform === "web" && pkg.dsh?.client?.immediately === true && Array.isArray(pkg.dsh?.client?.inject),
+  JSON.stringify(pkg.dsh?.client),
+);
 
 const env = cli.buildEnv({ llm: { baseUrl: "https://api.deepseek.com", protocol: "openai", apiKey: "sk-test", model: "deepseek-chat" }, env: { FOO: "bar" } });
 check(
@@ -306,6 +378,92 @@ check("enabled=false：/ocr-review 返回错误", offCmd?.kind === "error" && St
 
 const offStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
 check("enabled=false：ocr_status 仍可用于诊断", offStatus.ok === true && offStatus.enabled === false, `enabled=${offStatus.enabled} ref=${offStatus.credentialRef}`);
+
+/* ------------------------------------------------ dsh 路由：ocr ⇄ 本机桥 ⇄ ctx.llm.stream */
+
+const llmStub = fakeLlmService((options) => {
+  const last = options.messages.at(-1);
+  // 第 1 跳让它调工具（ocr llm test 会验证工具往返），第 2 跳（带 role=tool）才给正文。
+  if (last && last.role === "tool") {
+    return [{ type: "text-delta", index: 0, text: "pong" }, { type: "finish", reason: { kind: "stop" } }];
+  }
+  return [
+    { type: "tool-call-delta", index: 0, id: "call_smoke", name: "ocr_selftest", argumentsDelta: '{"note":"smoke"}' },
+    { type: "finish", reason: { kind: "stop" } },
+  ];
+});
+const bridgeCtx = makeCtx({ llm: llmStub });
+mod.apply(bridgeCtx, cfgMod.Config({ llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash" }));
+await new Promise((resolve) => setTimeout(resolve, 150)); // 等桥 listen 完成（startLlmBridge 是异步的）
+
+const bridgeStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "dsh 路由：宿主有 llm 服务时桥自动就绪（只监听 127.0.0.1）",
+  bridgeStatus.llmMode === "dsh" && Boolean(bridgeStatus.bridge) && String(bridgeStatus.bridge.url).startsWith("http://127.0.0.1:"),
+  `mode=${bridgeStatus.llmMode} bridge=${JSON.stringify(bridgeStatus.bridge)}`,
+);
+check(
+  "dsh 路由：LLM 端点指向本机桥，不再指向 api.commandcode.ai",
+  String(bridgeStatus.llmEndpoint).includes("127.0.0.1") && !String(bridgeStatus.llmEndpoint).includes("api.commandcode.ai"),
+  bridgeStatus.llmEndpoint,
+);
+check(
+  "dsh 路由：凭据由 DSH 提供（不再解析 llmApiKeyRef）",
+  String(bridgeStatus.credentialSource).includes("由 DSH 提供") && String(bridgeStatus.credentialRef).includes("dsh 模式不需要"),
+  `${bridgeStatus.credentialRef} → ${bridgeStatus.credentialSource}`,
+);
+check(
+  "dsh 路由：子进程只拿到桥的 URL 与打码 token",
+  bridgeStatus.llmEnv.some((line) => line.startsWith("OCR_LLM_URL=http://127.0.0.1:")) && bridgeStatus.llmEnv.includes("OCR_LLM_TOKEN=***"),
+  JSON.stringify(bridgeStatus.llmEnv),
+);
+
+const badAuth = await fetch(bridgeStatus.bridge.url + "/chat/completions", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: "Bearer not-the-token" },
+  body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+});
+check("dsh 路由：桥校验随机 token（错 token → 401）", badAuth.status === 401, String(badAuth.status));
+
+if (which("ocr")) {
+  // 真端到端：插件 → ocr 子进程（OCR_LLM_* 指向桥）→ 桥 → 假 llm 服务。
+  const live = await tools.get("ocr_status").execute({}, exec);
+  check(
+    "dsh 路由：真 ocr llm test 经桥打通（含工具往返）",
+    String(live.llmTest).startsWith("可用") && String(live.llmTest).includes("Tool-call round trip verified"),
+    String(live.llmTest).slice(0, 200),
+  );
+  check("dsh 路由：桥的请求打进 ctx.llm.stream（两跳：工具 + 正文）", llmStub.calls.length === 2 && llmStub.calls[0].provider === "commandcode", `calls=${llmStub.calls.length} provider=${llmStub.calls[0]?.provider}`);
+  check(
+    "dsh 路由：第 2 跳把 role=tool 翻成 DSH 的 tool 消息",
+    llmStub.calls[1]?.messages?.some((message) => message.role === "tool" && message.toolCallId === "call_smoke"),
+    JSON.stringify((llmStub.calls[1]?.messages ?? []).map((message) => message.role)),
+  );
+  check(
+    "dsh 路由：桥的 stats 计入 ocr_status 的探测请求（并记下那次故意打错的 token）",
+    Number(live.bridge?.requests ?? 0) >= 2 && Number(live.bridge?.failed ?? 0) === 1 && String(live.bridge?.lastModel).length > 0,
+    JSON.stringify(live.bridge),
+  );
+} else {
+  log("本机没有 ocr，跳过 dsh 路由的真端到端断言");
+}
+
+// 关掉插件（模拟插件卸载/服务消失）：桥必须一起关，端口不泄漏。
+for (const entry of bridgeCtx.effects) {
+  if (typeof entry.dispose === "function") entry.dispose();
+}
+await new Promise((resolve) => setTimeout(resolve, 50));
+let bridgeClosed = false;
+try {
+  await fetch(bridgeStatus.bridge.url + "/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer not-the-token" },
+    body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] }),
+  });
+} catch {
+  bridgeClosed = true;
+}
+check("dsh 路由：ctx.effect 清理后桥随之关闭（端口不泄漏）", bridgeClosed === true);
 
 /* ------------------------------------------------------------------ 汇总 */
 

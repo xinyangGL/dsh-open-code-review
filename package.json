@@ -13,6 +13,7 @@
   ],
   "type": "module",
   "main": "lib/index.js",
+  "icon": "./icon.svg",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -20,12 +21,15 @@
     "./test/*": "./test/*",
     "./config.json": "./config.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "cordis.patch.yml",
     "config.json",
+    "locale/*.json",
+    "icon.svg",
     "README.md"
   ],
   "dsh": {
@@ -33,10 +37,11 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
+      "platform": "web",
+      "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings"
-      ],
-      "platform": "web"
+      ]
     }
   },
   "license": "MIT"
