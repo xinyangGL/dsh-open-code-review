@@ -259,7 +259,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 125 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 126 项）。
 
 ---
 
@@ -324,6 +324,16 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | `endpoint` 模式下换了供应商却忘改地址 → 凭据被发到出厂那个第三方地址 | `ocr_status` 与评审正文的「LLM 端点」行在地址仍等于出厂默认值时点名：`…（出厂默认地址，换供应商时记得同步改 llm.baseUrl，否则凭据会发到旧地址）`（`endpointDisplay()`） |
 | `mergeLayers` 的注释宣称设置页也能给 `env`/`extraArgs`/`ocrCandidates` | 注释改成实际情况：这三个键不在设置页 schema 里，生产路径上 patch 侧只有 `llm`/`reviewer`/开关类字段；`[]` 与 `undefined` 无法区分，所以空数组 = 显式清空 |
 
+### 加固（v0.3.7：真机「上游流被截断 → 整份扫描白跑」）
+
+v0.3.6 上线后的第一次真机复验（`ocr scan lib\config.js`）连续两次失败：两次**都不是插件回归**，而是暴露了两个新问题——上游把流截断时，桥把这一次失败原样丢给 ocr，于是 ocr 报「整个文件的扫描失败」并打印一句误导人的通用提示（600.4s / 413.8s 各白跑一次）：
+
+| 现象（升级前的旧行为） | 现在 |
+| --- | --- |
+| 上游偶发 `OpenAI Responses stream ended before a terminal response event`（本例是 DSH 默认模型换成 `ark-coding-plan/glm-5.3-flash` 之后），桥只转发一次 → ocr 报 `all 1 file scan(s) failed — check your LLM configuration and API key`，整份扫描白跑 | 桥对**上游瞬时故障**自动重试一次（`MAX_UPSTREAM_ATTEMPTS = 2`；`isRetryableUpstreamFailure()` 认「流被截断 / ECONNRESET / fetch failed / 429 / 502-504 / 限流 / 过载」，**不认**我方主动 abort——客户端断开、桥的上游超时、桥关闭都直接放弃）。这么重试是安全的：桥本来就是「先把上游流攒完、再一次性写给客户端」（`createAccumulator` + `openAiStreamFrames`），失败时客户端一个字节都没收到，所以 JSON 与 SSE 两条路径都不会重复内容 |
+| 失败时只见 ocr 那句「check your LLM configuration and API key」，看不出真因，容易被引到密钥上 | 评审失败时若桥侧有失败记录，notes 里追加一行桥侧真因（`bridgeFailureNote()`）：`本机桥：已转发 21 次 · 失败 2 次 · 上游重试 1 次 · 最近错误：OpenAI Responses stream ended before a terminal response event（模型 glm-5.3-flash） —— ocr 打印的「check your LLM configuration and API key」是它的通用提示，未必是密钥问题。`（最小往返自检 `ocr_status{checkLlm:true}` 当时是成功的，正好印证「通路没坏、只是长请求偶发被截断」） |
+| 重试是「悄悄发生」的，账目不透明 | 桥的 `stats.retries` 单独计数（重试成功**不算** `failed`），`ocr_status` 的桥那行在有重试时补 `上游重试 N 次`，工具 schema 同步声明 `retries`（返回值多一个未声明字段会被宿主在调用期拒收） |
+
 ```
 dsh-open-code-review/
 ├─ package.json          # dsh.bundle.patch 指向 cordis.patch.yml；dsh.client 声明浏览器半侧；icon 指向 icon.svg
@@ -343,11 +353,11 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，125 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、配置分层与默认值单一来源、超时同源与上限夹取、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，126 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、配置分层与默认值单一来源、超时同源与上限夹取、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
-   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，65 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游」这三条真机事故回归）：node test/bridge-smoke.mjs
+   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，71 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游」「上游流被截断要自动重试一次且不重复写内容」这四条真机事故回归）：node test/bridge-smoke.mjs
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，144 项断言，含会话内进度行）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录

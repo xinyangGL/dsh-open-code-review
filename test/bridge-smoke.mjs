@@ -9,7 +9,9 @@ import {
   CLOSE_GRACE_MS,
   MAX_BODY_BYTES,
   bearerTokenOf,
+  bridgeFailureNote,
   createAccumulator,
+  isRetryableUpstreamFailure,
   openAiStreamFrames,
   startLlmBridge,
   textOfOpenAiContent,
@@ -455,6 +457,93 @@ const describe = happyBridge.describe();
 check("桥：describe() 报请求数/最近路由，且不吐明文 token", describe.requests >= 1 && describe.lastProvider === "commandcode" && describe.tokenMasked !== happyBridge.token && describe.tokenMasked.includes("…"), text(describe));
 check("桥：logger.warn 收到过鉴权/协议类噪音（说明有可观测性）", seen.some((line) => line.startsWith("warn:") || line.startsWith("debug:")), text(seen.slice(0, 3)));
 
+/* 上游瞬时故障自动重试。
+   真机事故（v0.3.7 的由来）：DSH 默认模型切成 ark-coding-plan/glm-5.3-flash 后，上游偶尔用
+   `OpenAI Responses stream ended before a terminal response event` 把流截断；ocr 把这一次失败
+   当成整份文件的扫描失败（`all 1 file scan(s) failed`），10 分钟白跑，还打印误导人的
+   「check your LLM configuration and API key」。桥是「先把上游流攒完、再一次性写给客户端」，
+   失败时客户端一个字节都没收到，所以可以安全重试一次。 */
+const retryScript = fakeStream((options, attempt) =>
+  attempt === 1
+    ? [
+        { type: "text-delta", index: 0, text: "半句" },
+        { type: "finish", reason: { kind: "error", failure: { code: "UPSTREAM", message: "OpenAI Responses stream ended before a terminal response event" } } },
+      ]
+    : [
+        { type: "text-delta", index: 0, text: "pong" },
+        { type: "finish", reason: { kind: "stop" } },
+      ],
+);
+const retryBridge = await startLlmBridge({ stream: retryScript.stream, target: () => ({ provider: "ark-coding-plan", model: "glm-5.3-flash" }), logger });
+const retried = await post(retryBridge.url, retryBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+check(
+  "桥：上游流被截断 → 自动重试一次并成功（客户端拿到完整结果，不再整份扫描失败）",
+  retried.status === 200 && retried.json.choices[0].message.content === "pong" && retryScript.calls.length === 2,
+  retried.status + " " + retried.raw.slice(0, 160) + " calls=" + retryScript.calls.length,
+);
+check(
+  "桥：重试只记在 retries，不算 failed（失败账目保持真实）",
+  retryBridge.stats.retries === 1 && retryBridge.stats.failed === 0 && retryBridge.describe().retries === 1,
+  text(retryBridge.describe()),
+);
+
+const noRetryScript = fakeStream(() => [{ type: "finish", reason: { kind: "error", failure: { code: "MODEL_NOT_FOUND", message: "Model not supported" } } }]);
+const noRetryBridge = await startLlmBridge({ stream: noRetryScript.stream, target: () => ({ provider: "p", model: "m" }), logger });
+const noRetried = await post(noRetryBridge.url, noRetryBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+check(
+  "桥：非瞬时错误（Model not supported）不重试——重试救不回配置错，只会放大延迟与配额",
+  noRetried.status === 502 && noRetryBridge.stats.retries === 0 && noRetryScript.calls.length === 1 && noRetryBridge.stats.failed === 1,
+  text({ calls: noRetryScript.calls.length, ...noRetryBridge.describe() }),
+);
+
+const retryStreamScript = fakeStream((options, attempt) =>
+  attempt === 1
+    ? [
+        { type: "text-delta", index: 0, text: "半句" },
+        { type: "finish", reason: { kind: "error", failure: { code: "UPSTREAM", message: "socket hang up" } } },
+      ]
+    : [
+        { type: "text-delta", index: 0, text: "pong" },
+        { type: "finish", reason: { kind: "stop" } },
+      ],
+);
+const retryStreamBridge = await startLlmBridge({ stream: retryStreamScript.stream, target: () => ({ provider: "p", model: "m" }), logger });
+const retriedStream = await post(retryStreamBridge.url, retryStreamBridge.token, { model: "m", stream: true, messages: [{ role: "user", content: "u" }] });
+check(
+  "桥：SSE 路径重试后只写一遍内容（第一次尝试的半句不残留、不重复）",
+  retriedStream.status === 200 &&
+    (retriedStream.raw.match(/"content":"pong"/g) ?? []).length === 1 &&
+    !retriedStream.raw.includes("半句") &&
+    retryStreamBridge.stats.retries === 1,
+  retriedStream.raw.slice(0, 200),
+);
+
+check(
+  "桥：isRetryableUpstreamFailure 只认上游瞬时故障，不认我方 abort",
+  isRetryableUpstreamFailure({ kind: "error", code: "UPSTREAM", message: "OpenAI Responses stream ended before a terminal response event" }) === true &&
+    isRetryableUpstreamFailure({ kind: "error", code: "x", message: "rate limit exceeded (429)" }) === true &&
+    isRetryableUpstreamFailure({ kind: "error", code: "x", message: "fetch failed" }) === true &&
+    isRetryableUpstreamFailure({ kind: "aborted", code: "aborted", message: "客户端断开，桥已取消上游调用" }) === false &&
+    isRetryableUpstreamFailure({ kind: "error", code: "x", message: "桥的上游调用超时" }) === false &&
+    isRetryableUpstreamFailure({ kind: "error", code: "MODEL_NOT_FOUND", message: "Model not supported" }) === false &&
+    isRetryableUpstreamFailure(null) === false,
+);
+{
+  const note = bridgeFailureNote({ requests: 21, failed: 2, retries: 1, lastError: "OpenAI Responses stream ended before a terminal response event", lastModel: "glm-5.3-flash" });
+  check(
+    "桥：bridgeFailureNote 把桥侧真因写成人话（含失败数/重试数/最近模型，且点明 ocr 的通用提示未必是密钥问题）",
+    bridgeFailureNote(null) === null &&
+      bridgeFailureNote({ requests: 3, failed: 0 }) === null &&
+      typeof note === "string" &&
+      note.includes("失败 2 次") &&
+      note.includes("上游重试 1 次") &&
+      note.includes("glm-5.3-flash") &&
+      note.includes("stream ended before a terminal response event") &&
+      note.includes("未必是密钥问题"),
+    String(note),
+  );
+}
+
 await happyBridge.close();
 let closed = false;
 try {
@@ -464,7 +553,7 @@ try {
 }
 check("桥：close() 之后端口关掉、请求失败", closed === true);
 
-for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge]) await bridge.close();
+for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge, retryBridge, noRetryBridge, retryStreamBridge]) await bridge.close();
 
 /* ------------------------------------------------------------------ 汇总 */
 

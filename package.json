@@ -1,6 +1,6 @@
 {
   "name": "dsh-open-code-review",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "private": true,
   "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、回合结束自动评审（ocr 流水线 / delegate 委派 / 独立的只读评审子 agent 三档引擎），每次评审都有实时进度（Jobs 面板 + 会话内进度行、可停止）。",
   "keywords": [

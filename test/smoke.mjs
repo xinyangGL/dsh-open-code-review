@@ -513,13 +513,18 @@ check(
   String(bridgeStatus.llmEndpoint).includes("127.0.0.1") && !String(bridgeStatus.llmEndpoint).includes("api.commandcode.ai"),
   bridgeStatus.llmEndpoint,
 );
-/* ocr_status.bridge 在 schema 里声明了 9 个键（且 additionalProperties:false）：多一个键
+/* ocr_status.bridge 在 schema 里声明了 10 个键（且 additionalProperties:false）：多一个键
    宿主会在调用期拒收整个返回值——这一支以前零覆盖。 */
 const bridgeKeys = Object.keys(bridgeStatus.bridge ?? {}).sort().join(",");
 check(
-  "ocr_status：bridge 对象恰好是 schema 声明的 9 个键（否则宿主调用期拒收）",
-  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,requests,tokenMasked,uptimeMs,url",
+  "ocr_status：bridge 对象恰好是 schema 声明的 10 个键（否则宿主调用期拒收）",
+  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,requests,retries,tokenMasked,uptimeMs,url",
   bridgeKeys,
+);
+check(
+  "ocr_status：bridge schema 也声明了 retries（返回值多键会被宿主拒收）",
+  JSON.stringify(tools.get("ocr_status")?.output?.schema ?? null).includes("\"retries\""),
+  JSON.stringify(tools.get("ocr_status")?.output?.schema ?? null).slice(0, 120),
 );
 check(
   "ocr_status：状态里不出现桥的明文 token",
