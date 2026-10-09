@@ -9,6 +9,7 @@ import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertToolSchemas, schemaViolations } from "./schema-subset.mjs";
 
 const REPO = process.argv[2] ?? "C:\\Users\\吴礼凯\\.dsh\\tmp-ocr-test";
 const results = [];
@@ -149,6 +150,10 @@ function makeCtx(overrides = {}) {
     },
     tools: {
       register(definition) {
+        // 真宿主在 register 时会用 dsh-tools 的 assertSupportedJsonSchema 检查 output.schema，
+        // 违反就抛 JsonSchemaError，让整个插件 fiber 加载失败（v0.3.0 就这么炸过一次）。
+        // 这里照同一套规则校验，免得只有真人重启 DSH 才暴露。
+        assertToolSchemas(definition.name, definition);
         tools.set(definition.name, definition);
         return () => tools.delete(definition.name);
       },
@@ -318,6 +323,39 @@ ctx.jobs = progressRegistry;
 mod.apply(ctx, schemaRefs);
 check("注册了 ocr_review / ocr_status / ocr-review", tools.has("ocr_review") && tools.has("ocr_status") && commands.has("ocr-review"), [...tools.keys()].join(","));
 check("工具声明了 output.schema + render", typeof tools.get("ocr_review").output?.render === "function" && tools.get("ocr_review").output.schema?.type === "object");
+
+/* ------------------------------- 注册的工具 schema 必须属于 DSH 支持的子集 */
+/* v0.3.0 的教训：ocr_status 的 output.schema 里 `bridge: { type: ["object","null"] }`
+   被 dsh-tools 的 assertSupportedJsonSchema 拒绝（type 数组/anyOf 都不支持），
+   register 抛 JsonSchemaError → 整个 host fiber 加载失败 → ocr_review 变 unknown tool，
+   而六套单测依旧全绿（假 ctx 的 register 不校验）。这里补上同一套规则。 */
+const toolSchemasOk = [...tools.values()].map((definition) => ({
+  name: definition.name,
+  problems: [
+    ...schemaViolations(definition.parameters ?? {}, `${definition.name}.parameters`),
+    ...schemaViolations(definition.output?.schema ?? {}, `${definition.name}.output.schema`),
+  ],
+}));
+for (const entry of toolSchemasOk) for (const problem of entry.problems) log(`${entry.name}：${problem}`);
+check(
+  "注册的工具 schema 属于 DSH 子集（宿主 register 不会抛 JsonSchemaError）",
+  tools.size >= 2 && toolSchemasOk.every((entry) => entry.problems.length === 0),
+  toolSchemasOk.map((entry) => `${entry.name}${entry.problems.length ? `(${entry.problems.length} 处违规)` : ""}`).join(", "),
+);
+const bridgeSchema = tools.get("ocr_status")?.output?.schema?.properties?.bridge;
+check(
+  "ocr_status.bridge 用 oneOf 表达「对象或 null」（桥没起来时 payload 仍是 null）",
+  Array.isArray(bridgeSchema?.oneOf) && bridgeSchema.oneOf.length === 2 && bridgeSchema.oneOf[1]?.type === "null" && bridgeSchema.type === undefined,
+  `oneOf 分支=${bridgeSchema?.oneOf?.length ?? 0}`,
+);
+check(
+  "schema 子集校验器自检：type 数组 / anyOf / 单分支 oneOf / 关键字挂错类型都能抓出来",
+  schemaViolations({ type: "object", properties: { x: { type: ["string", "null"] } } }, "s").some((line) => line.includes("type arrays are not supported")) &&
+    schemaViolations({ type: "object", properties: { x: { anyOf: [{ type: "string" }] } } }, "s").some((line) => line.includes("not a supported keyword")) &&
+    schemaViolations({ type: "object", properties: { x: { oneOf: [{ type: "string" }] } } }, "s").some((line) => line.includes("at least two")) &&
+    schemaViolations({ type: "object", properties: { x: { type: "string", properties: {} } } }, "s").some((line) => line.includes('not supported on type "string"')) &&
+    schemaViolations({ type: "object", properties: { x: { oneOf: [{ type: "object", properties: { y: { type: "null" } }, required: ["y"], additionalProperties: false }, { type: "null" }] } } }, "s").length === 0,
+);
 
 const agent = makeAgent();
 const exec = { name: "ocr_review", callId: "call-1", arguments: {}, agent, signal: undefined };
