@@ -119,7 +119,8 @@ function makeCtx(overrides = {}) {
       if (missing.length > 0) return undefined;
       return callback(ctx);
     },
-    subprocess: {
+    /** 真子进程替身；罐头场景用 overrides.subprocess 换成脚本化的假 spawn。 */
+    subprocess: overrides.subprocess ?? {
       async resolveExecutable(cmd) {
         const found = which(cmd);
         if (!found) throw new Error(`not found on PATH: ${cmd}`);
@@ -332,13 +333,13 @@ check(
 );
 
 const bad = await tools.get("ocr_review").execute({ scope: "commit" }, exec);
-check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.summary.includes("需要 commit"), bad.summary);
+check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.code === "OCR_INVALID_ARGS" && bad.summary.includes("需要 commit"), `${bad.code} | ${bad.summary}`);
 
 /* 用全新空目录当"非 git 仓库"样本：插件自己现在是个 git 仓库（用户要求建 GitHub 仓库时 git init 过），
    不能再拿它当反例。 */
 const nonRepoDir = mkdtempSync(join(tmpdir(), "ocr-nongit-"));
 const notRepo = await tools.get("ocr_review").execute({ preview: true, repo: nonRepoDir }, exec);
-check("非 git 仓库：给出可读诊断而不是裸 stderr", notRepo.ok === false && notRepo.summary.includes("不是 git 仓库") && notRepo.configHint.length > 0, notRepo.summary);
+check("非 git 仓库：给出可读诊断而不是裸 stderr", notRepo.ok === false && notRepo.code === "OCR_NOT_GIT_REPO" && notRepo.summary.includes("不是 git 仓库") && notRepo.configHint.length > 0, `${notRepo.code} | ${notRepo.summary}`);
 
 const status = await tools.get("ocr_status").execute({}, exec);
 check(
@@ -383,7 +384,7 @@ check(
 
 mod.apply(makeCtx(), cfgMod.Config({ enabled: false }));
 const offReview = await tools.get("ocr_review").execute({ preview: true }, exec);
-check("enabled=false：ocr_review 拒绝执行并指向设置页", offReview.ok === false && offReview.summary.includes("已在设置里关闭"), offReview.summary);
+check("enabled=false：ocr_review 拒绝执行并指向设置页", offReview.ok === false && offReview.code === "OCR_DISABLED" && offReview.summary.includes("已在设置里关闭"), `${offReview.code} | ${offReview.summary}`);
 
 const offCmd = await commands.get("ocr-review").handler({ agent: makeAgent(), rawInput: "", attachments: [], signal: undefined });
 check("enabled=false：/ocr-review 返回错误", offCmd?.kind === "error" && String(offCmd.text).includes("已在设置里关闭"), JSON.stringify(offCmd));
@@ -524,6 +525,196 @@ check(
   String(bareStatus.llmMode) === "dsh" && String(bareStatus.llmRoute).includes("都没给出可用模型名"),
   bareStatus.llmRoute,
 );
+
+/* --------------------------- 结果码与 fail-closed（罐头子进程，不依赖真 ocr） --------- */
+
+const codeKeys = Object.keys(review.CODES ?? {});
+check(
+  "结果码表：12 个稳定码齐全、都是 OCR_ 前缀、互不重复",
+  codeKeys.length === 12 && new Set(Object.values(review.CODES)).size === 12 && codeKeys.every((key) => String(review.CODES[key]).startsWith("OCR_")),
+  codeKeys.join(","),
+);
+
+const coded = review.valueToText({
+  ok: false,
+  code: review.CODES.RUN_FAILED,
+  engine: "ocr",
+  scope: "workspace",
+  exitCode: 1,
+  durationMs: 12,
+  summary: "失败",
+  issues: [],
+  notes: [],
+  reviewableFiles: [],
+  excludedFiles: [],
+});
+check("valueToText：结果码出现在首行", coded.includes("code=OCR_RUN_FAILED"), coded.split("\n")[0]);
+
+check(
+  "hasIssueCollection：空数组算「确实没问题」，缺字段算「形状不认识」",
+  review.hasIssueCollection({ issues: [] }) === true &&
+    review.hasIssueCollection({ findings: [{ message: "x" }] }) === true &&
+    review.hasIssueCollection({ files: [{ path: "a.js" }] }) === false &&
+    review.hasIssueCollection(null) === false,
+);
+
+/** 罐头 SubprocessRuntime：不起真进程，按脚本顺序吐出每个子进程的 stdout/stderr/exitCode。 */
+function cannedSubprocess(runs) {
+  const calls = [];
+  let index = 0;
+  return {
+    calls,
+    async resolveExecutable(cmd) {
+      return "C:\\fake\\" + cmd + ".exe";
+    },
+    spawn(spec) {
+      const run = runs[Math.min(index, runs.length - 1)] ?? {};
+      index += 1;
+      const call = { spec, run, terminated: false };
+      calls.push(call);
+      let settle = () => {};
+      const done = new Promise((resolve) => {
+        settle = () =>
+          resolve({
+            exitCode: typeof run.exitCode === "number" ? run.exitCode : 0,
+            signal: call.terminated ? "SIGTERM" : null,
+          });
+      });
+      if (run.delayMs) setTimeout(settle, run.delayMs);
+      else if (!run.manual) settle();
+      const reader = (text) => ({
+        readFrom: () => ({ text: String(text ?? ""), nextOffset: String(text ?? "").length, lossy: false }),
+      });
+      return {
+        collected: { stdout: reader(run.stdout), stderr: reader(run.stderr) },
+        done,
+        terminate() {
+          call.terminated = true;
+          settle();
+        },
+        waitForExit: () => done.then(() => true),
+      };
+    },
+  };
+}
+
+/** 用罐头子进程跑一次 ocr_review（engine=ocr 是一次 spawn，正好一次脚本）。 */
+function cannedHarness(runs, config = {}) {
+  const canned = cannedSubprocess(runs);
+  const ctx2 = makeCtx({ subprocess: canned });
+  mod.apply(ctx2, cfgMod.Config({ engine: "ocr", llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash", ...config }));
+  const exec2 = { name: "ocr_review", callId: "canned", arguments: {}, agent: makeAgent(), signal: undefined };
+  return { canned, ctx: ctx2, exec: exec2, call: (args) => tools.get("ocr_review").execute(args, exec2) };
+}
+
+const shapeCase = cannedHarness([
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 2, deletions: 0 }], summary: "looks fine" }) },
+]);
+const shapeRun = await shapeCase.call({ engine: "ocr" });
+check(
+  "fail-closed：exit=0 但没有问题清单字段 → OCR_OUTPUT_SHAPE_UNKNOWN（不当作「没问题」）",
+  shapeRun.ok === false && shapeRun.code === "OCR_OUTPUT_SHAPE_UNKNOWN" && shapeRun.rawJson.length > 0 && shapeRun.notes.some((n) => n.includes("ISSUE_KEYS")),
+  `${shapeRun.code} | ${shapeRun.summary}`,
+);
+
+const junkCase = cannedHarness([{ exitCode: 0, stdout: "这不是 JSON，只是 OCR 的一段日志" }]);
+const junkRun = await junkCase.call({ engine: "ocr" });
+check(
+  "fail-closed：exit=0 但输出不是 JSON → OCR_OUTPUT_UNPARSABLE",
+  junkRun.ok === false && junkRun.code === "OCR_OUTPUT_UNPARSABLE" && junkRun.rawJson.includes("这不是 JSON"),
+  `${junkRun.code} | ${junkRun.summary}`,
+);
+
+const silentCase = cannedHarness([{ exitCode: 0, stdout: "" }]);
+const silentRun = await silentCase.call({ engine: "ocr" });
+check(
+  "fail-closed：exit=0 但 stdout 为空 → OCR_OUTPUT_UNPARSABLE 且说明可能没改动",
+  silentRun.ok === false && silentRun.code === "OCR_OUTPUT_UNPARSABLE" && silentRun.notes.some((n) => n.includes("标准输出是空的")),
+  `${silentRun.code} | ${silentRun.notes.join(" / ")}`,
+);
+
+const cleanCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 1 }], issues: [] }) }]);
+const cleanRun = await cleanCase.call({ engine: "ocr" });
+check(
+  "fail-closed 不误报：带 issues:[] 的成功输出仍然是 ok（code 为空）",
+  cleanRun.ok === true && cleanRun.code === "" && cleanRun.summary.includes("未发现问题（返回的 JSON 带问题清单字段且为空）"),
+  `${cleanRun.code} | ${cleanRun.summary}`,
+);
+
+const issueCase = cannedHarness([
+  {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      files: [{ path: "a.js", insertions: 3, deletions: 0 }],
+      issues: [{ file: "a.js", line: 9, severity: "high", message: "空指针风险" }],
+    }),
+  },
+]);
+const issueRun = await issueCase.call({ engine: "ocr" });
+check(
+  "正常路径：issue 数组被解析出来",
+  issueRun.ok === true && issueRun.issues.length === 1 && issueRun.issues[0].line === 9 && issueRun.code === "",
+  `${issueRun.summary} | issues=${JSON.stringify(issueRun.issues)}`,
+);
+
+/* 取消（工具调用被中断 / 插件卸载）：signal 一 abort，子进程立刻被终结。 */
+const abortCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true }]);
+const abortController = new AbortController();
+abortController.abort();
+const abortedRun = await tools.get("ocr_review").execute(
+  { engine: "ocr" },
+  { name: "ocr_review", callId: "aborted", arguments: {}, agent: makeAgent(), signal: abortController.signal },
+);
+check(
+  "取消：signal 已 abort 时子进程被终结，结果报 OCR_ABORTED",
+  abortedRun.ok === false && abortedRun.code === "OCR_ABORTED" && abortCase.canned.calls[0]?.terminated === true,
+  `${abortedRun.code} terminated=${abortCase.canned.calls[0]?.terminated} | ${abortedRun.summary}`,
+);
+
+/* dispose：abort 在飞评审 + 等它收尾（不留孤儿进程，也不丢半截结果）。 */
+const disposeCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), delayMs: 300 }]);
+const inflight = disposeCase.call({ engine: "ocr" });
+await new Promise((resolve) => setTimeout(resolve, 40)); // 等 spawn 真的发生
+const lifecycleEntry = disposeCase.ctx.effects.find((entry) => String(entry.label).includes("在飞"));
+check(
+  "生命周期：apply 注册了「在飞 ocr 评审的收尾」effect",
+  Boolean(lifecycleEntry) && typeof lifecycleEntry.dispose === "function",
+  (disposeCase.ctx.effects ?? []).map((entry) => entry.label).join(" / "),
+);
+let inflightSettled = false;
+inflight.then(() => {
+  inflightSettled = true;
+});
+const disposePromise = lifecycleEntry.dispose();
+check("生命周期：dispose 返回 promise（可以等）", disposePromise instanceof Promise, typeof disposePromise);
+await disposePromise;
+check(
+  "生命周期：dispose 等评审真的收尾后 promise 才 settle（不是立刻返回）",
+  inflightSettled === true,
+  `inflightSettled=${inflightSettled}`,
+);
+const disposeValue = await inflight;
+check(
+  "生命周期：dispose 会 abort 在飞的子进程（terminate 被调用）",
+  disposeCase.canned.calls[0]?.terminated === true,
+  `terminated=${disposeCase.canned.calls[0]?.terminated}`,
+);
+check(
+  "生命周期：被 dispose 掐掉的评审标记为 OCR_ABORTED（不会当成功结果投递）",
+  disposeValue.ok === false && disposeValue.code === "OCR_ABORTED",
+  `${disposeValue.code} | ${disposeValue.summary}`,
+);
+
+if (which("ocr")) {
+  /* 罐头 ctx 覆盖了同名工具，先切回真子进程的注册再跑真 ocr。 */
+  mod.apply(ctx, schemaRefs);
+  const ocrOnly = await tools.get("ocr_review").execute({ engine: "ocr" }, exec);
+  check(
+    "engine=ocr 且没配 LLM 端点：返回 OCR_LLM_MISSING（真 ocr，不静默降级）",
+    ocrOnly.ok === false && ocrOnly.code === "OCR_LLM_MISSING",
+    `${ocrOnly.code} | ${ocrOnly.summary}`,
+  );
+}
 
 /* ------------------------------------------------------------------ 汇总 */
 
