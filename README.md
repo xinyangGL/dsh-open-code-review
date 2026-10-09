@@ -259,7 +259,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 118 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 125 项）。
 
 ---
 
@@ -311,6 +311,19 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 同一批阈值在 `DEFAULTS` 和 `buildSchema()` 里各写一份，改一处忘一处 | `buildSchema()` 的 6 个 `.default(...)`（`autoMaxPerSession`/`autoMinReviewableFiles`/`autoMinIntervalMs`/`autoSkipSubagents`/`autoIncludeDiff`/`timeoutMinutes`）与 `timeoutMinutes` 的上界都改成引用 `DEFAULTS`；`lib\review.js` 里 `maxTimeoutMinutes` 的回落值也从硬编码 `45` 改成 `DEFAULTS.maxTimeoutMinutes`（此前同一语义有三个数字：60 / 60 / 45） |
 | `config.json` 写坏了（JSON 语法错）却毫无提示 | 仍然 fail-safe 按出厂默认跑，但每次文件变化会在宿主日志里留一行：`[dsh-open-code-review] …\config.json 解析失败，本次按出厂默认运行：<原因>`（热读有 mtime/size 短路，所以只喊一次，不会刷屏） |
 
+### 加固（v0.3.6：修好 v0.3.5 之后再评一次自己的 `lib\config.js`）
+
+第二轮真机 `ocr scan`（229.6s，5 条问题；上一轮那 6 条已全部消失）逐条修掉：
+
+| 现象（升级前的旧行为） | 现在 |
+| --- | --- |
+| `timeoutMinutes: 999` 时「ocr 收到 `--timeout 60`、插件侧却按 999 分钟才算超时」 | 同一个分钟数只有一个来源：`normalizeConfig` 把 `maxTimeoutMinutes` 夹在 24h 内、`timeoutMinutes` 再夹在它之内（`MAX_TIMEOUT_MINUTES`）；`lib\config.js` 新增 `timeoutMsOf()` 统一换算毫秒，Jobs 行截止、评审 agent 的空闲上限、桥的上游超时都走它；Jobs 行的截止改成 `plan.timeoutMs`（= 分钟 + 60s 宽限，`lib\review.js:118`），不再读 `cfg` 的裸分钟数（否则面板行会先于 run 自己的硬超时触发） |
+| 手写 `config.json` 里 `"timeoutMinutes": "20"`（数字带引号）静默回落默认 | `countLike()` 改走新的 `toFiniteNumber()`：数字字符串也认（空串/纯空白/非数字仍回落默认），与 `boolLike()` 的宽容度一致 |
+| `maxTimeoutMinutes` 调到 120 也不放宽设置页的上限 | 上界本身有 24h 硬上界（`MAX_TIMEOUT_MINUTES`），而设置页那张表的上限固定为出厂值（schema 常量）——描述里直接写明「要更大的值请直接写 `config.json`」 |
+| `DEFAULT_REVIEWER_ROUNDS` 在 `lib\config.js` 与 `lib\reviewer.js` 各有定义 | 单一来源在 `lib\config.js`（`buildSchema()` 的默认值也用它），`lib\reviewer.js` 只 `export { … }` 转发 |
+| `endpoint` 模式下换了供应商却忘改地址 → 凭据被发到出厂那个第三方地址 | `ocr_status` 与评审正文的「LLM 端点」行在地址仍等于出厂默认值时点名：`…（出厂默认地址，换供应商时记得同步改 llm.baseUrl，否则凭据会发到旧地址）`（`endpointDisplay()`） |
+| `mergeLayers` 的注释宣称设置页也能给 `env`/`extraArgs`/`ocrCandidates` | 注释改成实际情况：这三个键不在设置页 schema 里，生产路径上 patch 侧只有 `llm`/`reviewer`/开关类字段；`[]` 与 `undefined` 无法区分，所以空数组 = 显式清空 |
+
 ```
 dsh-open-code-review/
 ├─ package.json          # dsh.bundle.patch 指向 cordis.patch.yml；dsh.client 声明浏览器半侧；icon 指向 icon.svg
@@ -330,12 +343,12 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，118 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、配置分层与默认值单一来源、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，125 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、配置分层与默认值单一来源、超时同源与上限夹取、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
    ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，65 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游」这三条真机事故回归）：node test/bridge-smoke.mjs
-   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，127 项断言，含会话内进度行）：node test/client-smoke.mjs
+   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，144 项断言，含会话内进度行）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
    ├─ zprobe3.mjs        # schema 预检：24 个字段是否都带 volatile/description/default

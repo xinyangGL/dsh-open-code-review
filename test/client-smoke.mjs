@@ -17,7 +17,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_DIR = dirname(HERE);
 
 let failures = 0;
+let total = 0;
 function check(name, ok, detail = "") {
+  total += 1;
   if (ok) console.log(`  ok   ${name}`);
   else {
     failures += 1;
@@ -867,5 +869,5 @@ check(
   enHtml.slice(0, 300),
 );
 
-console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
+console.log(failures === 0 ? `\n全部通过（共 ${total} 项）` : `\n${failures} 项失败（共 ${total} 项）`);
 if (failures > 0) process.exitCode = 1;

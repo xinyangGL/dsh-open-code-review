@@ -976,10 +976,14 @@ check(
     toolJobs[0]?.output.some((chunk) => chunk.text.includes("完成：")),
   (toolJobs[0]?.output ?? []).slice(-2).map((chunk) => `[${chunk.channel}]${chunk.text}`).join(""),
 );
+/* v0.3.6：Jobs 行的截止时间改成读 plan.timeoutMs（= 分钟 + 60s 宽限，lib/review.js:118），
+   不再读 cfg 的裸分钟数 —— 这里守住「等待者 = plan 截止 + 60s」这条链。 */
+const hrDefaultPlan = review.normalizeTarget({ scope: "workspace" }, {}, "C:/tmp");
 check(
-  "进度：每条 job 都挂了等待者、deadline = 超时(15min)+60s（否则结算事件会往会话灌唤醒消息）",
+  "进度：每条 job 都挂了等待者；等待者 = plan 截止（分钟 + 60s 宽限）+ 60s（否则结算事件会往会话灌唤醒消息）",
   progressRegistry.waits.length === progressRegistry.starts.length &&
-    progressRegistry.waits.every((waiter) => waiter.timeoutMs === (cfgMod.DEFAULTS.timeoutMinutes + 1) * 60000),
+    hrDefaultPlan.timeoutMs === (cfgMod.DEFAULTS.timeoutMinutes + 1) * 60000 &&
+    progressRegistry.waits.every((waiter) => waiter.timeoutMs === hrDefaultPlan.timeoutMs + 60000),
   JSON.stringify([...new Set(progressRegistry.waits.map((waiter) => waiter.timeoutMs))]),
 );
 check(
@@ -1414,11 +1418,11 @@ check(
 /* P2：手写 config 里的 "false" / false / -1 这类写法过去会被当成「启用 / 不节流」。 */
 const hrCfgWeird = cfgMod.loadConfig({ enabled: "false", auto: false, autoMinIntervalMs: -1, autoMaxPerSession: "2" });
 check(
-  "配置（P2 回归）：字符串/布尔/负数写法被归一（enabled:'false' 不再当启用）",
+  "配置（P2 回归）：字符串/布尔/负数写法被归一（enabled:'false' 不再当启用，'2' 认成 2，-1 回落默认）",
   hrCfgWeird.enabled === false &&
     hrCfgWeird.auto === "off" &&
     hrCfgWeird.autoMinIntervalMs === cfgMod.DEFAULTS.autoMinIntervalMs &&
-    hrCfgWeird.autoMaxPerSession === cfgMod.DEFAULTS.autoMaxPerSession,
+    hrCfgWeird.autoMaxPerSession === 2,
   JSON.stringify({
     enabled: hrCfgWeird.enabled,
     auto: hrCfgWeird.auto,
@@ -1481,6 +1485,73 @@ check(
   hrCapPlan.timeoutMinutes === cfgMod.DEFAULTS.maxTimeoutMinutes && hrCapPlan.timeoutMinutes > 45,
   `timeoutMinutes=${hrCapPlan.timeoutMinutes} fallback=${cfgMod.DEFAULTS.maxTimeoutMinutes}`,
 );
+
+/* v0.3.6：真机 `ocr scan` 复审报出的 5 条。high 那条 = 「ocr 的 --timeout 被夹到 60，
+   插件侧硬超时却按 999 分钟算」：同一个分钟数必须只有一个来源，且处处被上限夹住。 */
+const hrMaxCfg = cfgMod.loadConfig({ timeoutMinutes: 999, maxTimeoutMinutes: 120 });
+check(
+  "配置（v0.3.6 回归）：timeoutMinutes 被 maxTimeoutMinutes 夹住（不会再出现「ocr 60 分钟、插件 999 分钟」）",
+  hrMaxCfg.timeoutMinutes === 120 &&
+    hrMaxCfg.maxTimeoutMinutes === 120 &&
+    cfgMod.timeoutMsOf(hrMaxCfg, 999) === 120 * 60000 &&
+    cfgMod.timeoutMsOf(hrMaxCfg) === 120 * 60000,
+  JSON.stringify({ timeoutMinutes: hrMaxCfg.timeoutMinutes, ms: cfgMod.timeoutMsOf(hrMaxCfg, 999) }),
+);
+check(
+  "配置（v0.3.6 回归）：未配 maxTimeoutMinutes 时回落到出厂上限；maxTimeoutMinutes 自身也有 24h 硬上界",
+  cfgMod.loadConfig({ timeoutMinutes: 999 }).timeoutMinutes === cfgMod.DEFAULTS.maxTimeoutMinutes &&
+    cfgMod.loadConfig({ maxTimeoutMinutes: 5000 }).maxTimeoutMinutes === cfgMod.MAX_TIMEOUT_MINUTES &&
+    cfgMod.MAX_TIMEOUT_MINUTES === 24 * 60,
+  JSON.stringify({
+    fallback: cfgMod.loadConfig({ timeoutMinutes: 999 }).timeoutMinutes,
+    capped: cfgMod.loadConfig({ maxTimeoutMinutes: 5000 }).maxTimeoutMinutes,
+  }),
+);
+check(
+  "配置（v0.3.6 回归）：数字字符串（手写 config.json 常见）不再静默回落默认，空串也不当 0",
+  cfgMod.loadConfig({ timeoutMinutes: "20" }).timeoutMinutes === 20 &&
+    cfgMod.loadConfig({ autoMinIntervalMs: "250" }).autoMinIntervalMs === 250 &&
+    cfgMod.loadConfig({ timeoutMinutes: "" }).timeoutMinutes === cfgMod.DEFAULTS.timeoutMinutes,
+  JSON.stringify({
+    str: cfgMod.loadConfig({ timeoutMinutes: "20" }).timeoutMinutes,
+    interval: cfgMod.loadConfig({ autoMinIntervalMs: "250" }).autoMinIntervalMs,
+    empty: cfgMod.loadConfig({ timeoutMinutes: "" }).timeoutMinutes,
+  }),
+);
+check(
+  "配置（v0.3.6 回归）：显式分钟优先于生效配置，且两者都受同一个上限约束",
+  cfgMod.timeoutMsOf({ timeoutMinutes: 15 }, 30) === 30 * 60000 &&
+    cfgMod.timeoutMsOf({ timeoutMinutes: "20" }) === 20 * 60000 &&
+    cfgMod.timeoutMsOf({ timeoutMinutes: 15 }, 999) === cfgMod.DEFAULTS.maxTimeoutMinutes * 60000,
+  JSON.stringify([
+    cfgMod.timeoutMsOf({ timeoutMinutes: 15 }, 30),
+    cfgMod.timeoutMsOf({ timeoutMinutes: "20" }),
+    cfgMod.timeoutMsOf({ timeoutMinutes: 15 }, 999),
+  ]),
+);
+const hrSameSrcCfg = { timeoutMinutes: 999, maxTimeoutMinutes: 120 };
+const hrSameSrcPlan = review.normalizeTarget({ scope: "workspace", timeoutMinutes: 999 }, hrSameSrcCfg, "C:/tmp");
+check(
+  "配置（v0.3.6 回归）：Jobs 行的截止时间与 run 同源（plan.timeoutMs = 分钟 + 60s 宽限，job 不早于 run 触发）",
+  hrSameSrcPlan.timeoutMinutes === 120 &&
+    hrSameSrcPlan.timeoutMs === 121 * 60000 &&
+    cfgMod.timeoutMsOf(hrSameSrcCfg, hrSameSrcPlan.timeoutMinutes) === hrSameSrcPlan.timeoutMs - 60000,
+  `plan.timeoutMs=${hrSameSrcPlan.timeoutMs} jobBase=${cfgMod.timeoutMsOf(hrSameSrcCfg, hrSameSrcPlan.timeoutMinutes)}`,
+);
+const reviewerMod = await import(new URL("../lib/reviewer.js", import.meta.url));
+check(
+  "配置（v0.3.6 回归）：DEFAULT_REVIEWER_ROUNDS 只有一份定义（lib/config.js，reviewer.js 只转发）",
+  reviewerMod.DEFAULT_REVIEWER_ROUNDS === cfgMod.DEFAULT_REVIEWER_ROUNDS && cfgMod.DEFAULT_REVIEWER_ROUNDS === 3,
+  `reviewer=${reviewerMod.DEFAULT_REVIEWER_ROUNDS} config=${cfgMod.DEFAULT_REVIEWER_ROUNDS}`,
+);
+check(
+  "可见性（v0.3.6 回归）：endpoint 模式仍用出厂默认地址时点名提醒（换了供应商忘改地址 → 凭据发到旧地址）",
+  cfgMod.endpointDisplay() === "(未设置)" &&
+    cfgMod.endpointDisplay("https://api.example.com/v1") === "https://api.example.com/v1" &&
+    cfgMod.endpointDisplay(cfgMod.DEFAULTS.llm.baseUrl).includes("出厂默认地址"),
+  `${cfgMod.endpointDisplay(cfgMod.DEFAULTS.llm.baseUrl)} | ${cfgMod.endpointDisplay("https://api.example.com/v1")}`,
+);
+
 
 const hrReadmeText = [JSON.stringify(JSON.parse(readFileSync(new URL("../config.json", import.meta.url), "utf8"))._readme), readFileSync(new URL("../README.md", import.meta.url), "utf8")].join("\n");
 check(
