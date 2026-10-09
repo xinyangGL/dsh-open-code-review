@@ -242,6 +242,8 @@ function makeCtx(overrides = {}) {
   if (overrides.llm) ctx.llm = overrides.llm;
   if (overrides.subagents) ctx.subagents = overrides.subagents;
   if (overrides.jobs) ctx.jobs = overrides.jobs;
+  /* 命令注册服务也可以替换：用来模拟「register() 抛错」这种宿主侧失败。 */
+  if (overrides.commands) ctx.commands = overrides.commands;
   return ctx;
 }
 
@@ -670,7 +672,17 @@ const llmStub = fakeLlmService((options) => {
   const last = options.messages.at(-1);
   // 第 1 跳让它调工具（ocr llm test 会验证工具往返），第 2 跳（带 role=tool）才给正文。
   if (last && last.role === "tool") {
-    return [{ type: "text-delta", index: 0, text: "pong" }, { type: "finish", reason: { kind: "stop" } }];
+    return [
+      { type: "text-delta", index: 0, text: "pong" },
+      /* v0.5.4：按真机口径给 usage —— DSH 的 inputTokens 不含缓存命中/写入，两个缓存字段单列
+         （totalTokens = input + output + cacheRead + cacheWrite）。没有它们，界面就会显示成
+         「合计 500（输入 100 / 输出 20）」这种自相矛盾的假 bug。 */
+      {
+        type: "usage",
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 500, cacheReadTokens: 360, cacheWriteTokens: 20 },
+      },
+      { type: "finish", reason: { kind: "stop" } },
+    ];
   }
   return [
     { type: "tool-call-delta", index: 0, id: "call_smoke", name: "ocr_selftest", argumentsDelta: '{"note":"smoke"}' },
@@ -708,11 +720,21 @@ check(
   bridgeKeys,
 );
 check(
-  "v0.5.0 步骤 5：bridge.tokens 四个键（含 partial），桥刚起来时四键都是 0",
+  "v0.5.4：bridge.tokens 六个键（输入/输出/合计/缓存命中/缓存写入/partial），桥刚起来时六键都是 0",
   bridgeStatus.bridge?.tokens &&
-    Object.keys(bridgeStatus.bridge.tokens).sort().join(",") === "completion_tokens,partial,prompt_tokens,total_tokens" &&
-    bridgeStatus.bridge.tokens.partial === 0,
+    Object.keys(bridgeStatus.bridge.tokens).sort().join(",") ===
+      "cache_read_tokens,cache_write_tokens,completion_tokens,partial,prompt_tokens,total_tokens" &&
+    bridgeStatus.bridge.tokens.partial === 0 &&
+    bridgeStatus.bridge.tokens.cache_read_tokens === 0,
   JSON.stringify(bridgeStatus.bridge?.tokens ?? null),
+);
+/* v0.5.4：斜杠命令的注册状态可自查 —— 以前整条链路都假设 /ocr-review 在，没人证明 register() 成功。 */
+check(
+  "v0.5.4：ocr_status 报出 /ocr-review 的注册状态（回合尾部按钮走的就是这条命令）",
+  bridgeStatus.command?.name === "ocr-review" &&
+    bridgeStatus.command?.registered === true &&
+    bridgeStatus.command?.reason === "",
+  JSON.stringify(bridgeStatus.command),
 );
 {
   const declared = tools.get("ocr_status")?.output?.schema?.properties?.bridge?.oneOf?.[0]?.properties ?? {};
@@ -773,6 +795,16 @@ if (HAS_OCR) {
     "dsh 路由：桥的 stats 计入 ocr_status 的探测请求（并记下那次故意打错的 token）",
     Number(live.bridge?.requests ?? 0) >= 2 && Number(live.bridge?.failed ?? 0) === 1 && String(live.bridge?.lastModel).length > 0,
     JSON.stringify(live.bridge),
+  );
+  check(
+    "v0.5.4：真端到端 —— 上游的缓存命中/写入进到 ocr_status.bridge.tokens（真机 452422 那组数字的解释）",
+    Number(live.bridge?.tokens?.prompt_tokens ?? 0) === 100 &&
+      Number(live.bridge?.tokens?.completion_tokens ?? 0) === 20 &&
+      Number(live.bridge?.tokens?.total_tokens ?? 0) === 500 &&
+      Number(live.bridge?.tokens?.cache_read_tokens ?? 0) === 360 &&
+      Number(live.bridge?.tokens?.cache_write_tokens ?? 0) === 20 &&
+      Number(live.bridge?.tokens?.partial ?? -1) === 0,
+    JSON.stringify(live.bridge?.tokens),
   );
 } else {
   log("本机没有 ocr，跳过 dsh 路由的真端到端断言");
@@ -2130,24 +2162,35 @@ check(
   const reviewSchema = tools.get("ocr_review")?.output?.schema ?? {};
   const usageSchema = reviewSchema?.properties?.usage ?? null;
   check(
-    "M1：ocr_review 的返回值声明了 usage（四个数字键 + 可选的 partial），且不在 required 里（endpoint 路由没有桥数据时不写）",
+    "v0.5.4：ocr_review 的 usage 声明了缓存命中/写入（六个数字键），且都不在 required 里（endpoint 路由没有桥数据时不写）",
     Boolean(usageSchema) &&
-      Object.keys(usageSchema.properties ?? {}).sort().join(",") === "completion_tokens,partial,prompt_tokens,requests,total_tokens" &&
+      Object.keys(usageSchema.properties ?? {}).sort().join(",") ===
+        "cache_read_tokens,cache_write_tokens,completion_tokens,partial,prompt_tokens,requests,total_tokens" &&
       !(reviewSchema.required ?? []).includes("usage") &&
-      !(usageSchema.required ?? []).includes("partial"),
+      !(usageSchema.required ?? []).includes("partial") &&
+      !(usageSchema.required ?? []).includes("cache_read_tokens"),
     JSON.stringify(usageSchema).slice(0, 200),
   );
   const statusSchema = tools.get("ocr_status")?.output?.schema ?? {};
   const bridgeDecl = JSON.stringify(statusSchema?.properties?.bridge ?? null);
+  check(
+    "v0.5.4：ocr_status 的 schema 声明了 command（name/registered/reason）并进 required（漏声明 = 真机拒收）",
+    (statusSchema?.properties?.command?.required ?? []).join(",") === "name,registered,reason" &&
+      (statusSchema?.required ?? []).includes("command"),
+    JSON.stringify(statusSchema?.properties?.command ?? null).slice(0, 160),
+  );
   check(
     "M1：ocr_status 的 bridge schema 声明了 tokens / retrySkips / retrySkipReason（返回值多键会被宿主拒收）",
     bridgeDecl.includes("\"tokens\"") && bridgeDecl.includes("\"retrySkips\"") && bridgeDecl.includes("\"retrySkipReason\""),
     bridgeDecl.slice(0, 120),
   );
   check(
-    "v0.5.0 步骤 5：bridge.tokens 的 schema 也声明了 partial（additionalProperties:false，漏声明 = 真机拒收）",
+    "v0.5.4：bridge.tokens 的 schema 也声明了 partial 与两个缓存字段（additionalProperties:false，漏声明 = 真机拒收）",
     bridgeDecl.includes("\"partial\"") &&
-      (statusSchema?.properties?.bridge?.oneOf?.[0]?.properties?.tokens?.required ?? []).includes("partial"),
+      bridgeDecl.includes("\"cache_read_tokens\"") &&
+      bridgeDecl.includes("\"cache_write_tokens\"") &&
+      (statusSchema?.properties?.bridge?.oneOf?.[0]?.properties?.tokens?.required ?? []).includes("partial") &&
+      (statusSchema?.properties?.bridge?.oneOf?.[0]?.properties?.tokens?.required ?? []).includes("cache_read_tokens"),
     bridgeDecl.slice(0, 200),
   );
   check(
@@ -2211,6 +2254,28 @@ check(
     "v0.5.0 步骤 3：onDemand=false 时不注册 skill，reason 说明是「按需评审已关闭」",
     registeredOff.length === 0 && offStatus.onDemand === false && offStatus.skill?.registered === false && String(offStatus.skill?.reason).includes("按需评审已关闭"),
     `registered=${registeredOff.length} status=${JSON.stringify(offStatus.skill)}`,
+  );
+}
+
+/* v0.5.4：命令注册失败这条路以前是静默的（register() 抛错 → 命令没了，但 ocr_status 与回合尾部按钮
+   都以为它在）。放在最后跑：会重新 apply 一个「commands 服务坏掉」的实例并覆盖全局 tools 注册表。 */
+{
+  const brokenCmdCtx = makeCtx({
+    commands: {
+      register() {
+        throw new Error("definitionId 撞车了");
+      },
+    },
+  });
+  mod.apply(brokenCmdCtx, mkConfig({ llmMode: "endpoint" }));
+  const brokenStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+  const flagged = brokenStatus.notes.filter((line) => line.includes("ocr-review"));
+  check(
+    "v0.5.4：命令注册抛错时 ocr_status 报 registered=false + 原因，并在备注里点名按钮会失败（不再静默）",
+    brokenStatus.command?.registered === false &&
+      String(brokenStatus.command?.reason).includes("definitionId 撞车了") &&
+      flagged.some((line) => line.includes("按钮")),
+    JSON.stringify({ command: brokenStatus.command, notes: flagged }),
   );
 }
 

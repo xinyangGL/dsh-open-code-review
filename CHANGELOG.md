@@ -3,6 +3,25 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.4] — 2026-10-09
+
+### Fixed
+
+- **The token counter on the status line added up wrong.** `ocr_status` reported
+  `累计 tokens 452422（输入 41305 / 输出 73581）` — a 337 536-token gap. DSH's `TokenUsage.inputTokens`
+  already has the cache hits subtracted (`input = prompt - cacheRead - cacheWrite`, while
+  `total = input + output + cacheRead + cacheWrite`), and the bridge only forwarded
+  `prompt_tokens`/`completion_tokens`. The bridge now also reads `cacheReadTokens`/`cacheWriteTokens`
+  (plus the OpenAI spellings `cache_read_tokens` / `cachedTokens` / `prompt_cache_hit_tokens`), exposes
+  them as `cache_read_tokens` / `cache_write_tokens` (+ `prompt_tokens_details.cached_tokens`), and the
+  shared `describeTokens()` formatter prints `累计 tokens T（输入 P（其中缓存命中 C · 缓存写入 W） / 输出 O）`
+  — plus `另有 U tokens 未分类` when an upstream only reported a total. Same numbers in the job log and
+  in the per-review `usage`.
+- **`/ocr-review` registration is no longer assumed to have succeeded.** The command is what the
+  turn-tail button and a typed command both go through, yet a `register()` failure (host change, a
+  `definitionId` clash) was silent. The plugin now remembers the outcome and `ocr_status` reports
+  `command: { name, registered, reason }`, with a note that names the button when it failed.
+
 ## [0.5.3] — 2026-10-09
 
 ### Fixed

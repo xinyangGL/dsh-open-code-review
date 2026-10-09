@@ -13,6 +13,7 @@ import {
   bridgeFailureNote,
   classifyUpstreamFailure,
   createAccumulator,
+  describeTokens,
   isRetryableUpstreamFailure,
   openAiStreamFrames,
   startLlmBridge,
@@ -458,9 +459,10 @@ check(
 const describe = happyBridge.describe();
 check("桥：describe() 报请求数/最近路由，且不吐明文 token", describe.requests >= 1 && describe.lastProvider === "commandcode" && describe.tokenMasked !== happyBridge.token && describe.tokenMasked.includes("…"), text(describe));
 check(
-  "桥（v0.5.0）：describe().tokens 恒四键（含 partial），宿主 schema 与界面文案都靠它",
+  "桥（v0.5.4）：describe().tokens 恒六键（输入/输出/合计/缓存命中/缓存写入/partial），宿主 schema 与界面文案都靠它",
   describe.tokens &&
-    Object.keys(describe.tokens).sort().join(",") === "completion_tokens,partial,prompt_tokens,total_tokens" &&
+    Object.keys(describe.tokens).sort().join(",") ===
+      "cache_read_tokens,cache_write_tokens,completion_tokens,partial,prompt_tokens,total_tokens" &&
     Number.isFinite(describe.tokens.partial),
   text(describe.tokens),
 );
@@ -623,9 +625,94 @@ for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge
   );
   const fromScratch = accumulateUsage(undefined, { total_tokens: 42 });
   check(
-    "桥（v0.5.0）：accumulateUsage 从零开始时也把 partial 初始化出来（describe() 的 tokens 恒四键）",
+    "桥（v0.5.0）：accumulateUsage 从零开始时也把 partial 初始化出来（describe() 的 tokens 恒六键）",
     fromScratch.partial === 1 && fromScratch.total_tokens === 42 && fromScratch.prompt_tokens === 0,
     JSON.stringify(fromScratch),
+  );
+}
+/* v0.5.4：token 口径的真凶 —— DSH/pi-ai 的 inputTokens 不含缓存命中/写入。
+   真机事故：桥报「累计 tokens 452422（输入 41305 / 输出 73581）」，41305+73581=114886 ≠ 452422，
+   而 partial=0（不是「上游只报 total」）。差值 337536 就是缓存命中的输入 —— ocr 每次重发整份
+   审查规格，命中率很高。修法：toOpenAiUsage 带出 cache_read_tokens/cache_write_tokens，
+   累加与文案同步，界面显示成「输入 X（其中缓存命中 Y · 缓存写入 Z）/ 输出 W / 合计 T」。 */
+{
+  const mapped = toOpenAiUsage({
+    inputTokens: 100,
+    outputTokens: 20,
+    totalTokens: 500,
+    cacheReadTokens: 360,
+    cacheWriteTokens: 20,
+  });
+  check(
+    "桥（v0.5.4）：toOpenAiUsage 带出缓存命中/写入（DSH 的 inputTokens 已扣掉缓存，只取输入输出会看着像 bug）",
+    mapped.prompt_tokens === 100 &&
+      mapped.completion_tokens === 20 &&
+      mapped.total_tokens === 500 &&
+      mapped.cache_read_tokens === 360 &&
+      mapped.cache_write_tokens === 20 &&
+      mapped.prompt_tokens_details.cached_tokens === 360,
+    text(mapped),
+  );
+  check(
+    "桥（v0.5.4）：上游只报 OpenAI 风格字段名时也认（cache_read_tokens / prompt_tokens_details.cached_tokens / cachedTokens）",
+    toOpenAiUsage({ prompt_tokens: 5, completion_tokens: 1, cache_read_tokens: 7 }).cache_read_tokens === 7 &&
+      toOpenAiUsage({ input_tokens: 5, output_tokens: 1, cachedTokens: 9 }).cache_read_tokens === 9 &&
+      toOpenAiUsage({ inputTokens: 5, outputTokens: 1 }).cache_read_tokens === undefined,
+    JSON.stringify([
+      toOpenAiUsage({ prompt_tokens: 5, completion_tokens: 1, cache_read_tokens: 7 }),
+      toOpenAiUsage({ input_tokens: 5, output_tokens: 1, cachedTokens: 9 }),
+    ]),
+  );
+  check(
+    "桥（v0.5.4）：上游没给 total 时，补出来的合计含缓存（漏掉缓存会低估，且显示成「合计 < 输入+输出」）",
+    toOpenAiUsage({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 360, cacheWriteTokens: 20 }).total_tokens === 500 &&
+      toOpenAiUsage({ inputTokens: 100, outputTokens: 20 }).total_tokens === 120,
+    JSON.stringify([
+      toOpenAiUsage({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 360, cacheWriteTokens: 20 }),
+      toOpenAiUsage({ inputTokens: 100, outputTokens: 20 }),
+    ]),
+  );
+  const totals = accumulateUsage(undefined, {
+    prompt_tokens: 100,
+    completion_tokens: 20,
+    total_tokens: 500,
+    cache_read_tokens: 360,
+    cache_write_tokens: 20,
+  });
+  accumulateUsage(totals, { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 });
+  check(
+    "桥（v0.5.4）：缓存字段也逐次累加，缺失按 0（不让 NaN/负数污染）",
+    totals.prompt_tokens === 101 &&
+      totals.completion_tokens === 22 &&
+      totals.total_tokens === 503 &&
+      totals.cache_read_tokens === 360 &&
+      totals.cache_write_tokens === 20,
+    JSON.stringify(totals),
+  );
+  const justTotal = accumulateUsage(undefined, { total_tokens: 42 });
+  check(
+    "桥（v0.5.4）：只报 total 时缓存字段为 0（partial 记一次），describeTokens 说明「未分类」而不是编造归属",
+    justTotal.cache_read_tokens === 0 &&
+      justTotal.partial === 1 &&
+      describeTokens(justTotal) ===
+        "累计 tokens 42（输入 0 / 输出 0） · 另有 42 tokens 未分类（上游只按总数上报） · 其中 1 次上游只报了总数",
+    describeTokens(justTotal),
+  );
+  check(
+    "桥（v0.5.4）：describeTokens 把「合计 = 输入 + 输出 + 缓存」说清楚（真机 452422 那组数字）",
+    describeTokens({
+      prompt_tokens: 41305,
+      completion_tokens: 73581,
+      total_tokens: 452422,
+      cache_read_tokens: 337536,
+      cache_write_tokens: 0,
+      partial: 0,
+    }) === "累计 tokens 452422（输入 41305（其中缓存命中 337536） / 输出 73581）",
+    describeTokens({ prompt_tokens: 41305, completion_tokens: 73581, total_tokens: 452422, cache_read_tokens: 337536 }),
+  );
+  check(
+    "桥（v0.5.4）：describeTokens 没有数字时返回空串（endpoint 路由没有桥数据，界面不显示半句）",
+    describeTokens(undefined) === "" && describeTokens({ total_tokens: 0, prompt_tokens: 0 }) === "",
   );
 }
 {

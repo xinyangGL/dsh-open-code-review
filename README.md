@@ -149,7 +149,7 @@ The spec always comes from `ocr`, so all three engines review against the same r
 
 The plugin maps these onto the environment ocr understands: `OCR_LLM_URL`, `OCR_LLM_PROTOCOL`, `OCR_LLM_TOKEN`, `OCR_LLM_MODEL` (`config.env` can override or add more).
 
-`ocr_status.bridge` shows the `dsh` bridge live: `url`, the masked `token`, `requests`, `failed`, `retries`, `retrySkips` + `retrySkipReason` (why a request was not retried automatically), cumulative `tokens` (prompt / completion / total), `lastError`, `lastProvider`, `lastModel`, `inflight` and `uptimeMs`. If the host has no `llm` service, the plugin still works and the `dsh` route falls back to the static endpoint.
+`ocr_status.bridge` shows the `dsh` bridge live: `url`, the masked `token`, `requests`, `failed`, `retries`, `retrySkips` + `retrySkipReason` (why a request was not retried automatically), cumulative `tokens` (`prompt_tokens`, `completion_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `partial`), `lastError`, `lastProvider`, `lastModel`, `inflight` and `uptimeMs`. If the host has no `llm` service, the plugin still works and the `dsh` route falls back to the static endpoint.
 
 ## Usage
 
@@ -175,7 +175,7 @@ The plugin maps these onto the environment ocr understands: `OCR_LLM_URL`, `OCR_
 
 Unknown parameters are rejected (`additionalProperties: false`), so a typo fails loudly instead of silently doing nothing.
 
-The result carries: `ok`, `code` (empty on success), `engine` (the one that actually ran: `ocr` / `delegate` / `agent`), `reviewer` (`provider`, `model`, `round`, `rounds`, `childId`, `stopReason`, `verdict` = `clean` / `issues` / `uncertain`), `scope`, `repository`, `command` (the ocr command line that ran), `exitCode`, `durationMs`, `reviewableFiles[]` (`path`, `status`, `insertions`, `deletions`), `excludedFiles[]`, `issues[]` (`file`, `line`, `severity`, `message`), `summary`, `reviewSpec` (the `delegate` payload), `configHint`, `notes[]`, `rawJson` (ocr’s stdout, up to 100 000 characters), `stderr`, `lostOutput`, `spillPath`, `llmMissing`, `usage` (`prompt_tokens`, `completion_tokens`, `total_tokens`, `requests` — accumulated through the bridge on the `dsh` route), `timedOut`, `aborted`.
+The result carries: `ok`, `code` (empty on success), `engine` (the one that actually ran: `ocr` / `delegate` / `agent`), `reviewer` (`provider`, `model`, `round`, `rounds`, `childId`, `stopReason`, `verdict` = `clean` / `issues` / `uncertain`), `scope`, `repository`, `command` (the ocr command line that ran), `exitCode`, `durationMs`, `reviewableFiles[]` (`path`, `status`, `insertions`, `deletions`), `excludedFiles[]`, `issues[]` (`file`, `line`, `severity`, `message`), `summary`, `reviewSpec` (the `delegate` payload), `configHint`, `notes[]`, `rawJson` (ocr’s stdout, up to 100 000 characters), `stderr`, `lostOutput`, `spillPath`, `llmMissing`, `usage` (`prompt_tokens`, `completion_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `partial`, `requests` — accumulated through the bridge on the `dsh` route), `timedOut`, `aborted`.
 
 ### Tool `ocr_status`
 
@@ -191,6 +191,8 @@ Nothing runs on its own. Two ways to start a review when **you** decide the chan
 
 1. **The button at the end of a turn.** Every completed turn gets a **Start code review** button in the conversation tail. One click runs the same thing as `/ocr-review` for that session; while a review for that session is running the button turns into **Reviewing…** and is disabled (so double-clicking cannot stack two reviews), and a failure shows the reason inline and can be retried. It is rendered by `lib/client.js` (`conversation.chat.turnTail`); if the host does not expose the remote-command service the button simply is not there, and everything else keeps working.
 2. **The runtime skill `ocr-on-demand-review`.** With `onDemand = true` the plugin registers it with the host, so when you say “review this”, “verify the change” or “跑一次评审” the model can call `ocr_review` itself and report file-by-file findings. `ocr_status` reports `onDemand` and `skill.registered`, which is how you confirm the registration.
+
+The button and a typed `/ocr-review` both execute the same slash command on the host, so `ocr_status` also reports `command: { name: "ocr-review", registered, reason }` (added in 0.5.4). If `registered` is `false` the host refused the registration — the button and the command cannot work, and the status note says so instead of failing silently.
 
 Turn both off (`onDemand = false`, or `enabled = false`) and the plugin is reduced to the tools plus the `/ocr-review` command — nothing is ever injected or auto-started. `onDemand = false` also removes the skill registration; the tail button disappears with it.
 
@@ -246,14 +248,14 @@ With `progress = true` (default) every review is registered as a background job 
 | `DSH_OPEN_CODE_REVIEW_CONFIG` points at a file that does not exist | Since 0.5.0 the plugin no longer stops there: it falls back to `<DSH_HOME>/dsh-open-code-review.json`, then to the plugin directory, and `ocr_status` says so (“指向的 … 不存在，已回落到 …”). Before 0.5.0 that path silently kept running on defaults. |
 | The settings-page dropdowns are unreadable (white-on-white, or dark text on a dark theme) | Fixed in 0.5.0: the `<select>` / `<option>` colours now come from the host theme tokens and the widget declares `color-scheme`, so the native popup follows light/dark. Upgrade (and refresh the page after the host restart). |
 | The result says “0 file(s) reviewed, N issue(s) found” | Fixed in 0.5.0. The file count now comes from `files[]` / `total_files` / `reviewable_count`, falling back to the distinct files the findings mention, so a summary without a file list can no longer report 0 files next to N findings. |
-| Token counters look inconsistent (`total` > prompt + completion) | Expected when an upstream call reports only a total: `bridge.tokens.partial` counts those calls and the line adds “其中 N 次上游只报了总数”. The plugin never fabricates the missing halves. |
+| Token counters look inconsistent (`total` > prompt + completion) | Two causes, both now visible. (1) The cache: DSH's `inputTokens` already excludes cache hits while `total` includes them, so the bridge reports `cache_read_tokens` / `cache_write_tokens` and the line reads `输入 P（其中缓存命中 C · 缓存写入 W） / 输出 O` (fixed in 0.5.4 — before that the cache tokens simply went missing from the sum). (2) An upstream that reports only a total: `bridge.tokens.partial` counts those calls and the line adds “其中 N 次上游只报了总数”. The plugin never fabricates the missing halves. |
 | A status call right after install/restart says the bridge is not ready | Fixed in 0.5.2: the bridge listens asynchronously, so `resolveLlmRoute()` now waits for that start (at most 2 s) before computing the route. The first `ocr_status` already routes through the bridge; `llmRoute`, `llmEndpoint` and `bridge` are consistent with each other. |
 | `ocr_status` on a machine **without** `ocr` contradicted itself (route line named the bridge, `bridge` was `null`, `llmEnv` empty); `ocr_review` only said “set `ocrPath`” to someone who had not installed ocr yet | Fixed in 0.5.3: the fields that do not depend on ocr are computed before the “ocr not found” early return, and the install guide (`installHint`) is added to the review result, the auto-review delivery and `ocr_status.notes` alike. |
 | The plugin is missing entirely (`ocr_review` becomes an unknown tool) | The host fiber failed to load — most often an unsupported JSON-Schema construct in a tool schema, or a `lib/*.js` edit without a host restart. Check the DSH log, then restart. |
 
 ## Hardening history
 
-The v0.3.0 → v0.5.3 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md).
+The v0.3.0 → v0.5.4 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md).
 
 ## Development & tests
 
@@ -261,10 +263,10 @@ Six dependency-free suites (`node test/<name>.mjs`), item counts as actually run
 
 | Suite | Items | Covers |
 | --- | --- | --- |
-| `node test/smoke.mjs` | 161 (155 without `ocr` — same environment as CI) | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, config layering/sources, per-line findings, bridge readiness. Checks that need the real `ocr` binary swap their expectations for the “not installed” diagnostics path instead of failing, so CI (a bare clone) is green too. |
+| `node test/smoke.mjs` | 165 (158 without `ocr` — same environment as CI) | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, config layering/sources, per-line findings, bridge readiness, token/cache accounting, `/ocr-review` registration state. Checks that need the real `ocr` binary swap their expectations for the “not installed” diagnostics path instead of failing, so CI (a bare clone) is green too. |
 | `node test/job-smoke.mjs` | 51 | Review progress: registration, progress line, output stream, stop → cancel, idempotent settlement. |
 | `node test/reviewer-smoke.mjs` | 45 | Reviewer subagent logic: prompt, structured parsing, rounds, failure/timeout (aborts the in-flight child). |
-| `node test/bridge-smoke.mjs` | 77 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams, client disconnects and token accounting. |
+| `node test/bridge-smoke.mjs` | 84 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams, client disconnects and token accounting (prompt / completion / total / cache read / cache write / partial). |
 | `node test/client-smoke.mjs` | 206 | Browser half with a mini React: settings form (basics + collapsible advanced), card summary, in-session progress row, turn-tail review button. |
 | `node test/cordis-inject.mjs` | 26 | Real-cordis regression across three host shapes (all services / remote.session missing / no remote). |
 
