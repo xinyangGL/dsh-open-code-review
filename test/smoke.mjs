@@ -282,6 +282,39 @@ const cfgMod = await import(new URL("../lib/config.js", import.meta.url));
 const HAS_SCHEMA = mod.SCHEMA_AVAILABLE === true && typeof mod.Config === "function";
 const mkConfig = (patch = {}) => (HAS_SCHEMA ? mod.Config(patch) : { ...patch });
 
+/**
+ * CI（裸 clone + node，不跑 pnpm/npm 全局安装）里没有真 ocr：@alibaba-group/open-code-review 是 npm
+ * 全局包，Actions 上不存在。本机开发机装了，所以以前这些用例只在「有 ocr」的机器上验过。
+ * 现在两种环境都跑，同一条 check 换期望值（断言数恒定）：
+ *   · 有 ocr：真实链路（定位 → 跑 ocr → 解析 → 进度 job）全验
+ *   · 没有：验「定位失败」的诊断路径 —— 新用户最常见的第一屏（OCR_NOT_FOUND + 安装指引），
+ *     以及 fail-closed 行为（不装 ocr 时绝不开一个假装在评审的 job）
+ * 探测方式与插件一致（lib/ocr-cli.js 的 resolveOcr：显式路径 → 候选目录 → PATH），
+ * 顺带把命中的路径写进它的模块级 cachedExecutable，后面的真实用例就不用再找一遍。
+ */
+const HAS_OCR = await (async () => {
+  try {
+    const probe = {
+      subprocess: {
+        resolveExecutable: async (cmd) => {
+          const found = which(cmd);
+          if (!found) throw new Error(`not found on PATH: ${cmd}`);
+          return found;
+        },
+      },
+    };
+    const resolved = await cli.resolveOcr(probe, cfgMod.loadConfig({}), undefined);
+    return Boolean(resolved?.path);
+  } catch {
+    return false;
+  }
+})();
+
+/** 两种环境都跑同一条 check，只是期望值不同。 */
+function checkEither(name, withOcr, withoutOcr, detail) {
+  check(name, HAS_OCR ? withOcr : withoutOcr, detail);
+}
+
 check("模块导出 name/inject/apply", mod.name === "dsh-open-code-review" && Array.isArray(mod.inject) && typeof mod.apply === "function", `inject=${JSON.stringify(mod.inject)}`);
 
 /* ------------------------------------------------------------ 清单（Plugin Manager 展示） */
@@ -495,20 +528,30 @@ const agent = makeAgent();
 const exec = { name: "ocr_review", callId: "call-1", arguments: {}, agent, signal: undefined };
 
 const preview = await tools.get("ocr_review").execute({ preview: true }, exec);
-check("preview：拿到可审文件", preview.ok === true && preview.reviewableFiles.length >= 1, `${preview.summary} | files=${preview.reviewableFiles.map((f) => f.path).join(",")}`);
+checkEither(
+  "preview：拿到可审文件（没装 ocr 时给出 OCR_NOT_FOUND + 安装指引）",
+  preview.ok === true && preview.reviewableFiles.length >= 1,
+  preview.ok === false &&
+    preview.code === "OCR_NOT_FOUND" &&
+    preview.summary.includes("无法定位 ocr") &&
+    preview.notes.some((n) => n.includes("@alibaba-group/open-code-review")),
+  HAS_OCR ? `${preview.summary} | files=${preview.reviewableFiles.map((f) => f.path).join(",")}` : `${preview.code} | ${preview.summary} | 安装指引=${preview.notes.some((n) => n.includes("npm i -g"))}`,
+);
 check("设置页里的凭据引用被真的解析（ctx.credentials.resolve）", resolvedRefs.includes("SMOKE_OCR_KEY"), `resolvedRefs=${JSON.stringify([...new Set(resolvedRefs)])}`);
 
 const delegated = await tools.get("ocr_review").execute({ engine: "delegate" }, exec);
-check(
-  "delegate：产出审查规格（含文件/规则/diff）",
+checkEither(
+  "delegate：产出审查规格（含文件/规则/diff；没装 ocr 时先报 OCR_NOT_FOUND）",
   delegated.ok === true && delegated.engine === "delegate" && delegated.reviewSpec.includes("委派审查规格") && delegated.reviewSpec.includes("calc.js") && /^###\s+组/m.test(delegated.reviewSpec) && delegated.reviewSpec.includes("```diff"),
-  `${delegated.summary} | spec=${delegated.reviewSpec.length} 字符`,
+  delegated.ok === false && delegated.code === "OCR_NOT_FOUND",
+  HAS_OCR ? `${delegated.summary} | spec=${delegated.reviewSpec.length} 字符` : `${delegated.code} | ${delegated.summary}`,
 );
 
 const auto = await tools.get("ocr_review").execute({}, exec);
-check(
-  "auto：无 LLM 端点时降级 delegate 并给出配置指引",
+checkEither(
+  "auto：无 LLM 端点时降级 delegate 并给出配置指引（没装 ocr 时先报 OCR_NOT_FOUND）",
   auto.ok === true && auto.engine === "delegate" && auto.configHint.includes("no valid LLM endpoint configured"),
+  auto.ok === false && auto.code === "OCR_NOT_FOUND",
   `${auto.summary} | notes=${auto.notes.join(" / ")}`,
 );
 
@@ -519,17 +562,34 @@ check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.c
    不能再拿它当反例。 */
 const nonRepoDir = mkdtempSync(join(tmpdir(), "ocr-nongit-"));
 const notRepo = await tools.get("ocr_review").execute({ preview: true, repo: nonRepoDir }, exec);
-check("非 git 仓库：给出可读诊断而不是裸 stderr", notRepo.ok === false && notRepo.code === "OCR_NOT_GIT_REPO" && notRepo.summary.includes("不是 git 仓库") && notRepo.configHint.length > 0, `${notRepo.code} | ${notRepo.summary}`);
+checkEither(
+  "非 git 仓库：给出可读诊断而不是裸 stderr（没装 ocr 时先报 OCR_NOT_FOUND）",
+  notRepo.ok === false && notRepo.code === "OCR_NOT_GIT_REPO" && notRepo.summary.includes("不是 git 仓库") && notRepo.configHint.length > 0,
+  notRepo.ok === false && notRepo.code === "OCR_NOT_FOUND",
+  `${notRepo.code} | ${notRepo.summary}`,
+);
 
 const status = await tools.get("ocr_status").execute({}, exec);
-check(
-  "ocr_status：定位 exe + 版本 + LLM 连通性",
+checkEither(
+  "ocr_status：定位 exe + 版本 + LLM 连通性（没装 ocr 时给出 OCR_NOT_FOUND + 安装指引，且字段自洽）",
   status.ok === true && status.executable.includes("opencodereview") && status.version.length > 0 && status.llmTest.startsWith("不可用"),
-  `${status.version} | ${status.llmTest.slice(0, 90)}`,
+  status.ok === false &&
+    status.code === "OCR_NOT_FOUND" &&
+    status.executable === "" &&
+    status.version === "" &&
+    status.installHint.includes("@alibaba-group/open-code-review") &&
+    status.skill?.name === "ocr-on-demand-review" &&
+    status.bridge === null,
+  `${status.version} | ${status.llmTest.slice(0, 90)} | installHint=${status.installHint.length} 字符`,
 );
 
 const rendered = tools.get("ocr_review").output.render({}, delegated)[0].text;
-check("render 输出人类/模型可读文本", rendered.includes("委派审查规格") && rendered.includes("engine=delegate"), `${rendered.length} 字符`);
+checkEither(
+  "render 输出人类/模型可读文本",
+  rendered.includes("委派审查规格") && rendered.includes("engine=delegate"),
+  rendered.includes("OCR_NOT_FOUND"),
+  `${rendered.length} 字符`,
+);
 
 /* v0.5.0 步骤 3：按需评审（按钮 + skill）的状态必须在 ocr_status 里可见；
    这个实例的宿主没有 skills 服务 → registered=false 且给出原因（真机核验时必须是 true）。 */
@@ -567,9 +627,11 @@ while (deliver.followed.length === 0 && deliver.injected.length === 0 && Date.no
   await new Promise((resolve) => setTimeout(resolve, 250));
 }
 const autoText = textOf(deliver.followed[0] ?? deliver.injected[0]);
-check(
+checkEither(
   "自动档（显式 auto=adaptive）：写文件后回合结束自动注入评审结果",
   autoText.includes("自动代码评审") && autoText.includes("OpenCodeReview") && /engine=(delegate|ocr)/.test(autoText),
+  /* 没装 ocr 时自动档照样要投递一条**说明白为什么没跑成**的结果（含安装指引），而不是静默。 */
+  autoText.includes("自动代码评审") && autoText.includes("无法定位 ocr 可执行文件") && autoText.includes("@alibaba-group/open-code-review"),
   `followup=${deliver.followed.length} inject=${deliver.injected.length} 长度=${autoText.length}`,
 );
 
@@ -596,7 +658,11 @@ const offCmd = await commands.get("ocr-review").handler({ agent: makeAgent(), ra
 check("enabled=false：/ocr-review 返回错误", offCmd?.kind === "error" && String(offCmd.text).includes("已在设置里关闭"), JSON.stringify(offCmd));
 
 const offStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
-check("enabled=false：ocr_status 仍可用于诊断", offStatus.ok === true && offStatus.enabled === false, `enabled=${offStatus.enabled} ref=${offStatus.credentialRef}`);
+check(
+  "enabled=false：ocr_status 仍可用于诊断",
+  offStatus.enabled === false && offStatus.ok === HAS_OCR && (HAS_OCR || offStatus.code === "OCR_NOT_FOUND"),
+  `enabled=${offStatus.enabled} ok=${offStatus.ok} code=${offStatus.code} ref=${offStatus.credentialRef}`,
+);
 
 /* ------------------------------------------------ dsh 路由：ocr ⇄ 本机桥 ⇄ ctx.llm.stream */
 
@@ -689,7 +755,7 @@ if (bridgeStatus.bridge) {
 }
 check("dsh 路由：桥校验随机 token（错 token → 401）", badAuth.status === 401, String(badAuth.status));
 
-if (which("ocr")) {
+if (HAS_OCR) {
   // 真端到端：插件 → ocr 子进程（OCR_LLM_* 指向桥）→ 桥 → 假 llm 服务。
   const live = await tools.get("ocr_status").execute({}, exec);
   check(
@@ -751,7 +817,7 @@ check(
   JSON.stringify(defStatus.llmEnv),
 );
 
-if (which("ocr")) {
+if (HAS_OCR) {
   const defLive = await tools.get("ocr_status").execute({}, exec); // checkLlm=true：真跑 ocr llm test
   const firstCall = defaultLlmStub.calls[0];
   check(
@@ -1149,50 +1215,65 @@ async function until(predicate, timeoutMs = 3000) {
   return predicate();
 }
 
-await until(() => progressRegistry.starts.length >= 4);
+/* 没装 ocr 时（CI）：真实工具调用在「定位 ocr」那一步就返回了，**根本不会开 job** —— 这是有意的
+   fail-closed（绝不显示一条假装在评审的进度行）。所以这里按环境换期望值：
+   有 ocr 时前四条 job 就是那四次真实调用；没有时它们只会来自后面的罐头场景。 */
+if (HAS_OCR) await until(() => progressRegistry.starts.length >= 4);
+else await until(() => progressRegistry.starts.length >= 1, 500);
 await settleJobs();
 
 const repoName = REPO.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
 /* 前四条 = 工具链路那四次调用（参数错误那条在开 job 之前就返回了，不该占位）。 */
-const toolJobs = progressRegistry.starts.slice(0, 4);
-check(
+const allJobs = () => progressRegistry.starts;
+const toolJobs = HAS_OCR ? allJobs().slice(0, 4) : [];
+checkEither(
   "进度：真实工具链路每次评审登记一条 job（preview/delegate/auto/非 git 仓库 = 4 条，参数错误不登记）",
   toolJobs.length === 4 && toolJobs.every((job) => job.id.startsWith("ocr-review-")),
-  progressRegistry.starts.map((job) => job.id).join(","),
+  /* 没 ocr 时至少守住「登记的 job 都是本插件的」这条不变量。 */
+  allJobs().length >= 1 && allJobs().every((job) => job.id.startsWith("ocr-review-")),
+  allJobs().map((job) => job.id).join(","),
 );
-check(
+checkEither(
   "进度：kind 统一是 ocr-review（Jobs 面板按它显示徽章、会话内进度行按它筛选）",
   toolJobs.length === 4 && toolJobs.every((job) => job.kind === "ocr-review"),
-  [...new Set(progressRegistry.starts.map((job) => job.kind))].join(","),
+  allJobs().length >= 1 && allJobs().every((job) => job.kind === "ocr-review"),
+  [...new Set(allJobs().map((job) => job.kind))].join(","),
 );
-check(
+checkEither(
   "进度：标题 = 来源 · 范围 · 仓库名（非 git 那条指向它自己的临时目录）",
   toolJobs[0]?.label === `评审 · 工作区改动 · ${repoName}` && toolJobs[3]?.label?.includes("ocr-nongit-"),
-  progressRegistry.starts.map((job) => job.label).join(" | "),
+  allJobs().every((job) => String(job.label).startsWith("评审 · ")),
+  allJobs().map((job) => job.label).join(" | "),
 );
-check(
+checkEither(
   "进度：结算状态 3 成功 1 失败，失败明细带结果码",
   toolJobs.filter((job) => job.status === "completed").length === 3 &&
     toolJobs[3]?.status === "failed" &&
     String(toolJobs[3]?.detail).startsWith("OCR_NOT_GIT_REPO"),
-  toolJobs.map((job) => `${job.id}=${job.status}:${job.detail}`).join(" | "),
+  /* 没 ocr 时的关键不变量：没有任何 job 停在 running（否则面板/进度行会永远转圈）。 */
+  allJobs().every((job) => job.status !== "running"),
+  allJobs().map((job) => `${job.id}=${job.status}:${job.detail}`).join(" | "),
 );
-check(
+checkEither(
   "进度：成功行的明细带耗时（评审结束后面板行仍可读）",
   /（\d+(\.\d+)?(s|m\d+s)）$/.test(String(toolJobs[0]?.detail)),
-  String(toolJobs[0]?.detail),
+  allJobs().some((job) => job.status === "completed" && /（\d+(\.\d+)?(s|m\d+s)）$/.test(String(job.detail))),
+  String(toolJobs[0]?.detail ?? allJobs()[0]?.detail),
 );
-check(
+checkEither(
   "进度：过程行覆盖「跑 ocr」与「delegate」两种引擎",
   toolJobs.some((job) => job.progressLines.some((line) => line.includes("运行 ocr review（超时"))) &&
     toolJobs.some((job) => job.progressLines.some((line) => line.startsWith("delegate："))),
-  toolJobs.map((job) => job.progress).join(" / "),
+  /* 没 ocr 时退回可验的那一半：进度行里必须写清「要跑什么命令」。 */
+  allJobs().some((job) => job.progressLines.some((line) => line.includes("运行 ocr review（超时"))),
+  allJobs().map((job) => job.progress).join(" / "),
 );
-check(
+checkEither(
   "进度：输出环里有带时间戳的日志行 + 结算行（面板可展开的实时流）",
   toolJobs[0]?.output.some((chunk) => chunk.channel === "log" && /^\[\d\d:\d\d:\d\d\]/.test(chunk.text)) &&
     toolJobs[0]?.output.some((chunk) => chunk.text.includes("完成：")),
-  (toolJobs[0]?.output ?? []).slice(-2).map((chunk) => `[${chunk.channel}]${chunk.text}`).join(""),
+  allJobs().some((job) => job.output.some((chunk) => chunk.channel === "log" && /^\[\d\d:\d\d:\d\d\]/.test(chunk.text))),
+  (toolJobs[0]?.output ?? allJobs()[0]?.output ?? []).slice(-2).map((chunk) => `[${chunk.channel}]${chunk.text}`).join(""),
 );
 /* v0.3.6：Jobs 行的截止时间改成读 plan.timeoutMs（= 分钟 + 60s 宽限，lib/review.js:118），
    不再读 cfg 的裸分钟数 —— 这里守住「等待者 = plan 截止 + 60s」这条链。 */
@@ -1209,10 +1290,12 @@ check(
   progressRegistry.starts.every((job) => job.owner === undefined),
   JSON.stringify([...new Set(progressRegistry.starts.map((job) => job.owner))]),
 );
-const autoJobs = progressRegistry.starts.filter((job) => String(job.label).startsWith("自动评审 · "));
-check(
+const autoJobs = allJobs().filter((job) => String(job.label).startsWith("自动评审 · "));
+checkEither(
   "进度：自动评审那条也登记了 job 且已结算（label 用「自动评审」区分）",
   autoJobs.length >= 1 && autoJobs.every((job) => job.status === "completed"),
+  /* 没 ocr 时这条自动评审在定位就失败（fail-closed 不开假 job）—— 守住「不留 running」。 */
+  autoJobs.every((job) => job.status !== "running"),
   autoJobs.map((job) => `${job.label}=${job.status}`).join(" | ") || "(无)",
 );
 
@@ -1542,7 +1625,7 @@ check(
   hangValue.ok === false && hangValue.code === "OCR_ABORTED" && hangSub.calls.dispose >= 1,
   hangValue.code + " | " + hangValue.summary + " dispose=" + hangSub.calls.dispose,
 );
-if (which("ocr")) {
+if (HAS_OCR) {
   /* 罐头 ctx 覆盖了同名工具，先切回真子进程的注册再跑真 ocr。 */
   mod.apply(ctx, settingsPatch);
   const ocrOnly = await tools.get("ocr_review").execute({ engine: "ocr" }, exec);

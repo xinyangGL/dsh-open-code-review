@@ -3,6 +3,27 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.3] — 2026-10-09
+
+### Fixed
+
+- **CI is green on a bare clone again (and the suites now cover a machine without `ocr`).** CI runs on
+  a fresh clone with `node` only: `@alibaba-group/open-code-review` is a global npm package and is not
+  there, so every check that shells out to the real `ocr` failed and dragged the job/progress, `render`
+  and auto-review assertions down with it (24 failures, all 6 matrix jobs). `test/smoke.mjs` now probes
+  once (`HAS_OCR`) and swaps expectations per environment: with `ocr` it exercises the real chain, without
+  it exercises the diagnostics you get on a fresh machine (`OCR_NOT_FOUND` + the install guide, no fake
+  success, no job left in `running`). Item counts: 161 with `ocr`, 155 without.
+- **`ocr_status` no longer contradicts itself when `ocr` is missing.** The check for the executable used
+  to `return` early, so `bridge` stayed `null`, `llmEnv` stayed empty and the on-demand note was skipped —
+  while the route line already named the local bridge. The fields that do not depend on `ocr`
+  (`bridge`, `llmEnv`, `onDemand`/`skill` notes) are now computed before that early return, and the
+  bridge snapshot is refreshed at the end so the numbers include the `ocr llm test` probe.
+- **The first thing a new user hits: installing `ocr`.** On `OCR_NOT_FOUND`, the review result, the
+  auto-review delivery and `ocr_status.notes` now all carry the same `installHint(platform)` text
+  (npm package name, the Windows “use the real `.exe`, not the `.cmd` shim” warning, `OCR_EXECUTABLE`
+  / `OPENCODEREVIEW_BIN`) instead of only “set `ocrPath`”.
+
 ## [0.5.2] — 2026-10-09
 
 ### Fixed
@@ -17,8 +38,8 @@ distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangG
 - The test that covered this no longer gambles on a `setTimeout`: it asserts the bridge is available
   on an **immediate** status call (the ports are still checked for a stray 401 / a closed listener),
   and the two raw `bridge.url` fetches are guarded so a missing bridge fails the assertions instead
-  of crashing the suite mid-run. `test/smoke.mjs` is 161 assertions in both environments
-  (with and without `@deepseek-ai/schemastery`, with and without `ocr` on `PATH`).
+  of crashing the suite mid-run. `test/smoke.mjs` is 161 assertions with `ocr` on `PATH` and 155
+  without it (checks that need the real binary swap to the “not installed” diagnostics path).
 
 ## [0.5.1] — 2026-10-09
 
