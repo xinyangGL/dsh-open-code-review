@@ -63,7 +63,7 @@ function text(value) {
       tool_calls: [{ id: "call_probe", type: "function", function: { name: "ocr_selftest", arguments: "{\"note\":\"x\"}" } }],
     },
     { role: "tool", tool_call_id: "call_probe", content: "ocr_selftest ok" },
-  ]);
+  ], { provider: "commandcode", model: "deepseek/deepseek-v4.1-flash" });
   check("toDshMessages：system 折成 options.system 并用空行连接", translated.system === "系统一\n\n系统二", text(translated.system));
   check("toDshMessages：user 变文本块", translated.messages[0].role === "user" && translated.messages[0].content[0].text === "用户");
   check(
@@ -71,6 +71,26 @@ function text(value) {
     translated.messages[1].content[0].type === "tool-call" && translated.messages[1].content[0].name === "ocr_selftest" && translated.messages[1].content[0].arguments === "{\"note\":\"x\"}" && translated.messages[1].content[0].id === "call_probe",
     text(translated.messages[1]),
   );
+  {
+    // 真机教训：assistant 消息缺 source 时，宿主 forAdapter() 会抛
+    // Cannot read properties of undefined (reading 'replayState')，整轮工具往返全失败。
+    const source = translated.messages[1].source;
+    check(
+      "toDshMessages：assistant 自带 model source（宿主 forAdapter 的硬要求）",
+      source?.kind === "model" && source.provider === "commandcode" && source.model === "deepseek/deepseek-v4.1-flash" && source.replayState === undefined,
+      text(source),
+    );
+    check(
+      "toDshMessages：没给路由时也不缺 source（宁可为空串，也不能 undefined）",
+      typeof toDshMessages([{ role: "assistant", content: "hi" }]).messages[0].source === "object",
+      text(toDshMessages([{ role: "assistant", content: "hi" }]).messages[0]),
+    );
+    check(
+      "toDshMessages：role=tool 变 DSH 的 tool 消息（带 toolCallId + source.kind=tool）",
+      translated.messages[2].source?.kind === "tool" && translated.messages[2].source.callId === "call_probe",
+      text(translated.messages[2].source),
+    );
+  }
   check(
     "toDshMessages：role=tool 变 DSH 的 tool 消息（带 toolCallId）",
     translated.messages[2].role === "tool" && translated.messages[2].toolCallId === "call_probe" && translated.messages[2].content[0].text === "ocr_selftest ok",
@@ -154,6 +174,34 @@ function fakeStream(script) {
     }
   };
   return { stream, calls };
+}
+
+/**
+ * 宿主的真行为（dsh-llm/lib/index.js 的 forAdapter，以及 pi-ai/deepseek 适配器的
+ * toPiAssistant）：assistant 消息没有 source 时，真机会抛
+ * `Cannot read properties of undefined (reading 'replayState')` —— 假 ctx / 假 llm
+ * 服务完全拦不住这一类「宿主契约」错误，所以在这里逐字复刻那条读取路径。
+ * @returns 问题描述列表（空数组＝合规）。
+ */
+function hostAssistantSourceProblems(calls) {
+  const problems = [];
+  for (const options of calls) {
+    for (const message of options.messages) {
+      if (message.role !== "assistant") continue;
+      const source = message.source; // forAdapter: const source = message.source;
+      if (source === undefined || source === null) {
+        problems.push("assistant 消息缺 source（宿主会抛 Cannot read properties of undefined (reading 'replayState')）");
+        continue;
+      }
+      if (source.kind !== "model") problems.push("source.kind=" + String(source.kind));
+      if (typeof source.provider !== "string" || source.provider.length === 0) problems.push("source.provider 为空");
+      if (typeof source.model !== "string" || source.model.length === 0) problems.push("source.model 为空");
+      if (source.provider !== options.provider || source.model !== options.model) {
+        problems.push("source 路由(" + source.provider + "/" + source.model + ")≠本次转发路由(" + options.provider + "/" + options.model + ")");
+      }
+    }
+  }
+  return problems;
 }
 
 async function post(base, token, body, headers = {}) {
@@ -242,6 +290,25 @@ const second = await post(toolBridge.url, toolBridge.token, {
 });
 const secondOptions = toolScript.calls.at(-1);
 check("桥：第 2 跳把 assistant.tool_calls + role=tool 翻回 DSH 消息", second.status === 200 && secondOptions.messages[1].content[0].type === "tool-call" && secondOptions.messages[2].role === "tool" && secondOptions.messages[2].toolCallId === "call_probe", text(secondOptions.messages.map((m) => ({ role: m.role, types: m.content.map((b) => b.type) }))));
+{
+  // 这一节钉的是真机事故（v0.3.2）：工具往返第 2 跳的 assistant 历史缺 source，
+  // 宿主 forAdapter() 一读 message.source.replayState 就 TypeError → ocr 报
+  // 「all 4 file review(s) failed」，而桥自己只看到 stats.failed。
+  const problems = hostAssistantSourceProblems([...happy.calls, ...toolScript.calls]);
+  check("桥：发出去的每条 assistant 消息都带 model source（宿主 forAdapter 契约）", problems.length === 0, problems.join("；"));
+  check(
+    "桥：source 路由＝本次转发的 provider/model",
+    secondOptions.messages[1].source.provider === "p" && secondOptions.messages[1].source.model === "m",
+    text(secondOptions.messages[1].source),
+  );
+  check(
+    "桥：tool 消息带 source.kind=tool + callId（与 createToolResultMessage 同形）",
+    secondOptions.messages[2].source?.kind === "tool" && secondOptions.messages[2].source.callId === "call_probe",
+    text(secondOptions.messages[2].source),
+  );
+  const probe = hostAssistantSourceProblems([{ provider: "p", model: "m", messages: [{ role: "assistant", content: [] }] }]);
+  check("桥：宿主契约探针本身有效（缺 source 会被抓出来）", probe.length === 1 && probe[0].includes("replayState"), probe.join("；"));
+}
 
 const failing = fakeStream([{ type: "finish", reason: { kind: "error", failure: { code: "MODEL_NOT_FOUND", message: "Model not supported" } } }]);
 const failBridge = await startLlmBridge({ stream: failing.stream, target: () => ({ provider: "p", model: "m" }), logger });

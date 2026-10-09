@@ -267,6 +267,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | --- | --- |
 | 插件整个不见了：`ocr_review` / `ocr_status` 变成 unknown tool，或设置页里没有这个条目 | host fiber 加载失败。`ctx.tools.register` 会用宿主自己的 JSON Schema 子集校验 `output.schema`，违规（最常见的是 `type: ["object","null"]` 这类 **type 数组**，`anyOf` 也不支持）就抛 `JsonSchemaError`，整个插件不加载。日志里搜 `assertSupportedJsonSchema`；`node test/smoke.mjs` 现在跑同一套规则（`test/schema-subset.mjs`），改完 schema 先跑它 |
 | 调用报 `tool "ocr_review" returned invalid output: "value.xxx" is not a declared property`（或 `is required` / `must be a boolean`） | **调用期**宿主还会拿 `output.schema` 校验 execute 的返回值：payload 里多了没声明的字段或少了必填字段。把字段补进 `lib\index.js` 的 `REVIEW_TOOL_OUTPUT`。`test/smoke.mjs` 的假 register 已把 execute 包住，每次工具调用的返回值都会被同一套规则检查 |
+| 真实引擎跑评审时 `all N file review(s) failed`，而 `ocr_status` 的桥那行写着 `最近错误：Cannot read properties of undefined (reading 'replayState')` | 桥翻译历史消息时漏了宿主的**硬契约**：转给 `ctx.llm.stream` 的每条 `assistant` 消息都必须带 `source`（`{kind:"model",provider,model}`，`lib\bridge.js` 的 `toDshMessages` 负责补）。缺了它，宿主 `dsh-llm` 的 `forAdapter()` 一读 `message.source.replayState` 就 TypeError，且异常被吞成「上游 error」502 —— 症状是**每个文件的第 2 次请求（带 assistant 历史／工具往返）才失败**，单看桥的 stats 只有失败计数。`role: "tool"` 同理要 `source: {kind:"tool",callId}`。`test\bridge-smoke.mjs` 现在按 `hostAssistantSourceProblems()` 逐条复刻这条读取路径 |
 | 设置页里找不到 `dsh-open-code-review` / 表单是空的 | 多半是**改了 `lib\*.js` 但没重启 DSH**（宿主仍缓存旧模块，`Config` 没被导出）。完全退出并重开 DSH 后再看；判据：`ocr_status` 的第一行「设置页」 |
 | 插件卡片能打开，但没有配置表单 | 浏览器半侧没被加载：确认 `package.json` 里有 `dsh.client` 与 `exports["./client"]`、`lib\client.js` 存在且语法可解析（`node --check lib\client.js`），然后**重启一次 DSH** 并刷新页面（包扫描结果缓存到重启）；页面里若显示「浏览器侧没有这个条目的表单」说明 cell 已加载但条目 id 对不上 |
 | 设置导航里没有「代码评审」 | 同一个表单的独立入口（`settings.section`）。它没出现说明浏览器半侧没加载；只改了 `lib\client.js` 内容时**刷新页面**即可（bundle 的 rev 取文件 mtime），但**第一次**加上/移动客户端文件要重启 DSH 才会重新扫描 |
@@ -297,7 +298,7 @@ dsh-open-code-review/
 ├─ lib/
 │  ├─ index.js           # 插件入口：schemastery Config + 工具/命令注册 + 自动评审钩子 + 本机桥接线 + 独立评审 agent 编排（runReviewerReview / 轮次往返 / subagents 子注入）+ 评审进度接线（openReviewJob / finishReviewJob / chunkSink）
 │  ├─ reviewer.js        # 评审 agent：规格提示词、findings schema 与解析、线程与轮次（纯逻辑；subagents 运行时由调用方注入）
-│  ├─ bridge.js          # 本机 LLM 桥：OpenAI 兼容 /v1/chat/completions ⇄ ctx.llm.stream
+│  ├─ bridge.js          # 本机 LLM 桥：OpenAI 兼容 /v1/chat/completions ⇄ ctx.llm.stream（含宿主硬契约：assistant 消息补 source{kind:"model",provider,model}、tool 消息补 source{kind:"tool",callId}）
 │  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section + 会话内进度行（conversation.input.dock），渲染 24 字段设置表单（dsh 模式 18 个控件行 / 带静态端点的 endpoint 模式 20 行；评审 agent=spawn 时 21 行），文案走 Client locale
 │  ├─ config.js          # 三层配置合并、schemaOverrides（读 volatile 引用）
 │  ├─ job.js             # 评审进度：把每次评审登记成 background job（进度行/输出流/停止/结算），宿主没有 jobs 服务时整条链路降级成空操作
@@ -308,7 +309,7 @@ dsh-open-code-review/
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，40 项断言：登记/进度行/输出流/停止→取消/结算幂等/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，43 项断言：提示词/结构化解析/线程轮次/失败与超时）：node test/reviewer-smoke.mjs
-   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，51 项断言）：node test/bridge-smoke.mjs
+   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，58 项断言，含「assistant 消息必须带 model source」这条真机事故回归）：node test/bridge-smoke.mjs
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，127 项断言，含会话内进度行）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
