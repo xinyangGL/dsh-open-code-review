@@ -9,7 +9,7 @@ import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertToolPayload, assertToolSchemas, payloadViolations, schemaViolations } from "./schema-subset.mjs";
+import { assertToolContract, assertToolPayload, assertToolSchemas, losslessViolations, payloadViolations, schemaViolations, snapshotJsonValue } from "./schema-subset.mjs";
 
 const REPO = process.argv[2] ?? "C:\\Users\\吴礼凯\\.dsh\\tmp-ocr-test";
 const results = [];
@@ -154,7 +154,8 @@ function makeCtx(overrides = {}) {
         // 违反就抛 JsonSchemaError，让整个插件 fiber 加载失败（v0.3.0 就这么炸过一次）。
         // 这里照同一套规则校验，免得只有真人重启 DSH 才暴露。
         assertToolSchemas(definition.name, definition);
-        // 宿主在**调用期**还会拿 output.schema 校验 execute 的返回值（多一个未声明字段就报
+        // 宿主在**调用期**还有两道门（dsh-tools/lib/index.js:3541-3571）：先 snapshotJsonValue
+        // 要求返回值无损 JSON，再用 output.schema 校验（多一个未声明字段就报
         // `"value.aborted" is not a declared property`），所以这里也把 execute 包一层。
         const schema = definition?.output?.schema;
         const execute = definition?.execute;
@@ -162,7 +163,7 @@ function makeCtx(overrides = {}) {
           const wrapped = { ...definition };
           wrapped.execute = async (...args) => {
             const value = await execute.apply(wrapped, args);
-            assertToolPayload(definition.name, schema, value);
+            assertToolContract(definition.name, definition, value);
             return value;
           };
           definition = wrapped;
@@ -512,6 +513,19 @@ check(
   String(bridgeStatus.llmEndpoint).includes("127.0.0.1") && !String(bridgeStatus.llmEndpoint).includes("api.commandcode.ai"),
   bridgeStatus.llmEndpoint,
 );
+/* ocr_status.bridge 在 schema 里声明了 9 个键（且 additionalProperties:false）：多一个键
+   宿主会在调用期拒收整个返回值——这一支以前零覆盖。 */
+const bridgeKeys = Object.keys(bridgeStatus.bridge ?? {}).sort().join(",");
+check(
+  "ocr_status：bridge 对象恰好是 schema 声明的 9 个键（否则宿主调用期拒收）",
+  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,requests,tokenMasked,uptimeMs,url",
+  bridgeKeys,
+);
+check(
+  "ocr_status：状态里不出现桥的明文 token",
+  /…/.test(String(bridgeStatus.bridge?.tokenMasked)) && !/[0-9a-f]{32,}/.test(JSON.stringify(bridgeStatus.bridge)),
+  String(bridgeStatus.bridge?.tokenMasked),
+);
 check(
   "dsh 路由：凭据由 DSH 提供（不再解析 llmApiKeyRef）",
   String(bridgeStatus.credentialSource).includes("由 DSH 提供") && String(bridgeStatus.credentialRef).includes("dsh 模式不需要"),
@@ -654,12 +668,31 @@ check(
 function cannedSubprocess(runs) {
   const calls = [];
   let index = 0;
+  /* 复刻宿主 dsh-subprocess-local 的硬校验（runner-launch 的 launch 前置检查）：
+     不合规的 spec 在真机上直接抛，测试里也必须抛，否则契约漂移会被静默吞掉。 */
+  const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+  const validateSpec = (spec) => {
+    if (!spec || typeof spec !== "object") throw new Error("subprocess.spawn 需要 spec");
+    if (!Array.isArray(spec.argv) || spec.argv.length === 0 || typeof spec.argv[0] !== "string" || spec.argv[0] === "") {
+      throw new Error("spec.argv[0] 必须是非空字符串");
+    }
+    const graceMs = spec.graceMs ?? 0;
+    if (!Number.isFinite(graceMs) || graceMs <= 0 || graceMs > MAX_TIMER_DELAY_MS) {
+      throw new Error(`spec.graceMs 必须是 (0, ${MAX_TIMER_DELAY_MS}] 的有限数，收到 ${graceMs}`);
+    }
+    if (spec.signal?.aborted) throw new Error("aborted before spawn");
+  };
   return {
     calls,
     async resolveExecutable(cmd) {
-      return "C:\\fake\\" + cmd + ".exe";
+      const name = String(cmd ?? "");
+      if (!name) throw new Error("executable 不能是空串");
+      if (!isAbsolute(name) && name.includes("/")) throw new Error(`executable 必须是裸名字或绝对路径：${name}`);
+      if (name === "definitely-not-here") throw new Error(`找不到可执行文件：${name}`);
+      return "C:\\fake\\" + name + ".exe";
     },
     spawn(spec) {
+      validateSpec(spec);
       const run = runs[Math.min(index, runs.length - 1)] ?? {};
       index += 1;
       const call = { spec, run, terminated: false };
@@ -758,9 +791,24 @@ const abortedRun = await tools.get("ocr_review").execute(
   { name: "ocr_review", callId: "aborted", arguments: {}, agent: makeAgent(), signal: abortController.signal },
 );
 check(
-  "取消：signal 已 abort 时子进程被终结，结果报 OCR_ABORTED",
-  abortedRun.ok === false && abortedRun.code === "OCR_ABORTED" && abortCase.canned.calls[0]?.terminated === true,
-  `${abortedRun.code} terminated=${abortCase.canned.calls[0]?.terminated} | ${abortedRun.summary}`,
+  "取消：signal 已 abort 时不开子进程，结果报 OCR_ABORTED（真机宿主会抛 aborted before spawn）",
+  abortedRun.ok === false && abortedRun.code === "OCR_ABORTED" && abortCase.canned.calls.length === 0,
+  `${abortedRun.code} spawn=${abortCase.canned.calls.length} | ${abortedRun.summary}`,
+);
+
+/* 跑到一半才取消：子进程必须被 terminate（不是只在开跑前挡一下）。 */
+const midCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true }]);
+const midCtl = new AbortController();
+const midRun = midCase.call
+  ? tools.get("ocr_review").execute({ engine: "ocr" }, { ...midCase.exec, signal: midCtl.signal })
+  : null;
+for (let i = 0; i < 200 && midCase.canned.calls.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+midCtl.abort();
+const midValue = await midRun;
+check(
+  "取消：跑到一半被中断 → 子进程被 terminate，结果报 OCR_ABORTED",
+  midValue.ok === false && midValue.code === "OCR_ABORTED" && midCase.canned.calls[0]?.terminated === true,
+  `${midValue.code} terminated=${midCase.canned.calls[0]?.terminated} | ${midValue.summary}`,
 );
 
 /* dispose：abort 在飞评审 + 等它收尾（不留孤儿进程，也不丢半截结果）。 */
@@ -1253,6 +1301,7 @@ check(
   stRun.reviewer.enabled === true && stRun.reviewer.available === true && stRun.reviewer.providers.join(",") === "spawn" && stRun.reviewer.rounds === 3 && stRun.reviewer.ready === true,
   JSON.stringify(stRun.reviewer),
 );
+check("ocr_status：没有 llm 服务时 bridge=null（schema 里的另一支）", stRun.bridge === null, JSON.stringify(stRun.bridge));
 
 /* dispose：在飞的评审子 agent 会被 abort + dispose（不留孤儿子会话）。 */
 const hangSub = cannedSubagents({ pending: true });
@@ -1277,6 +1326,135 @@ if (which("ocr")) {
     `${ocrOnly.code} | ${ocrOnly.summary}`,
   );
 }
+
+/* ---------------------------------------------------------- 加固回归
+   （审计发现的 fail-open / job 不结算 / 参数越界；这些形状以前都会「静默通过」。） */
+
+/* P0：ocr 输出里没有可识别的问题清单字段时，过去会被当成「未发现问题」——
+   只要被审仓库能影响 ocr 的输出，评审就能静默变成通过。现在必须 fail-closed。 */
+const hrBadShapes = [
+  ["问题清单里是纯字符串", { issues: ["这是个字符串，不是对象"] }],
+  ["条目缺 message 字段（只有 file/line/severity）", { files: [{ path: "a.js" }], issues: [{ file: "a.js", line: 3, severity: "high" }] }],
+  ["message 只有空白", { issues: [{ file: "a.js", line: 1, message: "   " }] }],
+  ["空 JSON 对象", {}],
+  ["只有 summary 与插入行数（没有清单）", { summary: "x", total_insertions: 3 }],
+  ["findings 是对象不是数组", { findings: { a: 1 } }],
+  ["清单埋在 7 层嵌套里（超过深度上限 6）", { a: { b: { c: { d: { e: { f: { g: { issues: [] } } } } } } } }],
+];
+for (const [label, payload] of hrBadShapes) {
+  const hrCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify(payload) }]);
+  const hrRun = await hrCase.call({ engine: "ocr" });
+  check(
+    `fail-closed（P0 回归）：${label} → 不当作通过`,
+    hrRun.ok === false && hrRun.code === "OCR_OUTPUT_SHAPE_UNKNOWN",
+    `${hrRun.code || "(无 code)"} ok=${hrRun.ok} | ${hrRun.summary}`,
+  );
+}
+const hrEmptyCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }) }]);
+const hrEmptyRun = await hrEmptyCase.call({ engine: "ocr" });
+check(
+  "fail-closed（P0 回归）：空文件清单 + 空问题清单才算真的「未发现问题」",
+  hrEmptyRun.ok === true && hrEmptyRun.summary.includes("未发现问题"),
+  `${hrEmptyRun.code || "(无 code)"} ok=${hrEmptyRun.ok} | ${hrEmptyRun.summary}`,
+);
+const hrMixedCase = cannedHarness([
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js" }], issues: [{ file: "a.js", line: 2, message: "真问题" }, { file: "b.js", line: 5 }] }) },
+]);
+const hrMixedRun = await hrMixedCase.call({ engine: "ocr" });
+check(
+  "fail-closed 不误报：能读的条目照常交付，读不出的只记一条备注",
+  hrMixedRun.ok === true &&
+    hrMixedRun.issues.length === 1 &&
+    hrMixedRun.issues[0].message === "真问题" &&
+    hrMixedRun.notes.some((note) => note.includes("1 条无法解析")),
+  `ok=${hrMixedRun.ok} issues=${hrMixedRun.issues.length} | ${hrMixedRun.notes.join(" / ")}`,
+);
+
+/* P1：自动评审到「轮次上限」时过去直接 return，job 永远停在运行中。 */
+const hrCapJobs = makeJobsRegistry();
+const hrCapSub = cannedSubagents({ structured: FINDINGS_ONE });
+const hrCapMap = new Map();
+const hrCapSink = [];
+const hrCapAgent = localAgent(hrCapSink);
+const hrCapCase = cannedHarness(
+  [
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
+    ...reviewerSpecRuns(),
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
+  ],
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoMinIntervalMs: 0 },
+  { subagents: hrCapSub.runtime, listeners: hrCapMap, jobs: hrCapJobs },
+);
+emitOn(hrCapMap, "tools/result", { name: "edit", agent: hrCapAgent }, { isError: false });
+emitOn(hrCapMap, "agent/turn-stopping", { agent: hrCapAgent, reason: "test" });
+await waitUntil(() => hrCapSink.length >= 1);
+emitOn(hrCapMap, "tools/result", { name: "edit", agent: hrCapAgent }, { isError: false });
+emitOn(hrCapMap, "agent/turn-stopping", { agent: hrCapAgent, reason: "test" });
+await waitUntil(() => hrCapSink.length >= 2);
+await settleJobs();
+await settleJobs();
+const hrCapJob = hrCapJobs.starts.at(-1);
+check(
+  "进度（P1 回归）：自动评审到轮次上限也结算 job（否则面板永远显示运行中）",
+  Boolean(hrCapJob) && hrCapJob.status === "failed" && String(hrCapJob.detail).includes("已达轮次上限"),
+  hrCapJob ? `${hrCapJob.id}=${hrCapJob.status} | ${hrCapJob.detail}` : "(没有 job)",
+);
+
+/* P1：maxTimeoutMinutes 为负会让插件侧硬超时整条消失，还把 `--timeout -5` 交给 ocr。
+   （走不到 apply 的 schema 校验——手写 config.json 是插件自己读的，这里直接测解析函数。） */
+const hrNegCfg = { timeoutMinutes: -3, maxTimeoutMinutes: -5 };
+const hrNegPlan = review.normalizeTarget({ scope: "workspace" }, hrNegCfg, "C:/tmp");
+const hrNegArgv = review.buildOcrArgv(hrNegPlan, hrNegCfg).argv.join(" ");
+check(
+  "参数（P1 回归）：timeoutMinutes / maxTimeoutMinutes 为负时收敛成合法值（不再出现 --timeout -5）",
+  hrNegPlan.timeoutMinutes === 15 && hrNegPlan.timeoutMs === 16 * 60000 && hrNegArgv.includes("--timeout 15") && !/--timeout\s+-/.test(hrNegArgv),
+  `timeoutMinutes=${hrNegPlan.timeoutMinutes} timeoutMs=${hrNegPlan.timeoutMs} argv=${hrNegArgv}`,
+);
+
+/* P2：手写 config 里的 "false" / false / -1 这类写法过去会被当成「启用 / 不节流」。 */
+const hrCfgWeird = cfgMod.loadConfig({ enabled: "false", auto: false, autoMinIntervalMs: -1, autoMaxPerSession: "2" });
+check(
+  "配置（P2 回归）：字符串/布尔/负数写法被归一（enabled:'false' 不再当启用）",
+  hrCfgWeird.enabled === false &&
+    hrCfgWeird.auto === "off" &&
+    hrCfgWeird.autoMinIntervalMs === cfgMod.DEFAULTS.autoMinIntervalMs &&
+    hrCfgWeird.autoMaxPerSession === cfgMod.DEFAULTS.autoMaxPerSession,
+  JSON.stringify({
+    enabled: hrCfgWeird.enabled,
+    auto: hrCfgWeird.auto,
+    autoMinIntervalMs: hrCfgWeird.autoMinIntervalMs,
+    autoMaxPerSession: hrCfgWeird.autoMaxPerSession,
+  }),
+);
+const hrCfgTrue = cfgMod.loadConfig({ enabled: "true", auto: "OFF" });
+check(
+  "配置（P2 回归）：'true' / 'OFF' 这类写法认得出来",
+  hrCfgTrue.enabled === true && hrCfgTrue.auto === "off",
+  JSON.stringify({ enabled: hrCfgTrue.enabled, auto: hrCfgTrue.auto }),
+);
+
+/* P2：from/to/commit 原样进 git 命令（在 -- 之前），以 - 开头会被 git 当选项。 */
+const hrRefCase = cannedHarness([{ exitCode: 0, stdout: "{}" }]);
+const hrRefRun = await hrRefCase.call({ scope: "range", from: "--output=C:/tmp/x", to: "HEAD" });
+check(
+  "参数（P2 回归）：from/to/commit 以 - 开头时直接拒绝，且不开子进程",
+  hrRefRun.ok === false && hrRefRun.code === "OCR_INVALID_ARGS" && /不能以 - 开头/.test(hrRefRun.summary) && hrRefCase.canned.calls.length === 0,
+  `${hrRefRun.code} | ${hrRefRun.summary} | spawn=${hrRefCase.canned.calls.length}`,
+);
+
+/* P2：ocr 的输出可能带 ANSI 颜色 / 进度行 + 结果行。 */
+const hrAnsi = review.parseJsonLoose(`\u001b[32m${JSON.stringify({ files: [], issues: [] })}\u001b[0m`);
+check(
+  "解析（P2 回归）：带 ANSI 颜色的 JSON 能解析出来",
+  Boolean(hrAnsi) && Array.isArray(hrAnsi.issues),
+  JSON.stringify(hrAnsi),
+);
+const hrJsonl = review.parseJsonLoose('starting review\nscanned 3 files\n{"files":[],"issues":[{"message":"x"}]}');
+check(
+  "解析（P2 回归）：进度行 + JSON 结果行也能解析出来",
+  Boolean(hrJsonl) && Array.isArray(hrJsonl.issues),
+  JSON.stringify(hrJsonl),
+);
 
 /* ------------------------------------------------------------------ 汇总 */
 

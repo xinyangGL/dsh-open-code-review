@@ -237,7 +237,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 | `code` | 含义 |
 | --- | --- |
-| `OCR_INVALID_ARGS` | 参数不合法（范围 = `workspace`/`range`/`commit`/`scan`，后三种各自缺 `from`+`to`/`commit`/`paths`） |
+| `OCR_INVALID_ARGS` | 参数不合法：范围 = `workspace`/`range`/`commit`/`scan`，后三种各自缺 `from`+`to`/`commit`/`paths`；或 `from`/`to`/`commit` 以 `-` 开头（它们会被原样交给 `git`，等于让调用方注入命令行选项） |
 | `OCR_DISABLED` | `enabled = false`，插件被关掉 |
 | `OCR_NOT_GIT_REPO` | 目标不是 git 仓库（`range`/`commit` 范围不可用） |
 | `OCR_NOT_FOUND` | 找不到 `ocr` 可执行文件 |
@@ -258,6 +258,8 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 `ocr_status` 的 `code` 目前只会是 `OCR_NOT_FOUND`（本地桥/端点这类原因写在 `notes` 与状态行里）。状态行首行末尾也会带上码，例如 `阿里 OpenCodeReview · engine=ocr · scope=workspace · 失败（exit=1，0s，code=OCR_RUN_FAILED）`。
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
+
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 113 项）。
 
 ---
 
@@ -286,6 +288,17 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 设置页文案变成英文 | 界面文案走 Client locale 服务（跟随 DSH 语言）：`locale/*.json` 只放卡片标题与描述，界面文案在 `lib\client.js` 的 `TEXT_ZH`/`TEXT_EN`；没有 locale 服务或词典缺键时自动回落中文 |
 | 插件卡片没有图标 / 标题显示成包名 | 清单读取失败：确认 `package.json` 的 `icon` 是相对路径且文件存在、`exports` 含 `"./locale/*.json"`、`locale/{zh,en}.json` 有 `meta.title/description`（`node test/smoke.mjs` 会校验这几条） |
 
+### 加固（v0.3.4：一轮针对「稳定性/健壮性」的审计与修复）
+
+| 现象（升级前的旧行为） | 现在 |
+| --- | --- |
+| `ocr_status` 说 `ocrPath` 指向 `.cmd`/`.bat`/`.ps1` 被拒绝 | 硬拒并说明原因：Node 24 起 `spawn` 对批处理 shim 直接抛 `EINVAL`（子进程起不来还会被当成「执行失败」）。请指向原生的 `opencodereview.exe`（第 50 行那条探测顺序也是这个道理） |
+| 明明改了代码却不再自动评审 | 旧实现把「上次评审的签名」在评审**前**就推进了，一次瞬时失败（超时/网络/桥没起来）之后就认为这批改动已评过，且失败是静默的。现在签名在评审**成功**后才推进，同批改动失败会重试（`AUTO_RETRY_LIMIT = 2`） |
+| Jobs 面板里有一条评审一直转圈不结束 | 旧实现「打满轮次上限」的分支先登记 job 再 `return`，从不结算。现在会结算成 `failed` + `code: OCR_REVIEWER_UNCERTAIN`，摘要写明「已达轮次上限（N 轮），仍有 M 条未确认的问题」 |
+| 点了「停止」之后上游模型还在烧配额 | 旧桥不监听客户端断连。现在请求 `aborted`/连接被关会中止上游 `ctx.llm.stream`（`req.aborted` / `res` 的 `close` 两条路径）；桥的 `close()` 最多等 2s 宽限，然后关闭所有在飞连接 |
+| 设置页/`config.json` 里把开关写成 `"false"`、次数写成负数 | 旧实现把 `"false"` 当**真**（真值判断只看存在性），负数直接变成负超时（等于关掉硬超时、评审能挂到天荒地老）。现在 `loadConfig` 会归一：`"false"/"0"/"off"` → `false`，非法数字/负数回落到默认值（`timeoutMinutes` 默认 15，也夹在 `maxTimeoutMinutes` 之内） |
+| 评审结果形状不认识却报「未发现问题」 | fail-closed 补齐：`exit=0` 但没有可识别的问题清单字段 → `OCR_OUTPUT_SHAPE_UNKNOWN`（`test/smoke.mjs` 有 7 种坏形状的回归表）；混合清单（一部分解析不出来）也会在 `notes` 里写明「N 条无法解析」 |
+
 ```
 dsh-open-code-review/
 ├─ package.json          # dsh.bundle.patch 指向 cordis.patch.yml；dsh.client 声明浏览器半侧；icon 指向 icon.svg
@@ -305,11 +318,11 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，93 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed、生命周期收尾、独立评审 agent 全路径、评审进度、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，113 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
-   ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，40 项断言：登记/进度行/输出流/停止→取消/结算幂等/没有 jobs 时降级）：node test/job-smoke.mjs
-   ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，43 项断言：提示词/结构化解析/线程轮次/失败与超时）：node test/reviewer-smoke.mjs
-   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，58 项断言，含「assistant 消息必须带 model source」这条真机事故回归）：node test/bridge-smoke.mjs
+   ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
+   ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
+   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，65 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游」这三条真机事故回归）：node test/bridge-smoke.mjs
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，127 项断言，含会话内进度行）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录

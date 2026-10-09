@@ -10,7 +10,10 @@
  * 用法：node test/job-smoke.mjs
  */
 import { REVIEW_JOB_KIND, humanMs, noJob, oneLine, startJob } from "../lib/job.js";
-import { runCommand } from "../lib/ocr-cli.js";
+import { resolveOcr, runCommand } from "../lib/ocr-cli.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const results = [];
 let failures = 0;
@@ -229,6 +232,62 @@ function fakeRegistry(options = {}) {
   check("killed 的明细以停止原因为准，评审结果附在后面", registry.jobs.get(job.id).detail === "用户停止（评审完成）", registry.jobs.get(job.id).detail);
 }
 
+/* ---------------------------------------- 3.5 迟到 kill / 登记失败的兜底结算 */
+
+{
+  /* 结算之后才到的 kill（面板上误点、或宿主在结算与标记完成之间收到 kill）
+     必须被忽略：否则一次正常完成的评审会被翻成 killed。 */
+  const registry = fakeRegistry();
+  const seen = [];
+  const job = startJob(registry, { label: "评审 · 工作区改动 · repo", owner: "s-late", onCancel: (r) => seen.push(r) });
+  job.finish({ status: "completed", detail: "评审完成：0 条问题（2.0s）" });
+  await sleep(10);
+  registry.kill(job.id, "s-late", "迟到的停止");
+  await sleep(30);
+  check("结算之后迟到的 kill 被忽略（状态仍是 completed）", registry.jobs.get(job.id).status === "completed", registry.jobs.get(job.id).status);
+  check("迟到的 kill 不再触发 onCancel", seen.length === 0, JSON.stringify(seen));
+  check("迟到的 kill 不会把 cancelled() 翻成 true", job.cancelled() === false);
+}
+
+{
+  /* ocr 自审发现的真机隐患：宿主可能先调用 spec.run(handle)（job 已登记），
+     之后才抛错。这时再返回 noJob 就没人结算那个 job 了 —— 面板里永远「运行中」。 */
+  const started = new Map();
+  const late = {
+    start(spec) {
+      const handle = { id: "ocr-review-9", append() {}, updateProgress() {} };
+      const hooks = spec.run(handle);
+      started.set(handle.id, hooks);
+      throw new Error("宿主绑定 hooks 时失败");
+    },
+  };
+  const job = startJob(late, { label: "评审 · 工作区改动" });
+  const outcome = await Promise.race([started.get("ocr-review-9").done, sleep(300).then(() => null)]);
+  check("start 先登记后抛错：仍然降级并把原因带出来", job.live === false && job.why.includes("宿主绑定 hooks 时失败"), job.why);
+  check("start 先登记后抛错：兜底结算，不留永远运行中的 job", outcome?.status === "failed", JSON.stringify(outcome));
+}
+
+{
+  /* 没有 id 就挂不上等待者、也没法 kill —— 同样当作登记失败处理。 */
+  const hooks = [];
+  const bad = {
+    start(spec) {
+      hooks.push(spec.run({ id: "", append() {}, updateProgress() {} }));
+      return "";
+    },
+  };
+  const job = startJob(bad, { label: "评审 · 工作区改动" });
+  const outcome = await Promise.race([hooks[0].done, sleep(300).then(() => null)]);
+  check("start 返回空 id：降级且给出原因", job.live === false && job.why.includes("没有返回可用的 id"), job.why);
+  check("start 返回空 id：已登记的 job 也被结算掉", outcome?.status === "failed", JSON.stringify(outcome));
+}
+
+{
+  /* 退化形态的字段形状要和报告器对齐：调用方直接读 elapsedMs 拼文案。 */
+  const dead = noJob("没有 jobs 服务");
+  check("noJob().elapsedMs 是 0（不是 undefined）", dead.elapsedMs === 0, String(dead.elapsedMs));
+  check("noJob() 也有 label 字段", Object.hasOwn(dead, "label") && dead.label === "");
+}
 /* ------------------------------------------------------------------ 4. 等待者拒绝不炸 */
 
 {
@@ -339,6 +398,30 @@ function fakeRegistry(options = {}) {
     { exe: "ocr", argv: ["review"], cwd: process.cwd(), onChunk: () => (calls += 1) },
   );
   check("没有输出时不回调", calls === 0 && result2.stdout === "");
+}
+
+/* ------------------------------------------- 7. resolveOcr：Windows 脚本 shim */
+
+{
+  const dir = mkdtempSync(join(tmpdir(), "ocr-shim-"));
+  const shim = join(dir, "opencodereview.cmd");
+  writeFileSync(shim, "@echo off\r\n");
+  const batPath = join(dir, "ocr.bat");
+  writeFileSync(batPath, "@echo off\r\n");
+  const notFound = { subprocess: { resolveExecutable: async () => { throw new Error("ENOENT: 找不到"); } } };
+  const shimRes = await resolveOcr(notFound, { ocrPath: shim }).then((r) => ({ path: r.path }), (e) => ({ path: "", error: String(e.message ?? e) }));
+  check(
+    "resolveOcr：绝对路径指向 .cmd shim 时绝不返回它（返回它会 spawn EINVAL）",
+    !String(shimRes.path).toLowerCase().endsWith(".cmd"),
+    shimRes.path || shimRes.error.slice(0, 240),
+  );
+  const pathShim = { subprocess: { resolveExecutable: async () => batPath } };
+  const pathRes = await resolveOcr(pathShim, {}).then((r) => ({ path: r.path }), (e) => ({ path: "", error: String(e.message ?? e) }));
+  check(
+    "resolveOcr：PATH 解析结果落到 .bat shim 时也不返回（要么继续找，要么明确报错）",
+    !String(pathRes.path).toLowerCase().endsWith(".bat"),
+    pathRes.path || pathRes.error.slice(0, 240),
+  );
 }
 
 /* ------------------------------------------------------------------ 汇总 */

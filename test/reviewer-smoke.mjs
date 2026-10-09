@@ -475,6 +475,25 @@ function canned(options = {}) {
       hang.calls.dispose === 1,
     text({ code: timedOut.code, interrupt: hang.calls.interrupt.map((c) => c.id + "/" + c.info.kind) }),
   );
+  /* 一次性子 agent 只有 start 的 signal 真能取消（interrupt 对非 resident 静默 return）。
+     评审 agent 默认 timeoutMs 很大，写代码/工具调用卡住时过去只能干等。 */
+  check(
+    "超时真的掐掉 start 的 signal（否则子会话还在跑，dispose 会一直等 result）",
+    hang.calls.start.length === 1 && hang.calls.start[0].request.signal instanceof AbortSignal && hang.calls.start[0].request.signal.aborted === true,
+    text({ started: hang.calls.start.length, abortedAtStart: hang.calls.start[0]?.request.signal?.aborted, startSignal: String(hang.calls.start[0]?.request.signal) }),
+  );
+
+  const outer = canned({ result: new Promise(() => {}) });
+  const outerCtl = new AbortController();
+  const outerRun = runReviewerAgent({ ...base, subagents: outer.subagents, timeoutMs: 60000, signal: outerCtl.signal });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  outerCtl.abort();
+  await outerRun;
+  check(
+    "调用方 signal 中止 → 传到子 agent 的 start signal 也中止（插件卸载/停止按钮能真取消）",
+    outer.calls.start.length === 1 && outer.calls.start[0].request.signal.aborted === true,
+    text({ aborted: outer.calls.start[0]?.request.signal?.aborted }),
+  );
 
   const disposeBoom = canned({ disposeThrows: true });
   const disposeRes = await runReviewerAgent({ ...base, subagents: disposeBoom.subagents });

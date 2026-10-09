@@ -16,6 +16,12 @@
  * - properties/required/additionalProperties 只能挂在 `type:"object"` 上，items 只能挂 array，
  *   enum/const 只能用于标量（含 null）。
  * - `required` 里的名字必须在 `properties` 里；`additionalProperties` 只接受布尔。
+ *
+ * 另外两条同类教训（都在本文件里立了断言）：
+ * - **调用期**宿主还会拿 `output.schema` 校验 execute 的返回值，多一个字段就报
+ *   `returned invalid output: "value.aborted" is not a declared property`（见 payloadViolations）。
+ * - 校验之前先有一步 `snapshotJsonValue`：返回值里任何一层出现 `undefined`/`NaN`/`-0`/
+ *   稀疏数组/类实例，宿主直接报 `value is not lossless JSON`（见 losslessViolations）。
  */
 
 export const CONSTRAINT_KEYWORDS = new Set([
@@ -286,6 +292,75 @@ export function assertToolPayload(label, schema, value) {
   if (problems.length > 0) {
     throw new Error(`tool 返回值不符合 output.schema（宿主会拒收）：\n  - ${problems.join("\n  - ")}`);
   }
+}
+
+/** 递归比对「值」与宿主 snapshotJsonValue 的无损 JSON 规则，把不符之处写进 out。 */
+function collectLossless(value, path, out) {
+  if (value === undefined) {
+    out.push(`${path} 是 undefined：宿主会把整份返回值快照成 undefined（ToolOutputError: value is not lossless JSON）`);
+    return;
+  }
+  const kind = typeof value;
+  if (kind === "number") {
+    if (!Number.isFinite(value)) out.push(`${path} 不是有限数字（${String(value)}）`);
+    else if (Object.is(value, -0)) out.push(`${path} 是 -0：dsh-util-values 明确拒收`);
+    return;
+  }
+  if (kind === "string" || kind === "boolean" || value === null) return;
+  if (kind !== "object") {
+    out.push(`${path} 的类型是 ${kind}，不是 JSON 值`);
+    return;
+  }
+  if (Array.isArray(value)) {
+    // 宿主：数组必须 plain，且 Reflect.ownKeys(current).length === length + 1（不许稀疏、不许挂额外属性）。
+    const own = Reflect.ownKeys(value).length;
+    if (own !== value.length + 1) out.push(`${path} 是稀疏数组或带额外属性（ownKeys=${own}，length=${value.length}）`);
+    value.forEach((entry, index) => collectLossless(entry, `${path}[${index}]`, out));
+    return;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    out.push(`${path} 不是 plain object（prototype=${proto?.constructor?.name ?? "null"}）`);
+  }
+  for (const key of Object.keys(value)) collectLossless(value[key], `${path}.${key}`, out);
+}
+
+/**
+ * 收集「返回值」与无损 JSON 规则的不符之处（空数组 = 宿主能快照成功）。
+ *
+ * 宿主调用 execute 之后是三步：`snapshotToolValue`（= `snapshotJsonValue`）→
+ * `validateJsonSchemaValue(output.schema, detached, "value")` → `deepFreeze`。
+ * 第一步最容易被忽略：任何一层出现 `undefined`、`NaN`、`-0`、稀疏数组或类实例，
+ * 宿主直接报 `value is not lossless JSON`，连 schema 都走不到。
+ */
+export function losslessViolations(value, rootPath = "value") {
+  const out = [];
+  collectLossless(value, rootPath, out);
+  return out;
+}
+
+/** 宿主 `snapshotJsonValue` 的等价物：不合规则返回 undefined。 */
+export function snapshotJsonValue(value) {
+  return losslessViolations(value).length === 0 ? value : undefined;
+}
+
+/** 返回值不是无损 JSON 就抛。 */
+export function assertLosslessJson(label, value) {
+  const problems = losslessViolations(value, `${label}.value`);
+  if (problems.length > 0) {
+    throw new Error(`tool 返回值不是无损 JSON（宿主会报 "value is not lossless JSON"）：\n  - ${problems.join("\n  - ")}`);
+  }
+}
+
+/**
+ * 宿主对一次工具调用的完整门（等价于 dsh-tools/lib/index.js:3541-3571 的三步）：
+ * ①注册期 schema 必须属于支持的子集；②返回值必须无损；③返回值必须过 output.schema。
+ */
+export function assertToolContract(label, definition, value) {
+  assertToolSchemas(label, definition);
+  assertLosslessJson(label, value);
+  const schema = definition && definition.output ? definition.output.schema : undefined;
+  if (schema !== undefined) assertToolPayload(label, schema, value);
 }
 
 /** 违规就抛，信息里带上工具名与路径，方便定位。 */

@@ -6,6 +6,8 @@
  */
 import {
   BRIDGE_COMPLETIONS_PATH,
+  CLOSE_GRACE_MS,
+  MAX_BODY_BYTES,
   bearerTokenOf,
   createAccumulator,
   openAiStreamFrames,
@@ -32,6 +34,16 @@ function log(message) {
 
 function text(value) {
   return JSON.stringify(value);
+}
+
+/** 轮询等待（等桥内部的 abort / inflight 变化）。 */
+async function waitFor(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
 }
 
 /* ------------------------------------------------------- 纯函数：请求翻译 */
@@ -179,14 +191,26 @@ function fakeStream(script) {
 /**
  * 宿主的真行为（dsh-llm/lib/index.js 的 forAdapter，以及 pi-ai/deepseek 适配器的
  * toPiAssistant）：assistant 消息没有 source 时，真机会抛
- * `Cannot read properties of undefined (reading 'replayState')` —— 假 ctx / 假 llm
- * 服务完全拦不住这一类「宿主契约」错误，所以在这里逐字复刻那条读取路径。
+ * `Cannot read properties of undefined (reading 'replayState')`；role=tool 的
+ * toolCallId 对不上时，deepseek 适配器抛 INVALID_REQUEST（tool result has no
+ * matching call）—— 假 ctx / 假 llm 服务完全拦不住这一类「宿主契约」错误，
+ * 所以在这里逐字复刻那两条读取路径。
  * @returns 问题描述列表（空数组＝合规）。
  */
 function hostAssistantSourceProblems(calls) {
   const problems = [];
   for (const options of calls) {
     for (const message of options.messages) {
+      if (message.role === "tool") {
+        if (typeof message.toolCallId !== "string" || message.toolCallId.length === 0) {
+          problems.push("role=tool 缺 toolCallId（适配器会抛 INVALID_REQUEST：tool result has no matching call）");
+          continue;
+        }
+        if (message.source?.kind !== "tool" || message.source.callId !== message.toolCallId) {
+          problems.push("role=tool 的 source 与 toolCallId 不一致：" + text(message.source));
+        }
+        continue;
+      }
       if (message.role !== "assistant") continue;
       const source = message.source; // forAdapter: const source = message.source;
       if (source === undefined || source === null) {
@@ -309,6 +333,100 @@ check("桥：第 2 跳把 assistant.tool_calls + role=tool 翻回 DSH 消息", s
   const probe = hostAssistantSourceProblems([{ provider: "p", model: "m", messages: [{ role: "assistant", content: [] }] }]);
   check("桥：宿主契约探针本身有效（缺 source 会被抓出来）", probe.length === 1 && probe[0].includes("replayState"), probe.join("；"));
 }
+{
+  // A4：有些客户端不给 role=tool 带 tool_call_id；过去桥写出 toolCallId=""，
+  // 宿主适配器配对失败 → INVALID_REQUEST（DeepSeek Messages tool result has no
+  // matching call），第 2 跳直接失败。现在按前一条 assistant 的调用补齐。
+  const unpaired = await post(toolBridge.url, toolBridge.token, {
+    model: "m",
+    messages: [
+      { role: "system", content: "s" },
+      { role: "user", content: "u" },
+      { role: "assistant", content: null, tool_calls: first.json.choices[0].message.tool_calls },
+      { role: "tool", content: "没有 tool_call_id 的工具结果" },
+    ],
+  });
+  const unpairedOptions = toolScript.calls.at(-1);
+  check(
+    "桥：role=tool 缺 tool_call_id 时按前一条 assistant 的调用补齐（否则宿主配对失败）",
+    unpaired.status === 200 && unpairedOptions.messages[2].toolCallId === "call_probe" && unpairedOptions.messages[2].source?.callId === "call_probe",
+    text({ status: unpaired.status, toolCallId: unpairedOptions.messages[2]?.toolCallId, source: unpairedOptions.messages[2]?.source }),
+  );
+  const toolProbe = hostAssistantSourceProblems([{ provider: "p", model: "m", messages: [{ role: "tool", content: [], source: { kind: "tool", callId: "" } }] }]);
+  check("桥：宿主契约探针覆盖 role=tool（缺 callId 会被抓出来）", toolProbe.length === 1 && toolProbe[0].includes("INVALID_REQUEST"), toolProbe.join("；"));
+  const allProblems = hostAssistantSourceProblems([...happy.calls, ...toolScript.calls]);
+  check("桥：所有发出去的消息（含工具往返）都过宿主契约探针", allProblems.length === 0, allProblems.join("；"));
+}
+
+/* 超大 body：过去先 req.destroy() 再回 413，客户端拿到的是 ECONNRESET（status 0），
+   413 永远送不到。 */
+const bigBridge = await startLlmBridge({ stream: happy.stream, target: () => ({ provider: "p", model: "m" }), logger });
+let big = null;
+let bigError = "";
+try {
+  big = await post(bigBridge.url, bigBridge.token, '{"model":"m","messages":[{"role":"user","content":"' + "x".repeat(MAX_BODY_BYTES + 4096) + '"}]}');
+} catch (error) {
+  bigError = String(error);
+}
+check(
+  "桥：超过体积上限 → 客户端真的收到 413 body_too_large（不再是 ECONNRESET）",
+  big !== null && big.status === 413 && big.json.error.code === "body_too_large",
+  big ? big.status + " " + big.raw.slice(0, 120) : "请求失败：" + bigError,
+);
+await bigBridge.close();
+
+/* 客户端断开（ocr 被取消/超时/进程退出）：上游 llm.stream 必须收到 abort，
+   否则这次调用会继续烧配额（过去只有上游超时或关桥才会 abort）。 */
+const hangCalls = [];
+const hangBridge = await startLlmBridge({
+  stream: async function* stream(options) {
+    hangCalls.push(options);
+    yield { type: "text-delta", index: 0, text: "开始" };
+    await new Promise((resolve) => {
+      if (options.signal?.aborted) return resolve();
+      options.signal?.addEventListener("abort", resolve, { once: true });
+      return undefined;
+    });
+    yield { type: "finish", reason: { kind: "stop" } };
+  },
+  target: () => ({ provider: "p", model: "m" }),
+  logger,
+});
+const hangAc = new AbortController();
+const hangPending = fetch(hangBridge.url + "/chat/completions", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: "Bearer " + hangBridge.token },
+  body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "u" }] }),
+  signal: hangAc.signal,
+}).catch(() => null);
+await waitFor(() => hangCalls.length > 0);
+hangAc.abort();
+await waitFor(() => hangCalls[0]?.signal?.aborted === true);
+check(
+  "桥：客户端断开 → 上游 signal 被 abort（取消评审不再继续烧配额）",
+  hangCalls.length === 1 && hangCalls[0].signal.aborted === true,
+  "aborted=" + String(hangCalls[0]?.signal?.aborted),
+);
+await waitFor(() => hangBridge.describe().inflight === 0);
+check("桥：客户端断开后 inflight 归零", hangBridge.describe().inflight === 0, text(hangBridge.describe()));
+await hangPending;
+
+/* 关桥：客户端挂着连接（keep-alive）时也要在宽限期内返回，不能挂死插件卸载。 */
+const keepAlive = fetch(hangBridge.url + "/chat/completions", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: "Bearer " + hangBridge.token },
+  body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "u" }] }),
+}).catch(() => null);
+await waitFor(() => hangCalls.length >= 2);
+const closeStart = Date.now();
+await hangBridge.close();
+const closeMs = Date.now() - closeStart;
+check(
+  "桥：close() 在客户端挂着连接时也能在宽限期内返回（不挂死卸载）",
+  closeMs < CLOSE_GRACE_MS * 3,
+  "耗时 " + closeMs + "ms（宽限 " + CLOSE_GRACE_MS + "ms）",
+);
+await keepAlive;
 
 const failing = fakeStream([{ type: "finish", reason: { kind: "error", failure: { code: "MODEL_NOT_FOUND", message: "Model not supported" } } }]);
 const failBridge = await startLlmBridge({ stream: failing.stream, target: () => ({ provider: "p", model: "m" }), logger });
