@@ -4,6 +4,7 @@
     "这里适合放设置页没有的键：ocrCandidates / autoEngine / maxTimeoutMinutes / extraArgs / env / includeDiffMaxBytes / maxIssuesInText / llm.apiKey（字面密钥）。",
     "改本文件即时生效（按 mtime 热读）；设置页改动也是即时生效。",
     "LLM 默认走 dsh 路由：插件在 127.0.0.1 起一个只认随机 token 的 OpenAI 兼容小桥，把 ocr 的请求转给 DSH 的 ctx.llm.stream —— 模型 / provider / 密钥 / 配额全由 DSH 决定，下面的 baseUrl/protocol/apiKeyRef 只在 llm.mode=endpoint 时才用。",
+    "llm.provider 与 llm.model 留空 = 跟随 DSH 的默认模型（agent-default-model，官方读全局默认路由的同一来源）；想固定某个模型再在设置页的「模型名」下拉里选。",
     "endpoint 路由（老行为）的默认端点是 CommandCode 的 DeepSeek v4.1（OpenAI 兼容路由，实测可用）；密钥不写在这里，用 llm.apiKeyRef 指向 DSH 凭据库里的 COMMANDCODE_API_KEY。"
   ],
   "ocrPath": "",
@@ -21,7 +22,7 @@
     "provider": "",
     "baseUrl": "https://api.commandcode.ai/provider/v1",
     "protocol": "openai",
-    "model": "deepseek/deepseek-v4.1-flash",
+    "model": "",
     "apiKeyRef": "COMMANDCODE_API_KEY",
     "apiKey": ""
   },

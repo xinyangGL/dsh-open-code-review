@@ -84,6 +84,8 @@ const commands = new Map();
 const listeners = new Map();
 /** 凭据替身：只有 credentialStub.ref 指向的引用能解析出值。 */
 const credentialStub = { ref: "", value: "" };
+/** 假的 DSH 默认模型服务返回的路由（desktop profile 的 agent-default-model 实测值）。 */
+const DSH_DEFAULT_MODEL = { provider: "commandcode", model: "deepseek/deepseek-v4.1-flash-fast" };
 const resolvedRefs = [];
 
 /** 假的 llm 服务：脚本化吐 chunk，并记录每次收到的 options（用来验证本机桥的翻译）。 */
@@ -153,6 +155,16 @@ function makeCtx(overrides = {}) {
         commands.set(definition.name, definition);
         return () => commands.delete(definition.name);
       },
+    },
+    /**
+     * 可选服务的读取口（官方插件用 ctx.get("llm") / ctx.get("agentDefaultModel") 读可选服务）：
+     * agentDefaultModel 默认给一个替身（真机 profile 里就有这个服务），传 null 模拟它不存在。
+     */
+    get(name) {
+      if (name === "agentDefaultModel") {
+        return overrides.agentDefaultModel === undefined ? { currentSelection: () => DSH_DEFAULT_MODEL } : overrides.agentDefaultModel;
+      }
+      return ctx[name];
     },
   };
   if (overrides.llm) ctx.llm = overrides.llm;
@@ -464,6 +476,54 @@ try {
   bridgeClosed = true;
 }
 check("dsh 路由：ctx.effect 清理后桥随之关闭（端口不泄漏）", bridgeClosed === true);
+
+/* ------------------- dsh 路由：设置页留空 = 跟随 DSH 默认模型（agentDefaultModel） ------- */
+
+const defaultLlmStub = fakeLlmService(() => [
+  { type: "text-delta", index: 0, text: "pong" },
+  { type: "finish", reason: { kind: "stop" } },
+]);
+const defaultCtx = makeCtx({ llm: defaultLlmStub });
+mod.apply(defaultCtx, cfgMod.Config({ llmMode: "dsh", llmProvider: "", llmModel: "" }));
+await new Promise((resolve) => setTimeout(resolve, 150));
+
+const defStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "dsh 路由：设置页留空时用 DSH 默认模型（provider/model 都从 agentDefaultModel 读）",
+  String(defStatus.llmEndpoint).includes("commandcode/deepseek/deepseek-v4.1-flash-fast") && String(defStatus.llmRoute).includes("DSH 默认模型"),
+  `${defStatus.llmRoute} | ${defStatus.llmEndpoint}`,
+);
+check(
+  "dsh 路由：留空时 OCR_LLM_MODEL 写的也是 DSH 默认模型",
+  defStatus.llmEnv.includes("OCR_LLM_MODEL=deepseek/deepseek-v4.1-flash-fast"),
+  JSON.stringify(defStatus.llmEnv),
+);
+
+if (which("ocr")) {
+  const defLive = await tools.get("ocr_status").execute({}, exec); // checkLlm=true：真跑 ocr llm test
+  const firstCall = defaultLlmStub.calls[0];
+  check(
+    "dsh 路由：真 ocr 请求经桥转发到 DSH 默认模型",
+    String(defLive.llmTest).startsWith("可用") &&
+      defaultLlmStub.calls.length > 0 &&
+      firstCall?.provider === "commandcode" &&
+      firstCall?.model === "deepseek/deepseek-v4.1-flash-fast",
+    `llmTest=${String(defLive.llmTest).slice(0, 60)} calls=${defaultLlmStub.calls.length} ${firstCall ? `${firstCall.provider}/${firstCall.model}` : ""}`,
+  );
+} else {
+  log("本机没有 ocr，跳过 dsh 默认模型的真端到端断言");
+}
+for (const entry of defaultCtx.effects) {
+  if (typeof entry.dispose === "function") entry.dispose();
+}
+
+mod.apply(makeCtx({ llm: undefined, agentDefaultModel: null }), cfgMod.Config({ llmMode: "dsh", llmProvider: "", llmModel: "" }));
+const bareStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "dsh 路由：设置与 DSH 默认模型都缺模型名时说清回落原因",
+  String(bareStatus.llmMode) === "dsh" && String(bareStatus.llmRoute).includes("都没给出可用模型名"),
+  bareStatus.llmRoute,
+);
 
 /* ------------------------------------------------------------------ 汇总 */
 

@@ -455,6 +455,11 @@ const mi = modelInputNode(catalogTree);
 check("模型名仍是可编辑输入框", Boolean(mi) && mi.props.disabled !== true && mi.props.value === "deepseek/deepseek-v4.1-flash");
 check("默认收起候选列表", !modelMenuNode(catalogTree));
 check("模型目录来自 ctx.remote.session", textOf(catalogTree).includes("候选来自 DSH 自己的模型目录"));
+check(
+  "dsh 模式显示 DSH 默认模型（留空即跟随它）",
+  textOf(catalogTree).includes("DSH 默认模型") && textOf(catalogTree).includes("commandcode") && hosts(catalogTree).filter((n) => n.props && n.props["data-ocr-model-default"] === true).length === 1,
+  textOf(catalogTree).slice(-200),
+);
 
 mi.props.onFocus();
 const openTree = render();
