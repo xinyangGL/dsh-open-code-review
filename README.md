@@ -116,7 +116,7 @@ That file layer holds the keys the settings page does not have (`ocrCandidates`,
 | `includeDiffMaxBytes` | `120000` | file only | Cap (characters) on the diff embedded in the generated spec. |
 | `maxIssuesInText` | `40` | file only | Max issues listed in the text summary (the full data stays in `issues` / `rawJson`). |
 | `maxTimeoutMinutes` | `60` | file only | Hard upper bound for `timeoutMinutes`; itself clamped to 24 h (1440 min) in code. |
-| `llm.apiKey` | `""` | file only | Literal key for the `endpoint` route. Prefer `llm.apiKeyRef`: the plugin’s `config.json` is version-controlled and shipped inside the package. |
+| `llm.apiKey` | `""` | file only | Literal key for the `endpoint` route. Prefer `llm.apiKeyRef`: a literal ends up on disk in a config file — and keep that file out of any repository (this repo ships only `config.example.json`). |
 | `reviewer.persona` | `""` | file only | Extra persona / instructions for the reviewer subagent. |
 
 ### Choosing an engine

@@ -31,7 +31,6 @@
     "./client": "./lib/client.js",
     "./lib/*": "./lib/*",
     "./test/*": "./test/*",
-    "./config.json": "./config.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"

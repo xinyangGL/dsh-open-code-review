@@ -293,8 +293,8 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 设置页里找不到 `dsh-open-code-review` / 表单是空的 | 多半是**改了 `lib\*.js` 但没重启 DSH**（宿主仍缓存旧模块，`Config` 没被导出）。完全退出并重开 DSH 后再看；判据：`ocr_status` 的第一行「设置页」 |
 | 插件卡片能打开，但没有配置表单 | 浏览器半侧没被加载：确认 `package.json` 里有 `dsh.client` 与 `exports["./client"]`、`lib\client.js` 存在且语法可解析（`node --check lib\client.js`），然后**重启一次 DSH** 并刷新页面（包扫描结果缓存到重启）；页面里若显示「浏览器侧没有这个条目的表单」说明 cell 已加载但条目 id 对不上 |
 | 设置导航里没有「代码评审」 | 同一个表单的独立入口（`settings.section`）。它没出现说明浏览器半侧没加载；只改了 `lib\client.js` 内容时**刷新页面**即可（bundle 的 rev 取文件 mtime），但**第一次**加上/移动客户端文件要重启 DSH 才会重新扫描 |
-| `无法定位 ocr 可执行文件` | 在 `config.json` 里写 `ocrPath` 指向 `opencodereview.exe`（原生 exe 优先于 `ocr.cmd`） |
-| `credential "COMMANDCODE_API_KEY" 未配置` / `llm test` 报缺 key | 这是 `endpoint` 路由的问题：在设置页把「LLM 凭据引用」改成你 DSH 凭据库里已有的名字，或往 `config.json` 的 `llm.apiKey` 写一个字面密钥——**但先确认这个文件不会被提交**：它在仓库里受版本控制、且随插件包分发（`package.json` 的 `files`/`exports` 都含 `./config.json`），明文密钥会跟着泄露，所以更推荐 `llm.apiKeyRef`（见「加固 v0.3.5」）。若切回 `dsh` 路由，密钥由 DSH 的 provider 配置提供，不用在这里填 |
+| `无法定位 ocr 可执行文件` | 在设置页「高级设置 → ocr 可执行文件」填绝对路径，或往外部配置文件（`<DSH_HOME>\dsh-open-code-review.json`）写 `ocrPath` 指向 `opencodereview.exe`（原生 exe 优先于 `ocr.cmd`） |
+| `credential "COMMANDCODE_API_KEY" 未配置` / `llm test` 报缺 key | 这是 `endpoint` 路由的问题：在设置页把「LLM 凭据引用」改成你 DSH 凭据库里已有的名字（推荐，磁盘上没有明文），或往**外部配置文件**（`<DSH_HOME>\dsh-open-code-review.json`）的 `llm.apiKey` 写一个字面密钥。仓库里只放 `config.example.json`，真实的 `config.json` 已被 `.gitignore` 忽略、也不再随包分发（`package.json` 的 `files`/`exports` 都不含它），所以写密钥不会再随提交泄露 —— 但仍要确认你自己没有把它复制进任何仓库（见「加固 v0.3.5」）。若切回 `dsh` 路由，密钥由 DSH 的 provider 配置提供，不用在这里填 |
 | `OCR 未配置 LLM 端点` | 预期行为之一：`engine: "auto"` 会自动降级 `delegate`；想用 `ocr` 流水线就修好路由（`dsh` 路由看下一条，或切成 `endpoint` 填好端点/协议/模型/凭据引用）。显式 `engine: "ocr"` 时结果是失败：`code: OCR_LLM_MISSING` |
 | `Model "…" is not supported on this endpoint` | `llmProtocol` 配错了：CommandCode 的 DeepSeek 系要 `openai`；走 `/v1/messages` 的 Anthropic 端点才用 `anthropic` |
 | 结果里 `issues` 为空但评审成功 | 这表示返回的 JSON **确有**问题清单字段且为空（`code: ""`）= 真「未发现问题」。要核对 OCR 原始字段名与内容就读 `rawJson`；`extractIssues` 已兼容 `issues/findings/comments/…` 多种字段名 |
@@ -325,11 +325,11 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 | 现象（升级前的旧行为） | 现在 |
 | --- | --- |
-| 文档/注释引导把**明文密钥**写进 `config.json` | 本文件在仓库里受版本控制、且随插件包分发（`package.json` 的 `files`/`exports` 都含 `./config.json`），写进去会随提交与分发泄露。`config.json` 的 `_readme` 与本文档现在都明确：密钥用 `llm.apiKeyRef` 指向 DSH 凭据库，`llm.apiKey` 是最后手段且先确认本文件不会被提交 |
-| 设置页 / `config.json` / 默认值三层里，某层的 `env`、`extraArgs`、`ocrCandidates` 被静默丢掉 | 旧实现只叠加 `file` 层（`patch.env` 直接丢、`extraArgs`/`ocrCandidates` 只取文件层）。现在三层按「设置页 > `config.json` > 默认值」叠加，后两者走 `stringList()`（取上层第一个真数组、过滤空串） |
+| 文档/注释引导把**明文密钥**写进 `config.json` | 旧版 `config.json` 在仓库里受版本控制、且随插件包分发（`package.json` 的 `files`/`exports` 都含 `./config.json`），写进去会随提交与分发泄露。现在：`config.json` 已被 `.gitignore` 忽略、从索引里移除（`git rm --cached`）、也不再进 `files`/`exports`，仓库里放 `config.example.json` 模板；模板与文档都明确密钥首选 `llm.apiKeyRef`（指向 DSH 凭据库，磁盘无明文），`llm.apiKey` 只是最后手段，且推荐写 `<DSH_HOME>\dsh-open-code-review.json` 而不是包目录 |
+| 设置页 / `config.json` / 默认值三层里，某层的 `env`、`extraArgs`、`ocrCandidates` 被静默丢掉 | 旧实现只叠加 `file` 层（`patch.env` 直接丢、`extraArgs`/`ocrCandidates` 只取文件层）。现在三层按「设置页 > 外部配置文件 > 默认值」叠加，后两者走 `stringList()`（取上层第一个真数组、过滤空串） |
 | `includeDiffMaxBytes` / `maxIssuesInText` 显式写 `0` 却被当成「没配」 | 旧实现末尾有 `\|\| DEFAULTS.x`，把 `0`（本意是「不带 diff」/「正文不列问题」）吃掉，和同组其它计数项（`0` 合法）不一致。现在显式 `0` 保留 |
 | 同一批阈值在 `DEFAULTS` 和 `buildSchema()` 里各写一份，改一处忘一处 | `buildSchema()` 的 6 个 `.default(...)`（`autoMaxPerSession`/`autoMinReviewableFiles`/`autoMinIntervalMs`/`autoSkipSubagents`/`autoIncludeDiff`/`timeoutMinutes`）与 `timeoutMinutes` 的上界都改成引用 `DEFAULTS`；`lib\review.js` 里 `maxTimeoutMinutes` 的回落值也从硬编码 `45` 改成 `DEFAULTS.maxTimeoutMinutes`（此前同一语义有三个数字：60 / 60 / 45） |
-| `config.json` 写坏了（JSON 语法错）却毫无提示 | 仍然 fail-safe 按出厂默认跑，但每次文件变化会在宿主日志里留一行：`[dsh-open-code-review] …\config.json 解析失败，本次按出厂默认运行：<原因>`（热读有 mtime/size 短路，所以只喊一次，不会刷屏） |
+| 配置文件写坏了（JSON 语法错）却毫无提示 | 仍然 fail-safe 按出厂默认跑，但每次文件变化会在宿主日志里留一行：`[dsh-open-code-review] <解析出来的路径> 解析失败，本次按出厂默认运行：<原因>`（热读有 mtime/size 短路，所以只喊一次，不会刷屏） |
 
 ### 加固（v0.3.6：修好 v0.3.5 之后再评一次自己的 `lib\config.js`）
 
@@ -362,7 +362,7 @@ dsh-open-code-review/
 │  ├─ zh.json            # 卡片标题与描述（meta.title/description）：不加载插件也要可读
 │  └─ en.json            # 同上，英文
 ├─ cordis.patch.yml      # 插入 profile（本机为 desktop）插件树的条目
-├─ config.json           # 第 2 层配置（可选；默认值全列在此，含 _readme 说明）
+├─ config.example.json   # 配置模板（复制到 <DSH_HOME>\dsh-open-code-review.json 再改；真实的 config.json 已被 .gitignore 忽略、不进仓库也不进包）
 ├─ lib/
 │  ├─ index.js           # 插件入口：schemastery Config + 工具/命令注册 + 自动评审钩子 + 本机桥接线 + 独立评审 agent 编排（runReviewerReview / 轮次往返 / subagents 子注入）+ 评审进度接线（openReviewJob / finishReviewJob / chunkSink）
 │  ├─ reviewer.js        # 评审 agent：规格提示词、findings schema 与解析、线程与轮次（纯逻辑；subagents 运行时由调用方注入）

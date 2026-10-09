@@ -1615,11 +1615,17 @@ check(
 );
 
 
-const hrReadmeText = [JSON.stringify(JSON.parse(readFileSync(new URL("../config.json", import.meta.url), "utf8"))._readme), readFileSync(new URL("../README.md", import.meta.url), "utf8")].join("\n");
+/* 读 config.example.json（真实的 config.json 已被 .gitignore 忽略、也不再进包，
+   CI 里只有模板）+ 两份 README，断言「别把明文密钥写进文件」这条警示没被删掉。 */
+const hrDocsText = [
+  JSON.stringify(JSON.parse(readFileSync(new URL("../config.example.json", import.meta.url), "utf8"))._readme),
+  readFileSync(new URL("../README.md", import.meta.url), "utf8"),
+  readFileSync(new URL("../README.zh.md", import.meta.url), "utf8"),
+].join("\n");
 check(
-  "文档（v0.3.5 回归）：config.json 的 _readme 与 README 都警示「别把明文密钥写进本文件」",
-  /不要[^"]*明文密钥/.test(hrReadmeText) && /llm\.apiKeyRef/.test(hrReadmeText) && /不会被提交/.test(hrReadmeText),
-  `len=${hrReadmeText.length}`,
+  "文档（v0.3.5 回归）：config.example.json 的 _readme 与两份 README 都警示「别把明文密钥写进文件」",
+  /不要[^"]*明文密钥/.test(hrDocsText) && /llm\.apiKeyRef/.test(hrDocsText) && /(不会被提交|不该被提交|不写明文|no plaintext)/.test(hrDocsText),
+  `len=${hrDocsText.length}`,
 );
 
 /* P2：from/to/commit 原样进 git 命令（在 -- 之前），以 - 开头会被 git 当选项。 */
