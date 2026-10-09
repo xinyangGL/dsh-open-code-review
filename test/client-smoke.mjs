@@ -295,6 +295,9 @@ let snapshot = {
     autoMinIntervalMs: 60000,
     autoSkipSubagents: true,
     autoIncludeDiff: true,
+    reviewerAgent: "off",
+    reviewerProvider: "spawn",
+    reviewerRounds: 3,
     timeoutMinutes: 15,
     llmBaseUrl: "https://api.commandcode.ai/provider/v1",
     llmProtocol: "openai",
@@ -361,7 +364,7 @@ function controlRows(node, out = []) {
   return out;
 }
 const rows = controlRows(tree);
-check("dsh 模式下 16 个控件行（静态端点三行不渲染）", rows.length === 16, `n=${rows.length}`);
+check("dsh 模式下 17 个控件行（静态端点三行不渲染、独立评审 agent 只显一行）", rows.length === 17, `n=${rows.length}`);
 
 const modeRow = rows.find((r) => r.key === "llmMode");
 check("找到 LLM 路由行", Boolean(modeRow) && modeRow.field.tag === "select");
@@ -378,7 +381,7 @@ check("每行都有「恢复默认」", rows.every((r) => r.buttons.some((b) => 
 modeRow.field.props.onChange({ target: { value: "endpoint" } });
 const endpointTree = render();
 const endpointRows = controlRows(endpointTree);
-check("endpoint 模式下 18 个控件行", endpointRows.length === 18, `n=${endpointRows.length}`);
+check("endpoint 模式下 19 个控件行", endpointRows.length === 19, `n=${endpointRows.length}`);
 check("endpoint 模式下藏掉 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
 check("endpoint 模式状态行说明直连", textOf(endpointTree).includes("LLM 直连静态端点"));
 
@@ -394,7 +397,7 @@ if (save2) {
   check("保存调用 form.set(Base URL)", writes.some((w) => w.op === "set" && w.key === "llmBaseUrl" && w.value === "https://example.test/v1"), JSON.stringify(writes));
 }
 
-/* 切回 dsh：后面几段按 dsh 模式的 16 行断言 */
+/* 切回 dsh：后面几段按 dsh 模式的 17 行断言 */
 controlRows(render()).find((r) => r.key === "llmMode").field.props.onChange({ target: { value: "dsh" } });
 render();
 
@@ -502,6 +505,55 @@ modelInputNode(oneMatch).props.onKeyDown({ key: "Enter", preventDefault() {} });
 const kbPicked = controlRows(render()).find((r) => r.key === "llmModel");
 check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.value === "kimi-k2.7-code", kbPicked ? String(kbPicked.field.props.value) : "没有该行");
 
+/* ------------------------------------------------------------ 独立评审 agent（opt-in） */
+
+controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "spawn" } });
+const spawnTree = render();
+const spawnRows = controlRows(spawnTree);
+check("reviewer=spawn 时 dsh 模式 20 个控件行（多出子 agent 三行）", spawnRows.length === 20, `n=${spawnRows.length}`);
+check("reviewerAgent 只有 off / spawn 两个选项", (() => {
+  const row = spawnRows.find((r) => r.key === "reviewerAgent");
+  return Boolean(row) && hosts(row.row).filter((n) => n.tag === "option").length === 2;
+})());
+check("spawn 后出现子 agent provider / 模型 / 轮次三行", ["reviewerProvider", "reviewerModel", "reviewerRounds"].every((key) => spawnRows.some((r) => r.key === key)));
+check("spawn 状态行说明走独立 agent", textOf(spawnTree).includes("评审走独立 agent"));
+check("spawn 后轮次上限默认 3（数字框）", (() => {
+  const row = spawnRows.find((r) => r.key === "reviewerRounds");
+  return Boolean(row) && row.field.props.type === "number" && row.field.props.value === "3";
+})());
+
+/* 评审子会话的模型也走同一份 DSH 目录，选中候选写的是 reviewerProvider，不动 llmProvider */
+const reviewModelRow = spawnRows.find((r) => r.key === "reviewerModel");
+const reviewInput = reviewModelRow && hosts(reviewModelRow.row).find((n) => n.tag === "input" && n.props["data-ocr-model-input"] === true);
+check("子 agent 模型行也是可搜索下拉", Boolean(reviewInput) && reviewInput.props.disabled !== true);
+if (reviewInput) {
+  reviewInput.props.onFocus();
+  const reviewMenu = render();
+  const reviewItems = hosts(reviewMenu).filter((n) => n.props && n.props["data-ocr-model-item"] === true);
+  check("子 agent 模型行能展开候选", reviewItems.length >= 4, `n=${reviewItems.length}`);
+  const target = reviewItems.find((n) => textOf(n).includes("Kimi K2.7 Code"));
+  check("子 agent 候选里能找到模型", Boolean(target));
+  if (target) {
+    target.props.onMouseDown({ preventDefault() {} });
+    const afterPick = controlRows(render());
+    const rm = afterPick.find((r) => r.key === "reviewerModel");
+    const rp = afterPick.find((r) => r.key === "reviewerProvider");
+    check("选中后写入 reviewerModel 草稿", Boolean(rm) && rm.field.props.value === "kimi-k2.7-code", rm ? String(rm.field.props.value) : "没有该行");
+    check("选中后把提供方写进 reviewerProvider（不是 llmProvider）", Boolean(rp) && rp.field.props.value === "commandcode", rp ? String(rp.field.props.value) : "没有该行");
+    const saveReviewModel = rm && rm.buttons.find((b) => textOf(b) === "保存");
+    if (saveReviewModel) {
+      await saveReviewModel.props.onClick();
+      check("保存子 agent 模型调用 form.set(reviewerModel)", writes.some((w) => w.op === "set" && w.key === "reviewerModel" && w.value === "kimi-k2.7-code"), JSON.stringify(writes.slice(-2)));
+    }
+  }
+}
+
+/* 切回 off：后面的降级场景与行数断言按默认（不启用）算 */
+controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "off" } });
+const offAgain = controlRows(render());
+check("切回 off 后子 agent 三行消失、行数回到 17", offAgain.length === 17 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
+check("切回 off 后状态行不再提独立 agent", !textOf(render()).includes("评审走独立 agent"));
+
 /* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
 fakeCtx.remote.session.modelCatalog = async () => ({ ok: false, error: { code: "peer-unavailable", message: "peer 断了" } });
 render();
@@ -587,7 +639,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 /* 条目 id 回退：主 id 查不到时用备用 id */
 fakeCtx.rejectIds = ["include:dsh-open-code-review"];
 const fbTree = render();
-check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 16, JSON.stringify(fakeCtx.formIds.slice(-2)));
+check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 17, JSON.stringify(fakeCtx.formIds.slice(-2)));
 check("回退后字段仍可编辑", controlRows(fbTree).every((r) => r.field.props.disabled !== true));
 
 /* 两个 id 都查不到：给出诊断而不是崩掉 */
@@ -602,7 +654,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 const sectionTree = expand(miniReact.createElement(sectionReg.component, {}));
 const sectionHtml = textOf(sectionTree);
 check("设置页渲染标题", sectionHtml.includes("代码评审（阿里 OpenCodeReview）"));
-check("设置页也带 16 个控件行", controlRows(sectionTree).length === 16, `n=${controlRows(sectionTree).length}`);
+check("设置页也带 17 个控件行", controlRows(sectionTree).length === 17, `n=${controlRows(sectionTree).length}`);
 check("设置页照样带出条目 id", sectionHtml.includes("include:dsh-open-code-review"));
 
 /* ------------------------------------------------------------ 宿主没有 Remote 桥 */

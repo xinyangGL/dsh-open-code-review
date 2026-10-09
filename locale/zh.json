@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "代码评审（OpenCodeReview）",
-    "description": "把阿里 OpenCodeReview (ocr) 接进 DSH：模型可调用的 ocr_review / ocr_status 工具、/ocr-review 命令、回合结束自动评审；LLM 默认走插件的本机桥转发给 DSH（模型、密钥、配额全由 DSH 决定）。"
+    "description": "把阿里 OpenCodeReview (ocr) 接进 DSH：模型可调用的 ocr_review / ocr_status 工具、/ocr-review 命令、回合结束自动评审；LLM 默认走插件的本机桥转发给 DSH（模型、密钥、配额全由 DSH 决定）；也可让评审交给一个只读的独立子 agent 执行，findings 回传给编码 agent 逐条修复。"
   }
 }

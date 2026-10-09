@@ -99,6 +99,11 @@ dsh plugin --profile desktop remove dsh-open-code-review
 | `autoMinReviewableFiles` | `1` | ✅ | 可审文件数低于该值就跳过 |
 | `autoMinIntervalMs` | `60000` | ✅ | 两次自动评审最小间隔（毫秒） |
 | `autoIncludeDiff` | `true` | ✅ | 自动（delegate）评审时带不带 `git diff` |
+| `reviewer.agent` | `"off"` | ✅ | 独立评审 agent：`off`=不启用（评审走 ocr/delegate）；`spawn`=每轮起一个**只读**子 agent 评审（需要宿主提供 `subagents` 服务） |
+| `reviewer.provider` | `"spawn"` | ✅ | 子 agent 用的 provider 名（DSH 内置的是 `spawn`）；名字不存在时报 `OCR_REVIEWER_UNAVAILABLE` 并在 `notes` 里列出可用名 |
+| `reviewer.model` | `""` | ✅ | 评审子 agent 的模型（设置页的「子 agent 模型」下拉同样来自 DSH 模型目录）；留空=跟随 provider 默认 |
+| `reviewer.rounds` | `3` | ✅ | 一次往返最多几轮（1–10，每轮 = 一个新子会话）；到上限就交付当前结论 |
+| `reviewer.persona` | `""` | ✅ | 评审人格/纪律（留空=插件内置 `DEFAULT_REVIEWER_PERSONA`） |
 | `includeDiffMaxBytes` | `120000` | — | 单次带出的 diff 上限（字符） |
 | `maxIssuesInText` | `40` | — | 文本渲染最多列多少条问题（完整数据仍在 `issues`/`rawJson`） |
 | `verbose` | `false` | ✅ | 打印调试日志（本机桥的日志也走它） |
@@ -172,12 +177,13 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
   "rulePath": "D:\\rules\\review.json",  // 自定义系统规则
   "timeoutMinutes": 15,
   "repo": "D:\\my-repo",  // 默认取当前会话工作目录
+  "reviewer": true,       // true=强制独立评审 agent；false=强制 ocr/delegate；缺省按 reviewer.agent 设置
   "includeDiff": true     // delegate 模式是否附 diff
 }
 ```
 
-返回：`ok` / `code`（失败原因码，见下文「失败结果码」）/ `reviewableFiles` / `excludedFiles` / `issues[]` / `reviewSpec`（delegate 的规格正文）/ `summary` / `rawJson`（原始 JSON，最多 10 万字符）等。
-`ocr_status` 用来体检：可执行文件、版本、OCR 全局配置、环境变量、`llm test` 连通性，外加 LLM 路由模式与本机桥的 URL / 请求次数 / 失败次数 / 最近模型 / 最近错误。
+返回：`ok` / `code`（失败原因码，见下文「失败结果码」）/ `reviewableFiles` / `excludedFiles` / `issues[]` / `reviewSpec`（delegate 的规格正文）/ `reviewer`（独立评审 agent 的 provider/model/round/rounds/childId/stopReason/verdict）/ `summary` / `rawJson`（原始 JSON，最多 10 万字符）等。
+`ocr_status` 用来体检：可执行文件、版本、OCR 全局配置、环境变量、`llm test` 连通性，外加 LLM 路由模式与本机桥的 URL / 请求次数 / 失败次数 / 最近模型 / 最近错误，以及独立评审 agent 的 `enabled` / `available` / `providers` / `ready` / `error` 段。
 
 ### 命令 `/ocr-review`
 
@@ -192,6 +198,20 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 3. 把结果交给模型——模型仍在跑就用 `inject`（下个 step 作为上下文），已空闲就用 `followup`（开新回合处理）。
 
 每个会话最多 `autoMaxPerSession` 次，两次之间至少隔 `autoMinIntervalMs`，同样的改动签名不会重复触发。不想要就把 `auto` 设为 `"off"`。
+
+### 独立评审 agent（opt-in）
+
+默认 `off`：评审仍走 ocr 流水线或 delegate。把设置页的「独立评审 agent」设为 `spawn` 后，评审交给**第二个 agent** —— 它有自己的会话、上下文、人格与模型，只有只读工具：
+
+1. 回合结束、确认有可审改动后，插件先向 ocr 要一份规格（`delegate preview` 的文件清单 + 规则正文 + `git diff`）；**范围与规则仍来自 ocr**，评审 agent 不自己决定审什么；
+2. `ctx.subagents.start(provider, { prompt: 规格, outputSchema: FINDINGS_SCHEMA, toolFilter: { allow: ["read","grep","glob"] }, persona, parent: 编码 agent })` 起一个**只读**子 agent（禁止代改代码：两个 agent 抢写文件是灾难）；
+3. 子 agent 按 schema 返回 `verdict`（`clean` / `issues` / `uncertain`）+ `findings[]`（`file` / `line` / `severity` = `blocker|major|minor|nit` / `message` / `evidence?` / `suggestion?` / 第 2 轮起 `stillOpen?`）；
+4. 插件把 findings 注入编码 agent：「请逐条修复或说明理由（误报也要说明）；本回合结束后会自动开下一轮复审（最多 N 轮）」；
+5. 编码 agent 改完 → 下一轮（新子会话，prompt 里带上上一轮 findings 要求逐条判定是修复了还是仍存在）→ 直到 `clean`、到 `reviewer.rounds` 上限、或连续 2 次失败。
+
+安全阀：每轮都计入 `autoMaxPerSession` 与 `autoMinIntervalMs`（复用现有计数），线程闲置超过 `timeoutMinutes` 自动关闭；`clean` 关线程；同样改动签名不会重复开轮。想临时指定某一次评审，用 `ocr_review` 的 `reviewer` 参数（`true` 强制 agent，`false` 强制 ocr/delegate）。
+
+引擎三档的选择：`ocr`（阿里流水线，最省心）→ `delegate`（当前 agent 拿 ocr 规则自审，不花钱）→ `reviewer.agent = spawn`（第二双眼睛，最贵但最像人审）。规格始终来自 ocr，所以三档可以随时切换、互不冲突。
 
 ### 失败结果码（fail-closed）
 
@@ -211,8 +231,11 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | `OCR_OUTPUT_SHAPE_UNKNOWN` | `exit=0` 且是 JSON，但没有可识别的问题清单字段 |
 | `OCR_DELEGATE_PREVIEW_FAILED` | `delegate` 的 `ocr delegate preview` 失败 |
 | `OCR_DELEGATE_RULE_UNPARSABLE` | `delegate` 的规则 JSON 解析不出来（`reviewSpec` 仍会返回，文件清单与 diff 还能用） |
+| `OCR_REVIEWER_UNAVAILABLE` | `reviewer.agent = spawn` 但拿不到评审 agent：宿主没有 `subagents` 服务、provider 名不存在、`start()` 抛错。自动档回落静态引擎并在 `notes` 里说明；显式 `reviewer: true` 直接失败（不偷偷回落） |
+| `OCR_REVIEWER_FAILED` | 评审 agent 没给出可用结论：`stopReason` 不是 `completed`、`structured` 缺失或形状不合法 —— fail-closed，绝不当作通过 |
+| `OCR_REVIEWER_UNCERTAIN` | 评审 agent 自己说「信息不足，无法确认」（`verdict = uncertain`）—— `ok: false`，不算通过，线程保持打开等下一轮 |
 
-后四个是 **fail-closed**：退出码 0 不再等于「评审通过」。「没发现问题」必须由**带问题清单字段且为空**的 JSON 证明（`issues` / `findings` / `comments` / `problems` / `annotations` / `warnings` / `errors` / `review_comments` 任一）—— `exit=0` 但字段缺失、输出不是 JSON、或 stdout 是空的，都算失败（`ok: false`），并在 `notes` 里说清是哪一种、建议改用 `engine: "delegate"` 或复核 `rawJson`。真的没问题时结果仍是 `ok: true`、`code: ""`（`test/smoke.mjs` 有一条专门的「不误报」断言）。
+后四条（`OUTPUT_UNPARSABLE` / `OUTPUT_SHAPE_UNKNOWN` / `REVIEWER_FAILED` / `REVIEWER_UNCERTAIN`）是 **fail-closed**：退出码 0 不再等于「评审通过」。「没发现问题」必须由**带问题清单字段且为空**的 JSON 证明（`issues` / `findings` / `comments` / `problems` / `annotations` / `warnings` / `errors` / `review_comments` 任一）—— `exit=0` 但字段缺失、输出不是 JSON、或 stdout 是空的，都算失败（`ok: false`），并在 `notes` 里说清是哪一种、建议改用 `engine: "delegate"` 或复核 `rawJson`。真的没问题时结果仍是 `ok: true`、`code: ""`（`test/smoke.mjs` 有一条专门的「不误报」断言）。
 
 `ocr_status` 的 `code` 目前只会是 `OCR_NOT_FOUND`（本地桥/端点这类原因写在 `notes` 与状态行里）。状态行首行末尾也会带上码，例如 `阿里 OpenCodeReview · engine=ocr · scope=workspace · 失败（exit=1，0s，code=OCR_RUN_FAILED）`。
 
@@ -233,6 +256,9 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | `Model "…" is not supported on this endpoint` | `llmProtocol` 配错了：CommandCode 的 DeepSeek 系要 `openai`；走 `/v1/messages` 的 Anthropic 端点才用 `anthropic` |
 | 结果里 `issues` 为空但评审成功 | 这表示返回的 JSON **确有**问题清单字段且为空（`code: ""`）= 真「未发现问题」。要核对 OCR 原始字段名与内容就读 `rawJson`；`extractIssues` 已兼容 `issues/findings/comments/…` 多种字段名 |
 | `ok: false` + `code: OCR_OUTPUT_UNPARSABLE` / `OCR_OUTPUT_SHAPE_UNKNOWN` | fail-closed：`ocr` 退出码 0，但输出无法证明「评审跑过且没有问题清单」。先看 `notes` 里的原始输出摘要，必要时手工跑 `ocr review --format json`；若是新版 `ocr` 换了字段名，把新名字加进 `lib\review.js` 的 `ISSUE_KEYS`（`test/smoke.mjs` 的 `hasIssueCollection` 断言会跟着扩展），或临时用 `engine: "delegate"`（不依赖这份 JSON） |
+| `ok: false` + `code: OCR_REVIEWER_UNAVAILABLE` | 先看 `ocr_status` 的 reviewer 段（`available`/`providers`/`ready`/`error`）：宿主没有 `subagents` 服务或没装 provider（本机是 `dsh-tool-subagent` 的 `spawn`）时起不了评审 agent。把「独立评审 agent」设回 `off`，或装上提供方插件；显式传 `reviewer: true` 时这是硬失败 |
+| `code: OCR_REVIEWER_FAILED` | 评审 agent 没按 schema 返回（`stopReason` 是 `error`/`refusal`/`max-tokens`，或 `structured` 缺失）。诊断在 `notes`；连续 2 次会关掉这轮往返。临时绕开：`reviewer: false` 或 `engine: "ocr"` |
+| `code: OCR_REVIEWER_UNCERTAIN` | 评审 agent 说信息不足：把范围/规则说清楚，或在 `reviewer.persona` 里补要求。这条**不算通过**（`ok: false`） |
 | 输出被截断 | 看 `lostOutput`/`spillPath`（子进程输出超缓冲会落盘） |
 | 自动评审太频繁 | 设置页调小「每会话最多自动评审次数」、调大「最小间隔」，或把「自动评审」设为 `off` |
 | `ocr_status` 说「本机桥没有就绪」，状态行也显示回落 | `dsh` 路由需要宿主加载了提供 `llm` 服务的插件（本机是 `llm-commandcode` / `llm-pi-ai` 之类）。缺它就自动回落 `endpoint` 路由：要么修好 profile 里的提供方插件，要么把「LLM 路由」切成 `endpoint` 填好地址与凭据引用 |
@@ -249,19 +275,21 @@ dsh-open-code-review/
 ├─ cordis.patch.yml      # 插入 profile（本机为 desktop）插件树的条目
 ├─ config.json           # 第 2 层配置（可选；默认值全列在此，含 _readme 说明）
 ├─ lib/
-│  ├─ index.js           # 插件入口：schemastery Config + 工具/命令注册 + 自动评审钩子 + 本机桥接线
+│  ├─ index.js           # 插件入口：schemastery Config + 工具/命令注册 + 自动评审钩子 + 本机桥接线 + 独立评审 agent 编排（runReviewerReview / 轮次往返 / subagents 子注入）
+│  ├─ reviewer.js        # 评审 agent：规格提示词、findings schema 与解析、线程与轮次（纯逻辑；subagents 运行时由调用方注入）
 │  ├─ bridge.js          # 本机 LLM 桥：OpenAI 兼容 /v1/chat/completions ⇄ ctx.llm.stream
-│  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section，渲染 19 字段设置表单（dsh 路由 16 行 / endpoint 路由 18 行），文案走 Client locale
+│  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section，渲染 23 字段设置表单（评审 agent off 时 dsh 17 行 / endpoint 19 行；spawn 时 20 / 22 行），文案走 Client locale
 │  ├─ config.js          # 三层配置合并、schemaOverrides（读 volatile 引用）
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，56 项断言，含结果码/fail-closed/生命周期收尾/清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，75 项断言，含结果码/fail-closed/生命周期收尾/独立评审 agent 全路径/清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，43 项断言：提示词/结构化解析/线程轮次/失败与超时）：node test/reviewer-smoke.mjs
    ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，51 项断言）：node test/bridge-smoke.mjs
-   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，115 项断言）：node test/client-smoke.mjs
-   ├─ cordis-inject.mjs  # 真 cordis 回归（14 项断言，守住"服务齐全/只差 remote.session/完全没有 remote"三种宿主形态）：node test/cordis-inject.mjs
+   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，128 项断言）：node test/client-smoke.mjs
+   ├─ cordis-inject.mjs  # 真 cordis 回归（20 项断言，守住"服务齐全/只差 remote.session/完全没有 remote"三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
-   ├─ zprobe3.mjs        # schema 预检：19 个字段是否都带 volatile/description/default
+   ├─ zprobe3.mjs        # schema 预检：24 个字段是否都带 volatile/description/default
    └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs
 ```
 
@@ -275,4 +303,7 @@ dsh-open-code-review/
 - 本机桥是明文 HTTP + Bearer 随机 token，只绑定 `127.0.0.1`、只活在本进程内，token 通过子进程环境变量交给 `ocr`（同机信任模型，不做 TLS/签名；断言见 `test/smoke.mjs` 的「只监听 127.0.0.1」与 `test/bridge-smoke.mjs`）。
 - `ocr` 退出码 0 **不等于**评审通过：输出 JSON 里缺少可识别的问题清单字段（或不是 JSON / 是空串）时结果算失败（`OCR_OUTPUT_UNPARSABLE` / `OCR_OUTPUT_SHAPE_UNKNOWN`），免得「评审其实没跑成」被当成「没问题」。
 - 插件卸载/重载会先 abort 在飞的评审（子进程 `terminate()`，结果标 `OCR_ABORTED`）并等它们 settle，所以 `dispose` 可能要等子进程收尾。
-- 结果码是稳定契约（`OCR_*`）：`REVIEW_TOOL_OUTPUT` / `STATUS_TOOL_OUTPUT` 的枚举说明、`lib\review.js` 的 `CODES` 与 `test/smoke.mjs` 的码表断言三处同步。
+- 结果码是稳定契约（`OCR_*`）：`REVIEW_TOOL_OUTPUT` / `STATUS_TOOL_OUTPUT` 的枚举说明、`lib\review.js` 的 `CODES`、`lib\reviewer.js` 的 `REVIEWER_CODES` 与 `test/smoke.mjs` 的码表断言四处同步。
+- 独立评审 agent 需要宿主加载提供 `subagents` 服务的插件（本机是 `dsh-tool-subagent` 带的内置 `spawn` provider）。缺它时自动档回落静态引擎并在 `notes` 说明，显式 `reviewer: true` 以 `OCR_REVIEWER_UNAVAILABLE` 失败。
+- 结构化输出（`outputSchema`）只在一次性的 `ctx.subagents.start()` 上可用，所以**每轮都是一个新的子会话**：线程记忆（上一轮 findings / `stillOpen`）由插件写进 prompt。子会话会出现在子代理侧栏，并计入 `autoMaxPerSession`。
+- 评审子会话自己的回合结束不会再触发自动评审（`autoSkipSubagents` 挡住递归）；`uncertain` 不算通过，`clean` 才关线程。

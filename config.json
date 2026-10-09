@@ -5,7 +5,8 @@
     "改本文件即时生效（按 mtime 热读）；设置页改动也是即时生效。",
     "LLM 默认走 dsh 路由：插件在 127.0.0.1 起一个只认随机 token 的 OpenAI 兼容小桥，把 ocr 的请求转给 DSH 的 ctx.llm.stream —— 模型 / provider / 密钥 / 配额全由 DSH 决定，下面的 baseUrl/protocol/apiKeyRef 只在 llm.mode=endpoint 时才用。",
     "llm.provider 与 llm.model 留空 = 跟随 DSH 的默认模型（agent-default-model，官方读全局默认路由的同一来源）；想固定某个模型再在设置页的「模型名」下拉里选。",
-    "endpoint 路由（老行为）的默认端点是 CommandCode 的 DeepSeek v4.1（OpenAI 兼容路由，实测可用）；密钥不写在这里，用 llm.apiKeyRef 指向 DSH 凭据库里的 COMMANDCODE_API_KEY。"
+    "endpoint 路由（老行为）的默认端点是 CommandCode 的 DeepSeek v4.1（OpenAI 兼容路由，实测可用）；密钥不写在这里，用 llm.apiKeyRef 指向 DSH 凭据库里的 COMMANDCODE_API_KEY。",
+    "reviewer.agent=spawn（默认 off）时评审改由独立子 agent 执行：每轮起一个只读子 agent（只有 read/grep/glob，不改代码），拿结构化 findings 回传给你逐条修复/说明理由，改完自动开下一轮复审，直到没有问题或到 reviewer.rounds 上限。"
   ],
   "ocrPath": "",
   "ocrCandidates": [],
@@ -25,6 +26,13 @@
     "model": "",
     "apiKeyRef": "COMMANDCODE_API_KEY",
     "apiKey": ""
+  },
+  "reviewer": {
+    "agent": "off",
+    "provider": "spawn",
+    "model": "",
+    "rounds": 3,
+    "persona": ""
   },
   "auto": "adaptive",
   "autoScope": "workspace",

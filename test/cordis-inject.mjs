@@ -247,6 +247,104 @@ await settle();
 check("完全没有 remote 时子 fiber 不激活", Boolean(c.scope) && c.scope.current() === null, c.scope ? String(c.scope.current()) : "没有 remoteScope");
 check('完全没有 remote 时 ctx.get("remote") 也读不到（只剩手输降级）', Boolean(c.scoped) && c.scoped.get("remote") === undefined, String(c.scoped && c.scoped.get("remote")));
 
+/* ------------------------------------------------------------ 宿主侧 apply：可选服务缺席也不能 inactive */
+
+const host = await import(pathToFileURL(join(PLUGIN_DIR, "lib", "index.js")).href);
+
+/**
+ * 起一套根 Context，按宿主形态 provide 宿主服务的替身：
+ * tools / commands / subprocess / credentials 是插件 inject 里点名的（必须有），
+ * subagents 是可选服务 —— 只由插件内部的子 fiber 声明，缺它时插件本体必须照常激活。
+ * list() 的契约照真实实现抄：dsh-subagent 的 SubagentService.list() 返回 provider 名数组。
+ */
+async function makeHostPlugin(services) {
+  const root = new Context();
+  const registered = { tools: [], commands: [] };
+  const calls = { subagentsList: 0 };
+  await root.plugin({
+    name: "host-probe-provider",
+    apply(ctx) {
+      ctx.provide("tools", {
+        register(def) {
+          registered.tools.push(String((def && def.name) || ""));
+          return () => {};
+        },
+      });
+      ctx.provide("commands", {
+        register(def) {
+          registered.commands.push(String((def && def.name) || ""));
+          return () => {};
+        },
+      });
+      ctx.provide("subprocess", {
+        spawn() {
+          throw new Error("探针不该真的起子进程");
+        },
+      });
+      ctx.provide("credentials", {
+        resolve: async () => ({ value: "" }),
+      });
+      if (services.includes("subagents")) {
+        ctx.provide("subagents", {
+          list() {
+            calls.subagentsList += 1;
+            return ["spawn"];
+          },
+          getProvider: () => undefined,
+          start: async () => {
+            throw new Error("探针不该真的起子 agent");
+          },
+          interrupt: () => {},
+        });
+      }
+    },
+  });
+  await root.plugin({
+    name: "host-probe-plugin-" + (services.join("+") || "bare"),
+    apply: host.apply,
+    inject: host.inject,
+  });
+  return { root, registered, calls };
+}
+
+/* 形态 D：宿主没提供 subagents / llm（老版 DSH，或没装 subagent 插件） */
+const bareHost = await makeHostPlugin([]);
+await settle();
+check(
+  "宿主没提供 subagents/llm 时插件照样激活并注册两个工具 + 一条命令",
+  bareHost.registered.tools.length === 2 && bareHost.registered.commands.length === 1,
+  `tools=${bareHost.registered.tools.join(",")} commands=${bareHost.registered.commands.join(",")}`,
+);
+check(
+  "没有 subagents 时插件不会去碰它（list() 一次都没调）",
+  bareHost.calls.subagentsList === 0,
+  `list=${bareHost.calls.subagentsList}`,
+);
+check(
+  "宿主侧 inject 不硬依赖 subagents/llm（写进去会让缺服务的 profile 打成 inactive）",
+  !host.inject.includes("subagents") && !host.inject.includes("llm"),
+  host.inject.join(","),
+);
+
+/* 形态 E：宿主提供了 subagents —— 子 fiber 激活并绑定服务 */
+const fullHost = await makeHostPlugin(["subagents"]);
+await settle();
+check(
+  "提供了 subagents 时子 fiber 激活（确实读了一次 list()）",
+  fullHost.calls.subagentsList >= 1,
+  `list=${fullHost.calls.subagentsList}`,
+);
+check(
+  "提供 subagents 时插件本体依然注册两个工具 + 一条命令",
+  fullHost.registered.tools.length === 2 && fullHost.registered.commands.length === 1,
+  `tools=${fullHost.registered.tools.join(",")} commands=${fullHost.registered.commands.join(",")}`,
+);
+check(
+  "注册的工具名就是 ocr_review / ocr_status，命令是 ocr-review",
+  fullHost.registered.tools.join(",") === "ocr_review,ocr_status" && fullHost.registered.commands.join(",") === "ocr-review",
+  `tools=${fullHost.registered.tools.join(",")} commands=${fullHost.registered.commands.join(",")}`,
+);
+
 await rm(sandbox, { recursive: true, force: true });
 console.log(failures.length === 0 ? "\n全部通过" : `\n${failures.length} 项失败`);
 process.exit(failures.length === 0 ? 0 : 1); /* 跳过走 2（见文件头） */

@@ -104,6 +104,8 @@ function fakeLlmService(script) {
 function makeCtx(overrides = {}) {
   /** ctx.effect / ctx.inject 的替身：effect 立刻执行并记住清理函数，inject 只在服务齐全时回调。 */
   const effects = [];
+  /** 事件监听表：默认共用全局那张（端到端那几段依赖它），独立场景可以传自己的免得互相串。 */
+  const listenerMap = overrides.listeners ?? listeners;
   const ctx = {
     effects,
     effect(callback, label) {
@@ -137,10 +139,10 @@ function makeCtx(overrides = {}) {
       },
     },
     on(name, handler) {
-      if (!listeners.has(name)) listeners.set(name, []);
-      listeners.get(name).push(handler);
+      if (!listenerMap.has(name)) listenerMap.set(name, []);
+      listenerMap.get(name).push(handler);
       return () => {
-        const list = listeners.get(name) ?? [];
+        const list = listenerMap.get(name) ?? [];
         const index = list.indexOf(handler);
         if (index >= 0) list.splice(index, 1);
       };
@@ -169,6 +171,7 @@ function makeCtx(overrides = {}) {
     },
   };
   if (overrides.llm) ctx.llm = overrides.llm;
+  if (overrides.subagents) ctx.subagents = overrides.subagents;
   return ctx;
 }
 
@@ -530,8 +533,8 @@ check(
 
 const codeKeys = Object.keys(review.CODES ?? {});
 check(
-  "结果码表：12 个稳定码齐全、都是 OCR_ 前缀、互不重复",
-  codeKeys.length === 12 && new Set(Object.values(review.CODES)).size === 12 && codeKeys.every((key) => String(review.CODES[key]).startsWith("OCR_")),
+  "结果码表：15 个稳定码齐全、都是 OCR_ 前缀、互不重复",
+  codeKeys.length === 15 && new Set(Object.values(review.CODES)).size === 15 && codeKeys.every((key) => String(review.CODES[key]).startsWith("OCR_")),
   codeKeys.join(","),
 );
 
@@ -599,9 +602,9 @@ function cannedSubprocess(runs) {
 }
 
 /** 用罐头子进程跑一次 ocr_review（engine=ocr 是一次 spawn，正好一次脚本）。 */
-function cannedHarness(runs, config = {}) {
+function cannedHarness(runs, config = {}, overrides = {}) {
   const canned = cannedSubprocess(runs);
-  const ctx2 = makeCtx({ subprocess: canned });
+  const ctx2 = makeCtx({ subprocess: canned, ...overrides });
   mod.apply(ctx2, cfgMod.Config({ engine: "ocr", llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash", ...config }));
   const exec2 = { name: "ocr_review", callId: "canned", arguments: {}, agent: makeAgent(), signal: undefined };
   return { canned, ctx: ctx2, exec: exec2, call: (args) => tools.get("ocr_review").execute(args, exec2) };
@@ -705,6 +708,304 @@ check(
   `${disposeValue.code} | ${disposeValue.summary}`,
 );
 
+/* ------------------------------------------- 独立评审 agent（只读子 agent + findings 往返） */
+
+/** 罐头 SubagentRuntime：契约照 dsh-subagent 的 SubagentService（list / getProvider / start / interrupt）。 */
+function cannedSubagents(script) {
+  const calls = { start: [], interrupt: [], dispose: 0, list: 0, settle: null };
+  const runtime = {
+    list() {
+      calls.list += 1;
+      return ["spawn"];
+    },
+    getProvider(name) {
+      return name === "spawn" ? { name: "spawn", agentRouteDefaults: { provider: "commandcode" } } : null;
+    },
+    start(provider, request) {
+      calls.start.push({ provider, request });
+      const item = (typeof script === "function" ? script(provider, request, calls.start.length) : script) || {};
+      let resolvePending = () => {};
+      const pending = new Promise((resolve) => {
+        resolvePending = () => resolve(item.result ?? { stopReason: "aborted" });
+      });
+      calls.settle = resolvePending;
+      const signal = request && request.signal;
+      if (signal) {
+        if (signal.aborted) resolvePending();
+        else signal.addEventListener("abort", () => resolvePending(), { once: true });
+      }
+      const done = Promise.resolve(item.result ?? { stopReason: "completed", structured: item.structured });
+      return {
+        id: item.id ?? "child-" + calls.start.length,
+        localAgent: { session: { header: { cwd: REPO } } },
+        result: item.pending ? pending : done,
+        dispose: async () => {
+          calls.dispose += 1;
+        },
+      };
+    },
+    async interrupt(id, reason) {
+      calls.interrupt.push({ id, reason });
+      if (calls.settle) calls.settle();
+      return true;
+    },
+  };
+  return { runtime, calls };
+}
+
+/** 评审 agent 的规格来源：delegate preview → delegate rule → git diff（三条罐头命令）。 */
+function reviewerSpecRuns(files = [{ path: "lib/a.js", insertions: 3, deletions: 1 }]) {
+  return [
+    { exitCode: 0, stdout: JSON.stringify({ files, excluded: [] }) },
+    { exitCode: 0, stdout: JSON.stringify({ groups: [{ group_id: "g1", pattern: "**/*.js", rule: "不要把 undefined 当空值" }] }) },
+    { exitCode: 0, stdout: "diff --git a/lib/a.js b/lib/a.js\n+if (x == null) {}\n" },
+  ];
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitUntil = async (predicate, timeoutMs = 30000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await sleep(25);
+  return predicate();
+};
+const emitOn = (map, name, ...args) => {
+  for (const handler of map.get(name) ?? []) handler(...args);
+};
+/** 把交付到某个 agent 的用户消息收进本地数组（不写全局 deliver，免得跟别的段串）。 */
+function localAgent(sink, status = "idle") {
+  return {
+    status,
+    session: { header: { cwd: REPO, origin: "user" } },
+    inject: (message) => sink.push(message),
+    followup: (message) => sink.push(message),
+  };
+}
+const FINDINGS_ONE = {
+  verdict: "issues",
+  summary: "空值判断漏了 undefined",
+  findings: [
+    {
+      file: "lib/a.js",
+      line: 12,
+      severity: "major",
+      message: "x == null 之外的路径会读到 undefined",
+      evidence: "调用方可能传 undefined",
+      suggestion: "先做空值收敛再比较",
+    },
+  ],
+};
+
+/* 先跑「宿主没有 subagents 服务」的两条：reviewerRuntime 是插件模块级状态，后面的场景会把它绑上。 */
+const bareCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" });
+const bareForced = await bareCase.call({ reviewer: true });
+check(
+  "reviewer:true 但宿主没有 subagents：报 OCR_REVIEWER_UNAVAILABLE（不回落 ocr/delegate）",
+  bareForced.ok === false && bareForced.code === "OCR_REVIEWER_UNAVAILABLE" && bareForced.engine === "agent" && bareForced.issues.length === 0,
+  bareForced.code + " | " + bareForced.summary,
+);
+check(
+  "缺 subagents 时的说明可执行（指向 reviewerProvider 与 off 两条出路）",
+  bareForced.notes.some((n) => n.includes("reviewerProvider")) && bareForced.summary.includes("不可用"),
+  JSON.stringify(bareForced.notes),
+);
+
+/* 自动档：开了 spawn 但宿主没有 subagents → 回落静态引擎，并在备注里说明。 */
+const fbMap = new Map();
+const fbSink = [];
+const fbAgent = localAgent(fbSink);
+const fbCase = cannedHarness(
+  [
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], issues: [] }) },
+  ],
+  { engine: "ocr", reviewerAgent: "spawn", autoMinIntervalMs: 0 },
+  { listeners: fbMap },
+);
+emitOn(fbMap, "tools/result", { name: "edit", agent: fbAgent }, { isError: false });
+emitOn(fbMap, "agent/turn-stopping", { agent: fbAgent, reason: "test" });
+await waitUntil(() => fbSink.length > 0);
+const fbText = fbSink.length > 0 ? textOf(fbSink[0]) : "";
+check(
+  "自动档 reviewer.agent=spawn 但缺 subagents：回落 ocr/delegate 并在备注里说明",
+  fbSink.length === 1 && !fbText.includes("【独立评审 agent ·") && fbText.includes("独立评审 agent 不可用") && fbText.includes("engine=ocr"),
+  fbSink.length + " 条交付 | " + fbText.slice(0, 160),
+);
+
+/* 设置里关着 reviewer.agent（默认 off）：即使宿主有 subagents 也一次都不起。 */
+const offSub = cannedSubagents({ structured: { verdict: "clean", summary: "审完没问题", findings: [] } });
+const offRuns = [{ exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 1, deletions: 0 }], issues: [] }) }];
+const offCase = cannedHarness(offRuns, { engine: "ocr", reviewerAgent: "off" }, { subagents: offSub.runtime });
+const offRun = await offCase.call({});
+check(
+  "reviewer.agent=off（默认）：评审走 ocr，子 agent 零调用",
+  offRun.engine === "ocr" && offRun.code === "" && offSub.calls.start.length === 0,
+  offRun.engine + " code=" + offRun.code + " start=" + offSub.calls.start.length,
+);
+const offForced = cannedHarness(offRuns, { engine: "ocr", reviewerAgent: "spawn" }, { subagents: offSub.runtime });
+const offForcedRun = await offForced.call({ reviewer: false });
+check(
+  "reviewer:false 会压过设置里的 spawn（强制走 ocr/delegate）",
+  offForcedRun.engine === "ocr" && offSub.calls.start.length === 0,
+  offForcedRun.engine + " start=" + offSub.calls.start.length,
+);
+check("给的 subagents 服务在 apply 时被登记过（list 被调用）", offSub.calls.list >= 1, "list=" + offSub.calls.list);
+
+/* 工具入口 reviewer:true：起一个只读子 agent，拿结构化 findings。 */
+const okSub = cannedSubagents({ structured: FINDINGS_ONE });
+const okCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: okSub.runtime });
+const okRun = await okCase.call({ reviewer: true });
+const okStart = okSub.calls.start[0];
+const okPrompt = okStart ? okStart.request.prompt.map((b) => b.text).join("") : "";
+check(
+  "工具入口 reviewer:true：engine=agent、findings 进 issues、单轮（第 1/1 轮）",
+  okRun.ok === true && okRun.engine === "agent" && okRun.issues.length === 1 && okRun.issues[0].severity === "major" && okRun.reviewer.round === 1 && okRun.reviewer.rounds === 1 && okRun.reviewer.childId === "child-1",
+  okRun.engine + " issues=" + okRun.issues.length + " reviewer=" + JSON.stringify(okRun.reviewer),
+);
+check(
+  "子 agent 只拿到只读工具、结构化 schema、父 agent 与人格（不共享编码上下文）",
+  Boolean(okStart) && okStart.provider === "spawn" && okStart.request.toolFilter.allow.join(",") === "read,grep,glob" && okStart.request.outputSchema.properties.verdict.enum.join(",") === "clean,issues,uncertain" && okStart.request.parent === okCase.exec.agent && String(okStart.request.persona || "").length > 0 && okStart.request.label.includes("第 1/1 轮"),
+  okStart ? JSON.stringify({ provider: okStart.provider, allow: okStart.request.toolFilter.allow, label: okStart.request.label }) : "start 没被调用",
+);
+check(
+  "评审提示词带着 ocr 的规则正文与 diff（规格仍来自 ocr，不由 agent 自己找范围）",
+  okPrompt.includes("不要把 undefined 当空值") && okPrompt.includes("diff --git a/lib/a.js") && okPrompt.includes("## 审查规格"),
+  "prompt 长度=" + okPrompt.length + " | " + okPrompt.slice(0, 200).replace(/\n/g, " / "),
+);
+check("每次子 agent 跑完都 dispose（不泄漏子会话）", okSub.calls.dispose === 1, "dispose=" + okSub.calls.dispose);
+
+/* 失败路径：一律不当作通过。 */
+const errSub = cannedSubagents({ result: { stopReason: "error", diagnostic: "provider 502" } });
+const errCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: errSub.runtime });
+const errRun = await errCase.call({ reviewer: true });
+check(
+  "评审 agent 结束理由不是 completed：OCR_REVIEWER_FAILED（绝不当作通过）",
+  errRun.ok === false && errRun.code === "OCR_REVIEWER_FAILED" && errRun.reviewer.stopReason === "error" && errRun.notes.some((n) => n.includes("502")),
+  errRun.code + " | " + errRun.summary,
+);
+const noStructSub = cannedSubagents({ result: { stopReason: "completed" } });
+const noStructCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: noStructSub.runtime });
+const noStructRun = await noStructCase.call({ reviewer: true });
+check(
+  "structured 缺失：OCR_REVIEWER_FAILED 且 ok=false（fail-closed）",
+  noStructRun.ok === false && noStructRun.code === "OCR_REVIEWER_FAILED" && noStructRun.notes.some((n) => n.includes("fail-closed")),
+  noStructRun.code + " | " + noStructRun.summary,
+);
+const unsureSub = cannedSubagents({ structured: { verdict: "uncertain", summary: "看不到调用方，无法判断" } });
+const unsureCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: unsureSub.runtime });
+const unsureRun = await unsureCase.call({ reviewer: true });
+check(
+  "verdict=uncertain：OCR_REVIEWER_UNCERTAIN 且 ok=false（不算通过）",
+  unsureRun.ok === false && unsureRun.code === "OCR_REVIEWER_UNCERTAIN" && unsureRun.reviewer.verdict === "uncertain" && unsureRun.notes.some((n) => n.includes("uncertain 不算通过")),
+  unsureRun.code + " | " + unsureRun.summary,
+);
+
+/* 自动档：第 1 轮由独立子 agent 执行并交付 findings 清单。 */
+const autoSub = cannedSubagents({ structured: FINDINGS_ONE });
+const autoMap = new Map();
+const autoSink = [];
+const revAutoAgent = localAgent(autoSink);
+const autoCase = cannedHarness(
+  [
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
+    ...reviewerSpecRuns(),
+  ],
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoMinIntervalMs: 0 },
+  { subagents: autoSub.runtime, listeners: autoMap },
+);
+emitOn(autoMap, "tools/result", { name: "edit", agent: revAutoAgent }, { isError: false });
+emitOn(autoMap, "agent/turn-stopping", { agent: revAutoAgent, reason: "test" });
+await waitUntil(() => autoSink.length > 0);
+const revAutoText = autoSink.length > 0 ? textOf(autoSink[0]) : "";
+check(
+  "自动档第 1 轮：交付带轮次 + findings 清单 + 「请逐条修复或说明理由」",
+  autoSink.length === 1 && revAutoText.includes("【独立评审 agent · 第 1/3 轮】") && revAutoText.includes("lib/a.js:12") && revAutoText.includes("[major]") && revAutoText.includes("请逐条修复或说明理由"),
+  autoSink.length + " 条 | " + revAutoText.slice(0, 200).replace(/\n/g, " / "),
+);
+check(
+  "自动档：子 agent 的 parent 就是编码 agent，且只给只读工具",
+  autoSub.calls.start.length === 1 && autoSub.calls.start[0].request.parent === revAutoAgent && autoSub.calls.start[0].request.toolFilter.allow.join(",") === "read,grep,glob",
+  "start=" + autoSub.calls.start.length,
+);
+
+/* clean 之后线程关闭：换签名再来一次，又该从「第 1/3 轮」开始（不是第 2 轮）。 */
+const cleanSub = cannedSubagents({ structured: { verdict: "clean", summary: "审完没问题", findings: [] } });
+const cleanMap = new Map();
+const cleanSink = [];
+const cleanAgent = localAgent(cleanSink);
+const cleanRoundCase = cannedHarness(
+  [
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
+    ...reviewerSpecRuns(),
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
+    ...reviewerSpecRuns([{ path: "lib/a.js", insertions: 9, deletions: 1 }]),
+  ],
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoMinIntervalMs: 0 },
+  { subagents: cleanSub.runtime, listeners: cleanMap },
+);
+emitOn(cleanMap, "tools/result", { name: "edit", agent: cleanAgent }, { isError: false });
+emitOn(cleanMap, "agent/turn-stopping", { agent: cleanAgent, reason: "test" });
+await waitUntil(() => cleanSink.length >= 1);
+emitOn(cleanMap, "tools/result", { name: "edit", agent: cleanAgent }, { isError: false });
+emitOn(cleanMap, "agent/turn-stopping", { agent: cleanAgent, reason: "test" });
+await waitUntil(() => cleanSink.length >= 2);
+const cleanText1 = cleanSink[0] ? textOf(cleanSink[0]) : "";
+const cleanText2 = cleanSink[1] ? textOf(cleanSink[1]) : "";
+check(
+  "clean 之后线程关闭：换签名再评又回到「第 1/3 轮」",
+  cleanSink.length === 2 && cleanText1.includes("第 1/3 轮") && cleanText1.includes("未发现问题") && cleanText2.includes("第 1/3 轮") && cleanSub.calls.start.length === 2,
+  "交付=" + cleanSink.length + " start=" + cleanSub.calls.start.length + " | " + cleanText2.slice(0, 140),
+);
+
+/* 轮次上限：reviewerRounds=1 且还有未确认的问题 → 第二轮不再起子 agent。 */
+const capSub = cannedSubagents({ structured: FINDINGS_ONE });
+const capMap = new Map();
+const capSink = [];
+const capAgent = localAgent(capSink);
+const capCase = cannedHarness(
+  [
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
+    ...reviewerSpecRuns(),
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
+  ],
+  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoMinIntervalMs: 0 },
+  { subagents: capSub.runtime, listeners: capMap },
+);
+emitOn(capMap, "tools/result", { name: "edit", agent: capAgent }, { isError: false });
+emitOn(capMap, "agent/turn-stopping", { agent: capAgent, reason: "test" });
+await waitUntil(() => capSink.length >= 1);
+emitOn(capMap, "tools/result", { name: "edit", agent: capAgent }, { isError: false });
+emitOn(capMap, "agent/turn-stopping", { agent: capAgent, reason: "test" });
+await waitUntil(() => capSink.length >= 2);
+const capText2 = capSink[1] ? textOf(capSink[1]) : "";
+check(
+  "reviewerRounds=1：还有未确认的问题就到上限收工（不再起子 agent）",
+  capSink.length === 2 && capText2.includes("已达轮次上限") && capText2.includes("lib/a.js:12") && capSub.calls.start.length === 1,
+  "交付=" + capSink.length + " start=" + capSub.calls.start.length + " | " + capText2.slice(0, 160),
+);
+
+/* ocr_status 的 reviewer 诊断段：把「为什么没起来」摆给用户看。 */
+const stSub = cannedSubagents({ structured: { verdict: "clean", summary: "x", findings: [] } });
+const stCase = cannedHarness([{ exitCode: 0, stdout: "ocr 9.9.9" }], { reviewerAgent: "spawn", reviewerProvider: "spawn", reviewerRounds: 3 }, { subagents: stSub.runtime });
+const stRun = await tools.get("ocr_status").execute({ checkLlm: false }, stCase.exec);
+check(
+  "ocr_status 报出评审 agent 的可用性 / provider 清单 / 轮数",
+  stRun.reviewer.enabled === true && stRun.reviewer.available === true && stRun.reviewer.providers.join(",") === "spawn" && stRun.reviewer.rounds === 3 && stRun.reviewer.ready === true,
+  JSON.stringify(stRun.reviewer),
+);
+
+/* dispose：在飞的评审子 agent 会被 abort + dispose（不留孤儿子会话）。 */
+const hangSub = cannedSubagents({ pending: true });
+const hangCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: hangSub.runtime });
+const hangRun = hangCase.call({ reviewer: true });
+await waitUntil(() => hangSub.calls.start.length > 0);
+const hangEntry = hangCase.ctx.effects.find((entry) => String(entry.label).includes("在飞"));
+await hangEntry.dispose();
+const hangValue = await hangRun;
+check(
+  "dispose：在飞的评审子 agent 收到 abort，结果报 OCR_ABORTED（不留孤儿）",
+  hangValue.ok === false && hangValue.code === "OCR_ABORTED" && hangSub.calls.dispose >= 1,
+  hangValue.code + " | " + hangValue.summary + " dispose=" + hangSub.calls.dispose,
+);
 if (which("ocr")) {
   /* 罐头 ctx 覆盖了同名工具，先切回真子进程的注册再跑真 ocr。 */
   mod.apply(ctx, schemaRefs);
