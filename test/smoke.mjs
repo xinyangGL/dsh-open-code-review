@@ -270,6 +270,18 @@ const review = await import(new URL("../lib/review.js", import.meta.url));
 const cli = await import(new URL("../lib/ocr-cli.js", import.meta.url));
 const cfgMod = await import(new URL("../lib/config.js", import.meta.url));
 
+/**
+ * CI（裸 clone + node，不跑 pnpm install）里没有 DSH 的 @deepseek-ai/schemastery：
+ * lib/config.js 的动态 import 会失败，SCHEMA_AVAILABLE=false / Config=undefined。这不是 bug，
+ * 是设计好的降级（schema 由宿主提供，设置页据此生成）。所以这里按环境挑写法：
+ *   · 有 schema：Config(patch) —— 和宿主真实调用一致（含 volatile 引用）
+ *   · 没有：普通对象 —— apply() 内部走 schemaOverrides()，只认 SCHEMA_KEY_MAP 里的键，语义相同
+ * package.json 已把 @deepseek-ai/schemastery 声明为「可选 peerDependency」（社区插件 dshmarket 同款做法），
+ * 真实安装（pnpm/git）会把它链到插件目录或由 profile 提供，用户侧不会掉设置页。
+ */
+const HAS_SCHEMA = mod.SCHEMA_AVAILABLE === true && typeof mod.Config === "function";
+const mkConfig = (patch = {}) => (HAS_SCHEMA ? mod.Config(patch) : { ...patch });
+
 check("模块导出 name/inject/apply", mod.name === "dsh-open-code-review" && Array.isArray(mod.inject) && typeof mod.apply === "function", `inject=${JSON.stringify(mod.inject)}`);
 
 /* ------------------------------------------------------------ 清单（Plugin Manager 展示） */
@@ -326,19 +338,44 @@ check(
 
 /* --------------------------------------------------- 设置页 schema（volatile） */
 
-check("导出 schemastery Config（DSH 据此生成设置页）", mod.SCHEMA_AVAILABLE === true && Boolean(mod.Config), `SCHEMA_AVAILABLE=${mod.SCHEMA_AVAILABLE}`);
-const schema = mod.Config;
+if (HAS_SCHEMA) {
+  check("导出 schemastery Config（DSH 据此生成设置页）", mod.SCHEMA_AVAILABLE === true && Boolean(mod.Config), `SCHEMA_AVAILABLE=${mod.SCHEMA_AVAILABLE}`);
+} else {
+  check(
+    "没有 @deepseek-ai/schemastery 时优雅降级（CI 就是这种环境）：Config 为 undefined，其余导出照常可用",
+    mod.Config === undefined &&
+      typeof cfgMod.loadConfig === "function" &&
+      typeof cfgMod.normalizeConfig === "function" &&
+      typeof cfgMod.schemaOverrides === "function",
+    `SCHEMA_AVAILABLE=${mod.SCHEMA_AVAILABLE}`,
+  );
+}
+const schema = HAS_SCHEMA ? mod.Config : null;
 let schemaRefs = null;
 try {
   schemaRefs = typeof schema === "function" ? schema({ llmModel: "deepseek/deepseek-v4.1-flash", llmApiKeyRef: "SMOKE_OCR_KEY" }) : null;
 } catch (err) {
   log(`schema 解析失败：${err?.message ?? err}`);
 }
-check(
-  "设置页字段是 volatile 引用（有 .get()）",
-  Boolean(schemaRefs) && typeof schemaRefs?.llmApiKeyRef?.get === "function" && schemaRefs.llmApiKeyRef.get() === "SMOKE_OCR_KEY",
-  `llmApiKeyRef=${typeof schemaRefs?.llmApiKeyRef?.get === "function" ? schemaRefs.llmApiKeyRef.get() : "(无)"}`,
-);
+if (HAS_SCHEMA) {
+  check(
+    "设置页字段是 volatile 引用（有 .get()）",
+    Boolean(schemaRefs) && typeof schemaRefs?.llmApiKeyRef?.get === "function" && schemaRefs.llmApiKeyRef.get() === "SMOKE_OCR_KEY",
+    `llmApiKeyRef=${typeof schemaRefs?.llmApiKeyRef?.get === "function" ? schemaRefs.llmApiKeyRef.get() : "(无)"}`,
+  );
+} else {
+  check(
+    "没有 schema 时不解析 volatile 引用，但扁平字段映射照常（CI 路径：插件功能不依赖这个包）",
+    schemaRefs === null && cfgMod.schemaOverrides({ autoReview: { get: () => "adaptive" } })?.auto === "adaptive",
+    `schemaRefs=${schemaRefs ? "有" : "无"}`,
+  );
+}
+
+/**
+ * 宿主（设置页 / host 持久层）交给 apply() 的那份补丁：有 schema 时是 Config 实例（设置页字段是 volatile
+ * 引用），CI 上没有这个包就退化成同形状的普通对象 —— apply 内部走 schemaOverrides()，两者语义一致。
+ */
+const settingsPatch = schemaRefs ?? mkConfig({ llmModel: "deepseek/deepseek-v4.1-flash", llmApiKeyRef: "SMOKE_OCR_KEY" });
 
 const ref = (value) => Object.freeze({ get: () => value });
 const overrides = cfgMod.schemaOverrides({
@@ -384,7 +421,7 @@ check("buildOcrArgv(range) 参数拼装", argv.argv.join(" ") === "review --from
 const progressRegistry = makeJobsRegistry();
 const ctx = makeCtx();
 ctx.jobs = progressRegistry;
-mod.apply(ctx, schemaRefs);
+mod.apply(ctx, settingsPatch);
 check("注册了 ocr_review / ocr_status / ocr-review", tools.has("ocr_review") && tools.has("ocr_status") && commands.has("ocr-review"), [...tools.keys()].join(","));
 check("工具声明了 output.schema + render", typeof tools.get("ocr_review").output?.render === "function" && tools.get("ocr_review").output.schema?.type === "object");
 
@@ -522,7 +559,7 @@ check(
 
 /* 显式打开自动档（老行为）后照旧：另起一个 auto=adaptive 的实例，
    证明四档自动模式仍然可用，只是不再默认替用户打开。 */
-mod.apply(makeCtx(), cfgMod.Config({ autoReview: "adaptive", autoMaxPerSession: 3, autoMinIntervalMs: 0 }));
+mod.apply(makeCtx(), mkConfig({ autoReview: "adaptive", autoMaxPerSession: 3, autoMinIntervalMs: 0 }));
 emit("tools/result", { name: "edit", agent: autoAgent, callId: "c2b", arguments: {} }, { isError: false });
 emit("agent/turn-stopping", { agent: autoAgent, turn: 7, signal: undefined });
 const deadline = Date.now() + 120000;
@@ -551,7 +588,7 @@ check(
   `turn-stopping 监听=${(listeners.get("agent/turn-stopping") ?? []).length}`,
 );
 
-mod.apply(makeCtx(), cfgMod.Config({ enabled: false }));
+mod.apply(makeCtx(), mkConfig({ enabled: false }));
 const offReview = await tools.get("ocr_review").execute({ preview: true }, exec);
 check("enabled=false：ocr_review 拒绝执行并指向设置页", offReview.ok === false && offReview.code === "OCR_DISABLED" && offReview.summary.includes("已在设置里关闭"), `${offReview.code} | ${offReview.summary}`);
 
@@ -575,7 +612,7 @@ const llmStub = fakeLlmService((options) => {
   ];
 });
 const bridgeCtx = makeCtx({ llm: llmStub });
-mod.apply(bridgeCtx, cfgMod.Config({ llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash" }));
+mod.apply(bridgeCtx, mkConfig({ llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash" }));
 await new Promise((resolve) => setTimeout(resolve, 150)); // 等桥 listen 完成（startLlmBridge 是异步的）
 
 const bridgeStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
@@ -689,7 +726,7 @@ const defaultLlmStub = fakeLlmService(() => [
   { type: "finish", reason: { kind: "stop" } },
 ]);
 const defaultCtx = makeCtx({ llm: defaultLlmStub });
-mod.apply(defaultCtx, cfgMod.Config({ llmMode: "dsh", llmProvider: "", llmModel: "" }));
+mod.apply(defaultCtx, mkConfig({ llmMode: "dsh", llmProvider: "", llmModel: "" }));
 await new Promise((resolve) => setTimeout(resolve, 150));
 
 const defStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
@@ -722,7 +759,7 @@ for (const entry of defaultCtx.effects) {
   if (typeof entry.dispose === "function") entry.dispose();
 }
 
-mod.apply(makeCtx({ llm: undefined, agentDefaultModel: null }), cfgMod.Config({ llmMode: "dsh", llmProvider: "", llmModel: "" }));
+mod.apply(makeCtx({ llm: undefined, agentDefaultModel: null }), mkConfig({ llmMode: "dsh", llmProvider: "", llmModel: "" }));
 const bareStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
 check(
   "dsh 路由：设置与 DSH 默认模型都缺模型名时说清回落原因",
@@ -825,7 +862,7 @@ function cannedSubprocess(runs) {
 function cannedHarness(runs, config = {}, overrides = {}) {
   const canned = cannedSubprocess(runs);
   const ctx2 = makeCtx({ subprocess: canned, ...overrides });
-  mod.apply(ctx2, cfgMod.Config({ engine: "ocr", llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash", ...config }));
+  mod.apply(ctx2, mkConfig({ engine: "ocr", llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash", ...config }));
   const exec2 = { name: "ocr_review", callId: "canned", arguments: {}, agent: makeAgent(), signal: undefined };
   return { canned, ctx: ctx2, exec: exec2, call: (args) => tools.get("ocr_review").execute(args, exec2) };
 }
@@ -1497,7 +1534,7 @@ check(
 );
 if (which("ocr")) {
   /* 罐头 ctx 覆盖了同名工具，先切回真子进程的注册再跑真 ocr。 */
-  mod.apply(ctx, schemaRefs);
+  mod.apply(ctx, settingsPatch);
   const ocrOnly = await tools.get("ocr_review").execute({ engine: "ocr" }, exec);
   check(
     "engine=ocr 且没配 LLM 端点：返回 OCR_LLM_MISSING（真 ocr，不静默降级）",
@@ -1629,29 +1666,49 @@ check(
     dflt: cfgMod.loadConfig({}).onDemand,
   }),
 );
-check(
-  "配置（v0.5.0 步骤 3）：设置页 schema 的 auto / onDemand 默认值引用 DEFAULTS（不写死）",
-  schema?.dict?.autoReview?.meta?.default === cfgMod.DEFAULTS.auto && schema?.dict?.onDemand?.meta?.default === cfgMod.DEFAULTS.onDemand,
-  JSON.stringify({ autoReview: schema?.dict?.autoReview?.meta?.default, onDemand: schema?.dict?.onDemand?.meta?.default }),
-);
+if (HAS_SCHEMA) {
+  check(
+    "配置（v0.5.0 步骤 3）：设置页 schema 的 auto / onDemand 默认值引用 DEFAULTS（不写死）",
+    schema?.dict?.autoReview?.meta?.default === cfgMod.DEFAULTS.auto && schema?.dict?.onDemand?.meta?.default === cfgMod.DEFAULTS.onDemand,
+    JSON.stringify({ autoReview: schema?.dict?.autoReview?.meta?.default, onDemand: schema?.dict?.onDemand?.meta?.default }),
+  );
+} else {
+  check(
+    "配置（v0.5.0 步骤 3）：没有 schema 时这两个默认值仍由 DEFAULTS 单点决定（CI 路径：auto=off / onDemand=true）",
+    cfgMod.DEFAULTS.auto === "off" &&
+      cfgMod.DEFAULTS.onDemand === true &&
+      cfgMod.loadConfig({}).auto === cfgMod.DEFAULTS.auto &&
+      cfgMod.loadConfig({}).onDemand === cfgMod.DEFAULTS.onDemand,
+    JSON.stringify({ auto: cfgMod.loadConfig({}).auto, onDemand: cfgMod.loadConfig({}).onDemand }),
+  );
+}
 
 /* v0.3.5：真机 `ocr scan` 评审 lib/config.js 报出来的 6 条，这里守住其中可断言的部分。 */
 const schemaDefault = (name) => schema?.dict?.[name]?.meta?.default;
-check(
-  "配置（v0.3.5 回归）：设置页默认值直接引用 DEFAULTS（不再两处硬编码），timeoutMinutes 上界也是",
-  schemaDefault("timeoutMinutes") === cfgMod.DEFAULTS.timeoutMinutes &&
-    schemaDefault("autoMaxPerSession") === cfgMod.DEFAULTS.autoMaxPerSession &&
-    schemaDefault("autoMinReviewableFiles") === cfgMod.DEFAULTS.autoMinReviewableFiles &&
-    schemaDefault("autoMinIntervalMs") === cfgMod.DEFAULTS.autoMinIntervalMs &&
-    schemaDefault("autoSkipSubagents") === cfgMod.DEFAULTS.autoSkipSubagents &&
-    schemaDefault("autoIncludeDiff") === cfgMod.DEFAULTS.autoIncludeDiff &&
-    schema?.dict?.timeoutMinutes?.meta?.max === cfgMod.DEFAULTS.maxTimeoutMinutes,
-  JSON.stringify({
-    timeoutMinutes: schemaDefault("timeoutMinutes"),
-    max: schema?.dict?.timeoutMinutes?.meta?.max,
-    DEFAULTS: cfgMod.DEFAULTS.maxTimeoutMinutes,
-  }),
-);
+if (HAS_SCHEMA) {
+  check(
+    "配置（v0.3.5 回归）：设置页默认值直接引用 DEFAULTS（不再两处硬编码），timeoutMinutes 上界也是",
+    schemaDefault("timeoutMinutes") === cfgMod.DEFAULTS.timeoutMinutes &&
+      schemaDefault("autoMaxPerSession") === cfgMod.DEFAULTS.autoMaxPerSession &&
+      schemaDefault("autoMinReviewableFiles") === cfgMod.DEFAULTS.autoMinReviewableFiles &&
+      schemaDefault("autoMinIntervalMs") === cfgMod.DEFAULTS.autoMinIntervalMs &&
+      schemaDefault("autoSkipSubagents") === cfgMod.DEFAULTS.autoSkipSubagents &&
+      schemaDefault("autoIncludeDiff") === cfgMod.DEFAULTS.autoIncludeDiff &&
+      schema?.dict?.timeoutMinutes?.meta?.max === cfgMod.DEFAULTS.maxTimeoutMinutes,
+    JSON.stringify({
+      timeoutMinutes: schemaDefault("timeoutMinutes"),
+      max: schema?.dict?.timeoutMinutes?.meta?.max,
+      DEFAULTS: cfgMod.DEFAULTS.maxTimeoutMinutes,
+    }),
+  );
+} else {
+  check(
+    "配置（v0.3.5 回归）：没有 schema 时上下界仍由 DEFAULTS 单点决定（CI 路径：显式分钟被 maxTimeoutMinutes 夹住）",
+    cfgMod.timeoutMsOf({ timeoutMinutes: 9999 }) === cfgMod.DEFAULTS.maxTimeoutMinutes * 60000 &&
+      cfgMod.timeoutMsOf({}) === cfgMod.DEFAULTS.timeoutMinutes * 60000,
+    `clamped=${cfgMod.timeoutMsOf({ timeoutMinutes: 9999 })} default=${cfgMod.timeoutMsOf({})}`,
+  );
+}
 
 const hrMergedLayers = cfgMod.mergeLayers(
   { env: { FROM_FILE: "1" }, extraArgs: ["--file"], ocrCandidates: ["ocr-file"] },
@@ -2027,7 +2084,7 @@ check(
       return () => {};
     },
   };
-  mod.apply(skillCtx, cfgMod.Config({ onDemand: true }));
+  mod.apply(skillCtx, mkConfig({ onDemand: true }));
   const onDemandStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
   const def = registered[0];
   check(
@@ -2055,7 +2112,7 @@ check(
       return () => {};
     },
   };
-  mod.apply(offCtx, cfgMod.Config({ onDemand: false }));
+  mod.apply(offCtx, mkConfig({ onDemand: false }));
   const offStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
   check(
     "v0.5.0 步骤 3：onDemand=false 时不注册 skill，reason 说明是「按需评审已关闭」",

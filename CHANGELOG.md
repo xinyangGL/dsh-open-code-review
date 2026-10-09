@@ -3,6 +3,22 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.1] — 2026-10-09
+
+### Fixed
+
+- **CI is green on a bare clone.** The offline suites used to require `@deepseek-ai/schemastery`, a
+  DSH-internal package that only exists inside a real install — on GitHub Actions the first suite
+  crashed (`TypeError: cfgMod.Config is not a function`, `test/smoke.mjs:537`) and the remaining
+  suites never ran. `test/smoke.mjs` now detects the package and either exercises the real schema
+  (`Config(patch)`, volatile refs) or falls back to a plain patch — the same shape the plugin's own
+  config path takes (`apply` → `schemaOverrides`) — asserting the documented degradation in that
+  branch. The assertion count is identical in both environments (160).
+- `@deepseek-ai/schemastery` is declared as an **optional peer dependency** (what the other DSH
+  client plugins do), so a real install links it instead of relying on a developer-local junction.
+  No runtime behaviour change: without the package `Config` stays `undefined`, the settings page is
+  simply not generated, and every tool / command / job keeps working.
+
 ## [0.5.0] — 2026-10-09
 
 **Behaviour change: the plugin no longer reviews on its own.** The factory default for `auto`

@@ -1,6 +1,6 @@
 {
   "name": "dsh-open-code-review",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、按需评审（回合尾部的「启动代码审核」按钮 + 运行时 skill，出厂默认不自动评审）、三档引擎（ocr 流水线 / delegate 委派 / 独立的只读评审子 agent），结果按文件逐条列出「文件:行 [严重程度] 问题」，每次评审都有实时进度（Jobs 面板 + 会话内进度行、可停止）。",
   "keywords": [
@@ -22,6 +22,14 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   },
   "type": "module",
   "main": "lib/index.js",

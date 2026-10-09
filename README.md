@@ -2,6 +2,8 @@
 
 # dsh-open-code-review
 
+[![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
+
 Code review for DSH (DeepSeek Harness), powered by Alibaba **OpenCodeReview** (`ocr`).
 
 The plugin registers two model tools — `ocr_review` (run a review) and `ocr_status` (diagnostics) — plus the `/ocr-review` command, and it can review **automatically** at the end of a turn that wrote files. The review spec (rules + file list + unified diff) always comes from `ocr`; what changes is **who executes it**:

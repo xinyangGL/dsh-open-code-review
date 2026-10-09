@@ -2,7 +2,9 @@
 
 # dsh-open-code-review
 
-> 各版本（v0.3.0 → v0.4.0）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+[![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
+
+> 各版本（v0.3.0 → v0.5.1）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
