@@ -106,6 +106,7 @@ dsh plugin --profile desktop remove dsh-open-code-review
 | `reviewer.persona` | `""` | ✅ | 评审人格/纪律（留空=插件内置 `DEFAULT_REVIEWER_PERSONA`） |
 | `includeDiffMaxBytes` | `120000` | — | 单次带出的 diff 上限（字符） |
 | `maxIssuesInText` | `40` | — | 文本渲染最多列多少条问题（完整数据仍在 `issues`/`rawJson`） |
+| `progress` | `true` | ✅ | 评审进度：每次评审登记成宿主后台任务（kind `ocr-review`），Jobs 面板与会话内各有一条实时进度；关掉后评审照跑，只是不可见（见「评审进度」） |
 | `verbose` | `false` | ✅ | 打印调试日志（本机桥的日志也走它） |
 
 ### LLM 路由（`ocr` 引擎）
@@ -212,6 +213,23 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 安全阀：每轮都计入 `autoMaxPerSession` 与 `autoMinIntervalMs`（复用现有计数），线程闲置超过 `timeoutMinutes` 自动关闭；`clean` 关线程；同样改动签名不会重复开轮。想临时指定某一次评审，用 `ocr_review` 的 `reviewer` 参数（`true` 强制 agent，`false` 强制 ocr/delegate）。
 
 引擎三档的选择：`ocr`（阿里流水线，最省心）→ `delegate`（当前 agent 拿 ocr 规则自审，不花钱）→ `reviewer.agent = spawn`（第二双眼睛，最贵但最像人审）。规格始终来自 ocr，所以三档可以随时切换、互不冲突。
+
+### 评审进度（Jobs 面板 + 会话内进度行）
+
+`progress`（默认开）把**每一次评审**（`ocr_review`、`/ocr-review`、自动评审、独立评审 agent 的各轮）在宿主里登记成一个后台任务，kind 统一是 `ocr-review`，于是同一次评审在两个地方同时可见：
+
+| 位置 | 看到什么 |
+| --- | --- |
+| 会话标题栏的 **Jobs 面板**（后台任务） | 一行一条评审。标题形如 `评审 · 工作区改动 · my-repo`（自动评审是 `自动评审 · …`，区间/单提交/整文件扫描各有对应措辞）；副行是当前阶段（`运行 ocr review（超时 15 分钟；…）`、`delegate：采集 git diff…`、`独立评审 agent 第 1/3 轮…`）；展开是实时输出流（ocr 的 stderr 原样、stdout 里 JSON 之前的诊断行，外加 `[HH:MM:SS]` 阶段日志）与停止按钮 |
+| 输入框上方的**会话内进度行** | 最近两条：状态词（运行中/已完成/失败/已停止/停止中…）、标题、当前阶段、已用时长；运行中的那条右侧有「停止」，**点两次**才真的停（防误触） |
+
+细节：
+
+- **停止**：面板或进度行的停止 → `jobs.kill()` → 插件的 `AbortController` 中止本次评审（与调用方的 `signal` 合并）→ 评审以 `OCR_ABORTED` 结束，**绝不当作通过**；20 秒内没停下就按「已停止」结算，不会一直挂在「停止中…」。
+- **不刷屏**：任务挂了 `jobs.wait`，所以结算**不会**往会话里灌「后台任务完成」的唤醒消息 —— 进度是旁路，不打扰模型。
+- **结算之后**：面板里的行保留（可回看阶段、输出与耗时），会话内进度行再留 60 秒后消失。
+- **降级**：宿主没有 `jobs` 服务时不注册进度行（插件的 `jobs` 子 fiber 保持 pending），评审本身照跑；关掉 `progress` 只是不可见，不改变任何评审行为。
+- **输出流**：完整的 `--json` 结果不进流（那一行会被跳过，否则会灌满环形缓冲），只在工具结果/自动评审载荷里（`rawJson`，最多 10 万字符）。
 
 ### 失败结果码（fail-closed）
 

@@ -160,6 +160,13 @@ const envelope = {
 };
 /* 服务由一个独立 fiber provide（与真实 DSH 同形：remote 不是根上的，而是别的插件提供的） */
 const remoteValue = { session: { modelCatalog: async () => envelope } };
+/* Client jobs 服务（dsh-client-ui-jobs 提供）的最小替身：契约照 dsh-api-job-controller 抄。 */
+const jobsValue = {
+  state: { subscribe: () => () => {}, getSnapshot: () => ({ rows: {}, observed: {} }) },
+  watchRows: () => () => {},
+  observe: () => () => {},
+  kill: async () => ({ ok: true }),
+};
 
 /** 起一套根 Context，按宿主形态 provide 服务（slots/configForms 永远有，remote 可有可无）。 */
 async function makeHost(services) {
@@ -178,6 +185,7 @@ async function makeHost(services) {
         },
       });
       ctx.provide("configForms", { get: () => null });
+      if (services.includes("jobs")) ctx.provide("jobs", jobsValue);
       if (services.includes("remote")) ctx.provide("remote", remoteValue);
       if (services.includes("remote.session")) ctx.provide("remote.session", remoteValue.session);
     },
@@ -225,6 +233,54 @@ check(
 /* 与形态 B/C 的写法对齐：先确认拿到 scoped ctx，别让 TypeError 顶掉后面的断言（评审 #4）。 */
 const aFallback = a.scoped && typeof a.scoped.get === "function" ? a.scoped.get("remote") : undefined;
 check('同一个 ctx 用 ctx.get("remote") 也读得到（子 fiber 未激活时的第二条命）', Boolean(aFallback), String(aFallback));
+
+/* 形态 A2：宿主提供 Client jobs 服务（GUI 里就是标题栏 Jobs 面板那套）——
+   输入框上方的进度行 cell 才会注册；没有 jobs 时子 fiber 保持 INACTIVE（形态 A/B/C 的 cells=2）。 */
+const withJobs = await makeHost(["remote", "remote.session", "jobs"]);
+const a2 = await mount(withJobs, "jobs");
+check("有 jobs 服务时多注册一个进度行 cell", a2.cells === 3, `cells=${a2.cells}`);
+const dockReg = withJobs.registrations.find((r) => r.options && r.options.name === "conversation.input.dock");
+check(
+  "进度行挂在 conversation.input.dock，id/order 自取（不占内置席位）",
+  Boolean(dockReg) && dockReg.options.id === "ocr-review-progress" && dockReg.options.order === 15 && dockReg.options.locale === "dsh-open-code-review",
+  dockReg ? JSON.stringify(dockReg.options) : "没有该 cell",
+);
+const dockInject = dockReg && typeof dockReg.options.inject === "function" ? dockReg.options.inject() : null;
+check(
+  "进度行 cell 的注入面 = Jobs 面板同款读法（hooks/watchRows/killJob/t）",
+  Boolean(dockInject) && dockInject.hooks.jobs === jobsValue.state && typeof dockInject.watchRows === "function" && typeof dockInject.killJob === "function",
+  JSON.stringify(Object.keys(dockInject || {})),
+);
+/* 槽位的 locale 字段只自报家门：非内置命名空间拿不到宿主注入的 t，组件必须自带文案函数。
+   这个宿主没有 locale 服务 → 走内联 zh 兜底（有服务时是 locale.bind 的包装，见 makeT）。 */
+check(
+  "进度行自带文案函数（无 locale 服务时退回内联 zh）",
+  Boolean(dockInject) && typeof dockInject.t === "function" && dockInject.t("progress.title", "FALLBACK") === "评审进度",
+  dockInject && typeof dockInject.t === "function" ? String(dockInject.t("progress.title", "FALLBACK")) : "缺 t",
+);
+{
+  let watched = "";
+  let killed = null;
+  const originalWatch = jobsValue.watchRows;
+  const originalKill = jobsValue.kill;
+  jobsValue.watchRows = (sessionId) => {
+    watched = sessionId;
+    return () => {};
+  };
+  jobsValue.kill = async (sessionId, jobId) => {
+    killed = [sessionId, jobId];
+    return { ok: true };
+  };
+  const probe = dockReg ? dockReg.options.inject() : null;
+  if (probe) {
+    probe.watchRows("s1");
+    const okKill = await probe.killJob("s1", "ocr-review-1");
+    check("watchRows 透传会话 id", watched === "s1", watched);
+    check("killJob 透传 (sessionId, jobId) 并把 ok 收成布尔", killed && killed[0] === "s1" && killed[1] === "ocr-review-1" && okKill === true, JSON.stringify([killed, okKill]));
+  }
+  jobsValue.watchRows = originalWatch;
+  jobsValue.kill = originalKill;
+}
 
 /* 形态 B：有 remote、没有 remote.session —— 子 fiber 不激活，兜底读取口就是活的 */
 const half = await makeHost(["remote"]);

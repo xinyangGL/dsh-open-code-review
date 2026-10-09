@@ -172,6 +172,7 @@ function makeCtx(overrides = {}) {
   };
   if (overrides.llm) ctx.llm = overrides.llm;
   if (overrides.subagents) ctx.subagents = overrides.subagents;
+  if (overrides.jobs) ctx.jobs = overrides.jobs;
   return ctx;
 }
 
@@ -309,7 +310,11 @@ check("buildOcrArgv(range) 参数拼装", argv.argv.join(" ") === "review --from
 
 /* ------------------------------------------------------------- 端到端：工具 */
 
+/* 评审进度（可选 jobs 服务）替身：ctx 上有它，插件才会把每次评审登记成 job。
+   定义在文件末尾那节，函数声明会提升；这里先建实例（const 不提升）。 */
+const progressRegistry = makeJobsRegistry();
 const ctx = makeCtx();
+ctx.jobs = progressRegistry;
 mod.apply(ctx, schemaRefs);
 check("注册了 ocr_review / ocr_status / ocr-review", tools.has("ocr_review") && tools.has("ocr_status") && commands.has("ocr-review"), [...tools.keys()].join(","));
 check("工具声明了 output.schema + render", typeof tools.get("ocr_review").output?.render === "function" && tools.get("ocr_review").output.schema?.type === "object");
@@ -706,6 +711,178 @@ check(
   "生命周期：被 dispose 掐掉的评审标记为 OCR_ABORTED（不会当成功结果投递）",
   disposeValue.ok === false && disposeValue.code === "OCR_ABORTED",
   `${disposeValue.code} | ${disposeValue.summary}`,
+);
+
+/* ----------------------------------------------- 评审进度可见（可选 jobs 服务） */
+
+/**
+ * jobs 服务替身：契约照 @deepseek-ai/dsh-jobs-local —— start 同步跑 spec.run(handle) 并返回
+ * `<kind>-N`，handle.append/updateProgress 写进环，hooks.done 落地即结算，hooks.cancel 由 kill 触发。
+ * 进度是旁路能力，这一节只断言「看得见、停得掉」，不影响上面任何评审结果。
+ */
+function makeJobsRegistry() {
+  const records = new Map();
+  const starts = [];
+  const waits = [];
+  const kills = [];
+  return {
+    records,
+    starts,
+    waits,
+    kills,
+    start(spec) {
+      const id = `${spec.kind}-${starts.length + 1}`;
+      const record = {
+        id,
+        kind: spec.kind,
+        label: spec.label,
+        owner: spec.owner,
+        progress: "",
+        progressLines: [],
+        output: [],
+        status: "running",
+        detail: undefined,
+        awaited: false,
+      };
+      records.set(id, record);
+      starts.push(record);
+      const handle = {
+        id,
+        append: (text, opts = {}) => record.output.push({ text, channel: opts.channel ?? "stdout" }),
+        updateProgress: (line) => {
+          record.progress = line;
+          record.progressLines.push(line);
+        },
+      };
+      const hooks = spec.run(handle);
+      record.hooks = hooks;
+      hooks.done.then(
+        (outcome) => {
+          record.status = outcome?.status ?? "completed";
+          record.detail = outcome?.detail;
+          record.finishedAt = Date.now();
+        },
+        () => {
+          record.status = "failed";
+        },
+      );
+      return id;
+    },
+    wait(id, timeoutMs, owner) {
+      const record = records.get(id);
+      waits.push({ id, timeoutMs, owner });
+      return new Promise((resolve) => {
+        const poll = setInterval(() => {
+          if (!record || record.status !== "running") {
+            clearInterval(poll);
+            record.awaited = true;
+            resolve(records.get(id));
+          }
+        }, 5);
+      });
+    },
+    kill(id, caller, reason) {
+      kills.push({ id, caller, reason });
+      records.get(id)?.hooks?.cancel(reason);
+      return { ok: true };
+    },
+  };
+}
+
+/** 等一次 job 结算的微任务链走完（status/detail 是 hooks.done.then 里落的）。 */
+const settleJobs = () => new Promise((resolve) => setImmediate(resolve));
+
+/** 轮询等一个条件成立（等 spawn 真的发生之类）。 */
+async function until(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  return predicate();
+}
+
+await until(() => progressRegistry.starts.length >= 4);
+await settleJobs();
+
+const repoName = REPO.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+/* 前四条 = 工具链路那四次调用（参数错误那条在开 job 之前就返回了，不该占位）。 */
+const toolJobs = progressRegistry.starts.slice(0, 4);
+check(
+  "进度：真实工具链路每次评审登记一条 job（preview/delegate/auto/非 git 仓库 = 4 条，参数错误不登记）",
+  toolJobs.length === 4 && toolJobs.every((job) => job.id.startsWith("ocr-review-")),
+  progressRegistry.starts.map((job) => job.id).join(","),
+);
+check(
+  "进度：kind 统一是 ocr-review（Jobs 面板按它显示徽章、会话内进度行按它筛选）",
+  toolJobs.length === 4 && toolJobs.every((job) => job.kind === "ocr-review"),
+  [...new Set(progressRegistry.starts.map((job) => job.kind))].join(","),
+);
+check(
+  "进度：标题 = 来源 · 范围 · 仓库名（非 git 那条指向它自己的临时目录）",
+  toolJobs[0]?.label === `评审 · 工作区改动 · ${repoName}` && toolJobs[3]?.label?.includes("ocr-nongit-"),
+  progressRegistry.starts.map((job) => job.label).join(" | "),
+);
+check(
+  "进度：结算状态 3 成功 1 失败，失败明细带结果码",
+  toolJobs.filter((job) => job.status === "completed").length === 3 &&
+    toolJobs[3]?.status === "failed" &&
+    String(toolJobs[3]?.detail).startsWith("OCR_NOT_GIT_REPO"),
+  toolJobs.map((job) => `${job.id}=${job.status}:${job.detail}`).join(" | "),
+);
+check(
+  "进度：成功行的明细带耗时（评审结束后面板行仍可读）",
+  /（\d+(\.\d+)?(s|m\d+s)）$/.test(String(toolJobs[0]?.detail)),
+  String(toolJobs[0]?.detail),
+);
+check(
+  "进度：过程行覆盖「跑 ocr」与「delegate」两种引擎",
+  toolJobs.some((job) => job.progressLines.some((line) => line.includes("运行 ocr review（超时"))) &&
+    toolJobs.some((job) => job.progressLines.some((line) => line.startsWith("delegate："))),
+  toolJobs.map((job) => job.progress).join(" / "),
+);
+check(
+  "进度：输出环里有带时间戳的日志行 + 结算行（面板可展开的实时流）",
+  toolJobs[0]?.output.some((chunk) => chunk.channel === "log" && /^\[\d\d:\d\d:\d\d\]/.test(chunk.text)) &&
+    toolJobs[0]?.output.some((chunk) => chunk.text.includes("完成：")),
+  (toolJobs[0]?.output ?? []).slice(-2).map((chunk) => `[${chunk.channel}]${chunk.text}`).join(""),
+);
+check(
+  "进度：每条 job 都挂了等待者、deadline = 超时(15min)+60s（否则结算事件会往会话灌唤醒消息）",
+  progressRegistry.waits.length === progressRegistry.starts.length &&
+    progressRegistry.waits.every((waiter) => waiter.timeoutMs === (cfgMod.DEFAULTS.timeoutMinutes + 1) * 60000),
+  JSON.stringify([...new Set(progressRegistry.waits.map((waiter) => waiter.timeoutMs))]),
+);
+check(
+  "进度：owner 透传（这里的 agent 没有 id，所以不传 owner）",
+  progressRegistry.starts.every((job) => job.owner === undefined),
+  JSON.stringify([...new Set(progressRegistry.starts.map((job) => job.owner))]),
+);
+const autoJobs = progressRegistry.starts.filter((job) => String(job.label).startsWith("自动评审 · "));
+check(
+  "进度：自动评审那条也登记了 job 且已结算（label 用「自动评审」区分）",
+  autoJobs.length >= 1 && autoJobs.every((job) => job.status === "completed"),
+  autoJobs.map((job) => `${job.label}=${job.status}`).join(" | ") || "(无)",
+);
+
+/* 停止链路：面板「停止」→ job cancel → 评审自己的 AbortController → 终结子进程 → 结算成 killed。 */
+const killRegistry = makeJobsRegistry();
+const killCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true }], {}, { jobs: killRegistry });
+check("进度：cannedHarness 能把 jobs 服务带进 makeCtx（kill 场景的前提）", killCase.ctx.jobs === killRegistry);
+const killRun = killCase.call({ engine: "ocr" });
+await until(() => killRegistry.starts.length === 1 && killCase.canned.calls.length >= 1);
+const stopping = killRegistry.starts[0];
+check("进度：评审一开始就登记（面板/进度行立刻看得见，无需等结果）", Boolean(stopping) && stopping.status === "running", `${stopping?.id} ${stopping?.progress}`);
+const killed = killRegistry.kill(stopping.id, {}, "用户停止");
+const killedValue = await killRun;
+await settleJobs();
+check(
+  "停止：kill 记录带原因，job 结算成 killed 且明细以停止原因为准（不显示成「评审完成」）",
+  killed.ok === true && killRegistry.kills[0]?.reason === "用户停止" &&
+    stopping.status === "killed" && String(stopping.detail).startsWith("用户停止") && String(stopping.detail).includes("OCR_ABORTED"),
+  `${stopping.status} | ${stopping.detail} | kills=${JSON.stringify(killRegistry.kills)}`,
+);
+check(
+  "停止：子进程被终结，结果报 OCR_ABORTED（不会当成功结果投递）",
+  killCase.canned.calls[0]?.terminated === true && killedValue.ok === false && killedValue.code === "OCR_ABORTED",
+  `${killedValue.code} terminated=${killCase.canned.calls[0]?.terminated}`,
 );
 
 /* ------------------------------------------- 独立评审 agent（只读子 agent + findings 往返） */

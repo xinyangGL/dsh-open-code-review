@@ -247,7 +247,14 @@ plugin.apply(fakeCtx);
 check("apply 注入 configForms", fakeCtx.injectCalls.some((d) => d.includes("configForms")), JSON.stringify(fakeCtx.injectCalls));
 check("注册进 plugins.bundle.config", fakeCtx.slotInjectCalls.includes("plugins.bundle.config"), JSON.stringify(fakeCtx.slotInjectCalls));
 check("注册进 settings.section", fakeCtx.slotInjectCalls.includes("settings.section"), JSON.stringify(fakeCtx.slotInjectCalls));
-check("共注册两个 cell", registrations.length === 2, `n=${registrations.length}`);
+check("注册三个 cell（设置页两处 + 输入框上方的进度行）", registrations.length === 3, `n=${registrations.length}`);
+const dockReg = registrations.find((r) => r.options.name === "conversation.input.dock");
+check("进度行注册到 conversation.input.dock", Boolean(dockReg), JSON.stringify(registrations.map((r) => r.options.name)));
+check(
+  "进度行的 id/order 自取，不与内置席位（todo/goal/queue/git-graph）撞",
+  Boolean(dockReg) && dockReg.options.id === "ocr-review-progress" && dockReg.options.order === 15,
+  dockReg ? JSON.stringify(dockReg.options) : "没有该 cell",
+);
 check(
   "apply 为模型目录单独声明 remote 子注入",
   fakeCtx.injectCalls.some((d) => Array.isArray(d) && d.includes("remote") && d.includes("remote.session")),
@@ -268,7 +275,7 @@ check("文案注册走 ctx.effect（随 fiber 撤销）", fakeCtx.effectCalls.so
 check("zh 词典含生成的字段文案", String(zhDict["field.llmModel.hint"] || "").includes("候选来自 DSH 自己的模型目录"), String(zhDict["field.llmModel.hint"]).slice(0, 60));
 check("zh 词典含选项文案与分组名", String(zhDict["choice.llmMode.dsh"] || "").startsWith("dsh —") && zhDict["group.llm"] === "LLM 路由（ocr 引擎）", JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.llm"]]));
 check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
-check("两个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
+check("三个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
 const reg = registrations.find((r) => r.options.name === "plugins.bundle.config") || { options: {}, component: () => null };
 const sectionReg = registrations.find((r) => r.options.name === "settings.section") || { options: {}, component: () => null };
 check("key = 包名", reg.options.key === "dsh-open-code-review", String(reg.options.key));
@@ -299,6 +306,7 @@ let snapshot = {
     reviewerProvider: "spawn",
     reviewerRounds: 3,
     timeoutMinutes: 15,
+    progress: true,
     llmBaseUrl: "https://api.commandcode.ai/provider/v1",
     llmProtocol: "openai",
     llmModel: "deepseek/deepseek-v4.1-flash",
@@ -333,7 +341,7 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-for (const label of ["总开关", "默认引擎", "输出受众", "ocr 可执行文件", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔（毫秒）", "跳过子代理会话", "委派时带 diff", "LLM 路由", "模型名", "提供方（provider）", "单次超时（分钟）", "调试日志"]) {
+for (const label of ["总开关", "默认引擎", "输出受众", "ocr 可执行文件", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔（毫秒）", "跳过子代理会话", "委派时带 diff", "LLM 路由", "模型名", "提供方（provider）", "单次超时（分钟）", "评审进度", "调试日志"]) {
   check(`渲染字段「${label}」`, html.includes(label));
 }
 /* dsh 模式（默认）不需要地址与 key：静态端点那三行不该出现 */
@@ -364,7 +372,7 @@ function controlRows(node, out = []) {
   return out;
 }
 const rows = controlRows(tree);
-check("dsh 模式下 17 个控件行（静态端点三行不渲染、独立评审 agent 只显一行）", rows.length === 17, `n=${rows.length}`);
+check("dsh 模式下 18 个控件行（静态端点三行不渲染、独立评审 agent 只显一行）", rows.length === 18, `n=${rows.length}`);
 
 const modeRow = rows.find((r) => r.key === "llmMode");
 check("找到 LLM 路由行", Boolean(modeRow) && modeRow.field.tag === "select");
@@ -381,7 +389,7 @@ check("每行都有「恢复默认」", rows.every((r) => r.buttons.some((b) => 
 modeRow.field.props.onChange({ target: { value: "endpoint" } });
 const endpointTree = render();
 const endpointRows = controlRows(endpointTree);
-check("endpoint 模式下 19 个控件行", endpointRows.length === 19, `n=${endpointRows.length}`);
+check("endpoint 模式下 20 个控件行", endpointRows.length === 20, `n=${endpointRows.length}`);
 check("endpoint 模式下藏掉 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
 check("endpoint 模式状态行说明直连", textOf(endpointTree).includes("LLM 直连静态端点"));
 
@@ -510,7 +518,7 @@ check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.v
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "spawn" } });
 const spawnTree = render();
 const spawnRows = controlRows(spawnTree);
-check("reviewer=spawn 时 dsh 模式 20 个控件行（多出子 agent 三行）", spawnRows.length === 20, `n=${spawnRows.length}`);
+check("reviewer=spawn 时 dsh 模式 21 个控件行（多出子 agent 三行）", spawnRows.length === 21, `n=${spawnRows.length}`);
 check("reviewerAgent 只有 off / spawn 两个选项", (() => {
   const row = spawnRows.find((r) => r.key === "reviewerAgent");
   return Boolean(row) && hosts(row.row).filter((n) => n.tag === "option").length === 2;
@@ -551,7 +559,7 @@ if (reviewInput) {
 /* 切回 off：后面的降级场景与行数断言按默认（不启用）算 */
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "off" } });
 const offAgain = controlRows(render());
-check("切回 off 后子 agent 三行消失、行数回到 17", offAgain.length === 17 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
+check("切回 off 后子 agent 三行消失、行数回到 18", offAgain.length === 18 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
 check("切回 off 后状态行不再提独立 agent", !textOf(render()).includes("评审走独立 agent"));
 
 /* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
@@ -639,7 +647,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 /* 条目 id 回退：主 id 查不到时用备用 id */
 fakeCtx.rejectIds = ["include:dsh-open-code-review"];
 const fbTree = render();
-check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 17, JSON.stringify(fakeCtx.formIds.slice(-2)));
+check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 18, JSON.stringify(fakeCtx.formIds.slice(-2)));
 check("回退后字段仍可编辑", controlRows(fbTree).every((r) => r.field.props.disabled !== true));
 
 /* 两个 id 都查不到：给出诊断而不是崩掉 */
@@ -654,8 +662,81 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 const sectionTree = expand(miniReact.createElement(sectionReg.component, {}));
 const sectionHtml = textOf(sectionTree);
 check("设置页渲染标题", sectionHtml.includes("代码评审（阿里 OpenCodeReview）"));
-check("设置页也带 17 个控件行", controlRows(sectionTree).length === 17, `n=${controlRows(sectionTree).length}`);
+check("设置页也带 18 个控件行", controlRows(sectionTree).length === 18, `n=${controlRows(sectionTree).length}`);
 check("设置页照样带出条目 id", sectionHtml.includes("include:dsh-open-code-review"));
+
+/* ------------------------------------------------------------ 会话内进度行（conversation.input.dock） */
+
+/* 组件读的是 Client jobs 服务的快照（hooks.jobs → useJobs 选择器），
+   也就是和标题栏 Jobs 面板同一份数据；这里用桩提供快照，验证渲染与「两次点击停止」。 */
+const watched = [];
+const killed = [];
+const dockProps = (rows) => ({
+  sessionId: "s1",
+  useJobs: (select) => select({ rows: { s1: rows }, observed: {} }),
+  watchRows: (sessionId) => {
+    watched.push(sessionId);
+    return () => {};
+  },
+  killJob: async (sessionId, jobId) => {
+    killed.push([sessionId, jobId]);
+    return true;
+  },
+  t: (key, fallback) => fallback,
+});
+const renderDock = (rows, props = {}) => {
+  const built = expand(miniReact.createElement(dockReg.component, { ...dockProps(rows), ...props }));
+  flushEffects();
+  return built;
+};
+const liveJob = {
+  id: "ocr-review-1",
+  kind: "ocr-review",
+  label: "评审 · 工作区改动 · dsh-open-code-review",
+  status: "running",
+  progress: "运行 ocr review（超时 15 分钟）",
+  startedAt: Date.now() - 4200,
+};
+
+check("没有任务时进度行不占位", renderDock([]) === null);
+check(
+  "只认本插件的 kind（宿主自己的 bash / subagent 行不进这里）",
+  renderDock([{ ...liveJob, kind: "bash", id: "bash-1" }]) === null,
+);
+
+const liveTree = renderDock([liveJob]);
+const liveText = textOf(liveTree);
+check("运行中的评审行带标题与状态词", liveText.includes("评审进度") && liveText.includes("运行中"), liveText);
+check("行里带 label 与实时进度行", liveText.includes("评审 · 工作区改动") && liveText.includes("运行 ocr review（超时 15 分钟）"), liveText);
+check("行里带已跑时长", /4s|5s/.test(liveText), liveText);
+check("运行中有停止按钮", hosts(liveTree).some((n) => n.tag === "button" && textOf(n) === "停止"));
+check("组件订阅了本会话的任务行（引用计数 roster 流）", watched.includes("s1"), JSON.stringify(watched));
+
+/* 停止要两次点击（防误触），第二次才真的调 killJob */
+const stopBtn = hosts(liveTree).find((n) => n.tag === "button" && textOf(n) === "停止");
+stopBtn.props.onClick();
+const armedTree = renderDock([liveJob]);
+const armedText = textOf(armedTree);
+check("第一次点击只变成「再点一次停止」，还没杀任务", armedText.includes("再点一次停止") && killed.length === 0, JSON.stringify(killed));
+hosts(armedTree)
+  .find((n) => n.tag === "button")
+  .props.onClick();
+await tick();
+check("第二次点击调用 killJob(sessionId, jobId)", killed.length === 1 && killed[0][0] === "s1" && killed[0][1] === "ocr-review-1", JSON.stringify(killed));
+
+const settledJob = { ...liveJob, id: "ocr-review-2", status: "completed", progress: "", detail: "评审完成：3 个文件，1 条问题（8.2s）", finishedAt: Date.now() - 1000 };
+const settledText = textOf(renderDock([settledJob]));
+check("结算后的行短暂留着，显示完成与终态明细", settledText.includes("已完成") && settledText.includes("1 条问题"), settledText);
+check("结算后没有停止按钮", !hosts(renderDock([settledJob])).some((n) => n.tag === "button"));
+check(
+  "结算超过一分钟后自动让位给 Jobs 面板",
+  renderDock([{ ...settledJob, finishedAt: Date.now() - 120000 }]) === null,
+);
+const stoppingJob = { ...liveJob, id: "ocr-review-3", status: "stopping" };
+check("停止中的行显示「停止中…」并仍可再点停止", textOf(renderDock([stoppingJob])).includes("停止中…"));
+
+/* 收尾：把最后创建的定时器清掉（deps 变了就会跑上一个 cleanup），别让 node 卡在事件循环里 */
+renderDock([]);
 
 /* ------------------------------------------------------------ 宿主没有 Remote 桥 */
 
@@ -674,8 +755,8 @@ const noRemoteCtx = makeCtx({
 });
 plugin.apply(noRemoteCtx);
 check(
-  "宿主没有 Remote 桥时插件照样 apply 并注册两个 cell",
-  noRemoteRegs.length === 2 && noRemoteCtx.slotInjectCalls.includes("settings.section"),
+  "宿主没有 Remote 桥时插件照样 apply 并注册三个 cell（进度行不依赖 remote）",
+  noRemoteRegs.length === 3 && noRemoteCtx.slotInjectCalls.includes("settings.section"),
   `regs=${noRemoteRegs.length}`,
 );
 check(
