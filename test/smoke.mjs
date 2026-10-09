@@ -1433,6 +1433,62 @@ check(
   JSON.stringify({ enabled: hrCfgTrue.enabled, auto: hrCfgTrue.auto }),
 );
 
+/* v0.3.5：真机 `ocr scan` 评审 lib/config.js 报出来的 6 条，这里守住其中可断言的部分。 */
+const schemaDefault = (name) => schema?.dict?.[name]?.meta?.default;
+check(
+  "配置（v0.3.5 回归）：设置页默认值直接引用 DEFAULTS（不再两处硬编码），timeoutMinutes 上界也是",
+  schemaDefault("timeoutMinutes") === cfgMod.DEFAULTS.timeoutMinutes &&
+    schemaDefault("autoMaxPerSession") === cfgMod.DEFAULTS.autoMaxPerSession &&
+    schemaDefault("autoMinReviewableFiles") === cfgMod.DEFAULTS.autoMinReviewableFiles &&
+    schemaDefault("autoMinIntervalMs") === cfgMod.DEFAULTS.autoMinIntervalMs &&
+    schemaDefault("autoSkipSubagents") === cfgMod.DEFAULTS.autoSkipSubagents &&
+    schemaDefault("autoIncludeDiff") === cfgMod.DEFAULTS.autoIncludeDiff &&
+    schema?.dict?.timeoutMinutes?.meta?.max === cfgMod.DEFAULTS.maxTimeoutMinutes,
+  JSON.stringify({
+    timeoutMinutes: schemaDefault("timeoutMinutes"),
+    max: schema?.dict?.timeoutMinutes?.meta?.max,
+    DEFAULTS: cfgMod.DEFAULTS.maxTimeoutMinutes,
+  }),
+);
+
+const hrMergedLayers = cfgMod.mergeLayers(
+  { env: { FROM_FILE: "1" }, extraArgs: ["--file"], ocrCandidates: ["ocr-file"] },
+  { env: { FROM_SETTINGS: "1" }, extraArgs: ["--settings"] },
+);
+check(
+  "配置（v0.3.5 回归）：env / extraArgs / ocrCandidates 三层叠加（设置页与文件层都不再被静默丢掉）",
+  hrMergedLayers.env.FROM_FILE === "1" &&
+    hrMergedLayers.env.FROM_SETTINGS === "1" &&
+    hrMergedLayers.extraArgs.join(" ") === "--settings" &&
+    hrMergedLayers.ocrCandidates.join(" ") === "ocr-file",
+  JSON.stringify({
+    env: hrMergedLayers.env,
+    extraArgs: hrMergedLayers.extraArgs,
+    ocrCandidates: hrMergedLayers.ocrCandidates,
+  }),
+);
+
+const hrZeroCfg = cfgMod.loadConfig({ includeDiffMaxBytes: 0, maxIssuesInText: 0 });
+check(
+  "配置（v0.3.5 回归）：显式 0 不再被当成「没配」（不带 diff / 正文不列问题）",
+  hrZeroCfg.includeDiffMaxBytes === 0 && hrZeroCfg.maxIssuesInText === 0,
+  JSON.stringify({ includeDiffMaxBytes: hrZeroCfg.includeDiffMaxBytes, maxIssuesInText: hrZeroCfg.maxIssuesInText }),
+);
+
+const hrCapPlan = review.normalizeTarget({ scope: "workspace", timeoutMinutes: 999 }, {}, "C:/tmp");
+check(
+  "配置（v0.3.5 回归）：maxTimeoutMinutes 回落值取自 DEFAULTS（此前硬编码 45，与 60 的声明不一致）",
+  hrCapPlan.timeoutMinutes === cfgMod.DEFAULTS.maxTimeoutMinutes && hrCapPlan.timeoutMinutes > 45,
+  `timeoutMinutes=${hrCapPlan.timeoutMinutes} fallback=${cfgMod.DEFAULTS.maxTimeoutMinutes}`,
+);
+
+const hrReadmeText = [JSON.stringify(JSON.parse(readFileSync(new URL("../config.json", import.meta.url), "utf8"))._readme), readFileSync(new URL("../README.md", import.meta.url), "utf8")].join("\n");
+check(
+  "文档（v0.3.5 回归）：config.json 的 _readme 与 README 都警示「别把明文密钥写进本文件」",
+  /不要[^"]*明文密钥/.test(hrReadmeText) && /llm\.apiKeyRef/.test(hrReadmeText) && /不会被提交/.test(hrReadmeText),
+  `len=${hrReadmeText.length}`,
+);
+
 /* P2：from/to/commit 原样进 git 命令（在 -- 之前），以 - 开头会被 git 当选项。 */
 const hrRefCase = cannedHarness([{ exitCode: 0, stdout: "{}" }]);
 const hrRefRun = await hrRefCase.call({ scope: "range", from: "--output=C:/tmp/x", to: "HEAD" });

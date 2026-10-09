@@ -1,7 +1,8 @@
 {
   "_readme": [
     "这个文件是可选的第 2 层配置（优先级：设置页 > 本文件 > 插件内置默认值，详见 README 的「配置」一节）。",
-    "这里适合放设置页没有的键：ocrCandidates / autoEngine / maxTimeoutMinutes / extraArgs / env / includeDiffMaxBytes / maxIssuesInText / llm.apiKey（字面密钥）。",
+    "这里适合放设置页没有的键：ocrCandidates / autoEngine / maxTimeoutMinutes / extraArgs / env / includeDiffMaxBytes / maxIssuesInText。",
+    "不要把明文密钥写进本文件：它受版本控制、且随插件包分发（package.json 的 files/exports 都含 ./config.json），写进去会随 git 提交与分发泄露。密钥一律用 llm.apiKeyRef 指向 DSH 凭据库；llm.apiKey 只是「不想用凭据库」时的最后手段，用之前先确认本文件不会被提交。",
     "改本文件即时生效（按 mtime 热读）；设置页改动也是即时生效。",
     "LLM 默认走 dsh 路由：插件在 127.0.0.1 起一个只认随机 token 的 OpenAI 兼容小桥，把 ocr 的请求转给 DSH 的 ctx.llm.stream —— 模型 / provider / 密钥 / 配额全由 DSH 决定，下面的 baseUrl/protocol/apiKeyRef 只在 llm.mode=endpoint 时才用。",
     "llm.provider 与 llm.model 留空 = 跟随 DSH 的默认模型（agent-default-model，官方读全局默认路由的同一来源）；想固定某个模型再在设置页的「模型名」下拉里选。",

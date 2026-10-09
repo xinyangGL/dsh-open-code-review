@@ -259,7 +259,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 113 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs` 118 项）。
 
 ---
 
@@ -274,7 +274,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 插件卡片能打开，但没有配置表单 | 浏览器半侧没被加载：确认 `package.json` 里有 `dsh.client` 与 `exports["./client"]`、`lib\client.js` 存在且语法可解析（`node --check lib\client.js`），然后**重启一次 DSH** 并刷新页面（包扫描结果缓存到重启）；页面里若显示「浏览器侧没有这个条目的表单」说明 cell 已加载但条目 id 对不上 |
 | 设置导航里没有「代码评审」 | 同一个表单的独立入口（`settings.section`）。它没出现说明浏览器半侧没加载；只改了 `lib\client.js` 内容时**刷新页面**即可（bundle 的 rev 取文件 mtime），但**第一次**加上/移动客户端文件要重启 DSH 才会重新扫描 |
 | `无法定位 ocr 可执行文件` | 在 `config.json` 里写 `ocrPath` 指向 `opencodereview.exe`（原生 exe 优先于 `ocr.cmd`） |
-| `credential "COMMANDCODE_API_KEY" 未配置` / `llm test` 报缺 key | 这是 `endpoint` 路由的问题：在设置页把「LLM 凭据引用」改成你 DSH 凭据库里已有的名字，或往 `config.json` 的 `llm.apiKey` 写一个字面密钥。若切回 `dsh` 路由，密钥由 DSH 的 provider 配置提供，不用在这里填 |
+| `credential "COMMANDCODE_API_KEY" 未配置` / `llm test` 报缺 key | 这是 `endpoint` 路由的问题：在设置页把「LLM 凭据引用」改成你 DSH 凭据库里已有的名字，或往 `config.json` 的 `llm.apiKey` 写一个字面密钥——**但先确认这个文件不会被提交**：它在仓库里受版本控制、且随插件包分发（`package.json` 的 `files`/`exports` 都含 `./config.json`），明文密钥会跟着泄露，所以更推荐 `llm.apiKeyRef`（见「加固 v0.3.5」）。若切回 `dsh` 路由，密钥由 DSH 的 provider 配置提供，不用在这里填 |
 | `OCR 未配置 LLM 端点` | 预期行为之一：`engine: "auto"` 会自动降级 `delegate`；想用 `ocr` 流水线就修好路由（`dsh` 路由看下一条，或切成 `endpoint` 填好端点/协议/模型/凭据引用）。显式 `engine: "ocr"` 时结果是失败：`code: OCR_LLM_MISSING` |
 | `Model "…" is not supported on this endpoint` | `llmProtocol` 配错了：CommandCode 的 DeepSeek 系要 `openai`；走 `/v1/messages` 的 Anthropic 端点才用 `anthropic` |
 | 结果里 `issues` 为空但评审成功 | 这表示返回的 JSON **确有**问题清单字段且为空（`code: ""`）= 真「未发现问题」。要核对 OCR 原始字段名与内容就读 `rawJson`；`extractIssues` 已兼容 `issues/findings/comments/…` 多种字段名 |
@@ -299,6 +299,18 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 设置页/`config.json` 里把开关写成 `"false"`、次数写成负数 | 旧实现把 `"false"` 当**真**（真值判断只看存在性），负数直接变成负超时（等于关掉硬超时、评审能挂到天荒地老）。现在 `loadConfig` 会归一：`"false"/"0"/"off"` → `false`，非法数字/负数回落到默认值（`timeoutMinutes` 默认 15，也夹在 `maxTimeoutMinutes` 之内） |
 | 评审结果形状不认识却报「未发现问题」 | fail-closed 补齐：`exit=0` 但没有可识别的问题清单字段 → `OCR_OUTPUT_SHAPE_UNKNOWN`（`test/smoke.mjs` 有 7 种坏形状的回归表）；混合清单（一部分解析不出来）也会在 `notes` 里写明「N 条无法解析」 |
 
+### 加固（v0.3.5：一次真机 `ocr scan` 评审本身的发现）
+
+这轮改动全部来自「用本插件评审它自己的 `lib\config.js`」的真实输出（`ocr scan`，175.9s，6 条问题），逐条修掉：
+
+| 现象（升级前的旧行为） | 现在 |
+| --- | --- |
+| 文档/注释引导把**明文密钥**写进 `config.json` | 本文件在仓库里受版本控制、且随插件包分发（`package.json` 的 `files`/`exports` 都含 `./config.json`），写进去会随提交与分发泄露。`config.json` 的 `_readme` 与本文档现在都明确：密钥用 `llm.apiKeyRef` 指向 DSH 凭据库，`llm.apiKey` 是最后手段且先确认本文件不会被提交 |
+| 设置页 / `config.json` / 默认值三层里，某层的 `env`、`extraArgs`、`ocrCandidates` 被静默丢掉 | 旧实现只叠加 `file` 层（`patch.env` 直接丢、`extraArgs`/`ocrCandidates` 只取文件层）。现在三层按「设置页 > `config.json` > 默认值」叠加，后两者走 `stringList()`（取上层第一个真数组、过滤空串） |
+| `includeDiffMaxBytes` / `maxIssuesInText` 显式写 `0` 却被当成「没配」 | 旧实现末尾有 `\|\| DEFAULTS.x`，把 `0`（本意是「不带 diff」/「正文不列问题」）吃掉，和同组其它计数项（`0` 合法）不一致。现在显式 `0` 保留 |
+| 同一批阈值在 `DEFAULTS` 和 `buildSchema()` 里各写一份，改一处忘一处 | `buildSchema()` 的 6 个 `.default(...)`（`autoMaxPerSession`/`autoMinReviewableFiles`/`autoMinIntervalMs`/`autoSkipSubagents`/`autoIncludeDiff`/`timeoutMinutes`）与 `timeoutMinutes` 的上界都改成引用 `DEFAULTS`；`lib\review.js` 里 `maxTimeoutMinutes` 的回落值也从硬编码 `45` 改成 `DEFAULTS.maxTimeoutMinutes`（此前同一语义有三个数字：60 / 60 / 45） |
+| `config.json` 写坏了（JSON 语法错）却毫无提示 | 仍然 fail-safe 按出厂默认跑，但每次文件变化会在宿主日志里留一行：`[dsh-open-code-review] …\config.json 解析失败，本次按出厂默认运行：<原因>`（热读有 mtime/size 短路，所以只喊一次，不会刷屏） |
+
 ```
 dsh-open-code-review/
 ├─ package.json          # dsh.bundle.patch 指向 cordis.patch.yml；dsh.client 声明浏览器半侧；icon 指向 icon.svg
@@ -318,7 +330,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，113 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，118 项断言，含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、配置分层与默认值单一来源、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
