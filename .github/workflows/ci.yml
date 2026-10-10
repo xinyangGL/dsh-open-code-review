@@ -40,12 +40,12 @@ jobs:
           node test/bridge-smoke.mjs
           node test/client-smoke.mjs
 
-      # cordis-inject 需要 DSH 自带的 cordis（asar 里取不出来，仓库不 vendor 它）：
-      # 拿不到就退出 2 = 跳过（跳过 ≠ 通过，所以这里只容忍 0 和 2）。
-      - name: Cordis injection regression (exit 2 = skipped on CI)
+      # cordis-inject 需要 DSH 自带的 cordis（asar 里取不出来，仓库不 vendor 它）。
+      # 以前这里容忍 exit 2 = 「跳过」，等于这套回归在 CI 上从没跑过（S6/D3 的缺口）。
+      # 现在临时装一份上游 cordis + cosmokit（--no-save：不进 package.json、不进 lock），
+      # 测试自己就能在仓库的 node_modules 里发现它；exit 2 不再被容忍，跳过就是失败。
+      - name: Cordis injection regression (real cordis, installed transiently)
         shell: bash
         run: |
-          set +e
-          node test/cordis-inject.mjs
-          code=$?
-          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+          npm install --no-save --no-package-lock @deepseek-ai/cordis@^4 @deepseek-ai/cosmokit@^1
+          OCR_TEST_CORDIS="$(node -e "console.log(require.resolve('@deepseek-ai/cordis'))")" node test/cordis-inject.mjs

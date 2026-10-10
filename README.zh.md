@@ -724,7 +724,8 @@ dsh-open-code-review/
    ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，103 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「半截正文也算截断」「桥自己的超时会给客户端交代并计入统计」「畸形请求体 → 400 invalid_body」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数、v0.6.1 的 rejected/lastReject 与 retrySkipReason 逐请求重置、v0.6.2 的无 index 工具调用合并与 reasoning_content）：node test/bridge-smoke.mjs
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
-   │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
+   │                     #   取不到 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
+   │                     #   CI 里不再容忍这个跳过：工作流临时装上游 cordis + cosmokit（--no-save）并把 OCR_TEST_CORDIS 指到真 main 文件，跳过即失败
    ├─ killswitch-smoke.mjs # 紧急制动冒烟（44 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏；v0.7.1 起还覆盖「标记是目录也算命中」与 statSync/ENOENT 的源码级守卫；v0.7.2 起断言拒绝表头写的是 engine=未执行）：node test/killswitch-smoke.mjs
    └─ host-contract.mjs  # 宿主契约冒烟（37 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里；v0.7.1 起还覆盖「服务只藏在 ctx.reflect.get(name,false) 后面也认」与「有 ctx.on 但没挂上钩子时四条事件能力必须报缺失」；v0.7.2 起还覆盖「文案里不出现字面量 undefined」「账目按 ctx 取」）：node test/host-contract.mjs
    └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs [仓库路径] [status-only]

@@ -3,6 +3,29 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.8.2] — 2026-10-10
+
+这一版**没有代码行为变更**，是把仓库收拾成「能给别人用」的样子：社区文件、发布纪律、以及 CI 上
+那套以前形同虚设的回归。单独发一个补丁号，是为了让 v0.9.0 那类会动外部接口的改动不和这些混在一起
+（见 `RELEASING.md` 的「一次 tag 只带一个高风险改动」）。
+
+Added
+- `CONTRIBUTING.md`（开发环境 / 怎么跑测试 / L0–L6 测试分层 / CI 等价环境 / 碰宿主扩展点之前的四条 /
+  PR 期望）、`RELEASING.md`（一次 tag 一个高风险改动、出事第一步与回滚顺序、每个 tag 前的检查清单）、
+  `SECURITY.md`、`.github/ISSUE_TEMPLATE/{bug.yml,config.yml}`、`.github/PULL_REQUEST_TEMPLATE.md`。
+- `docs/maturity-assessment-2026-10-10.md`：一次外部产品评估（含「不成熟」的结论、八个维度打分、
+  M1–M4 机制建议与 P0/P1 路线图）。留着是为了让路线图有出处，不是宣传材料。
+
+Changed
+- **CI 上的 cordis 回归不再「跳过即通过」**：工作流那一步以前容忍退出码 2（跳过），而 CI runner 上
+  取不到 DSH 自带的 cordis ⇒ 这套回归在 CI 上**从来没跑过**。现在那一步临时装
+  `@deepseek-ai/cordis@^4` + `@deepseek-ai/cosmokit@^1`（`npm install --no-save --no-package-lock`）
+  并把 `OCR_TEST_CORDIS` 指到真 main 文件；跳过 = 失败。
+- 文档同步：`README.md` / `README.zh.md` 里「CI 上这套是 best-effort、跳过不算错」的说法改掉。
+
+Tests
+- 离线八套不变（`smoke` 236 项、没装 `ocr` 时 229）。本版没有改断言，只改了 CI 怎么跑。
+
 ## [0.8.1] — 2026-10-10
 
 这一版是 v0.8.0 的第一次真机自审（`ocr_review` 扫 `lib/review.js`，166.2s、6 条）加上那次运行里

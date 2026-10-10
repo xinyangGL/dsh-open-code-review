@@ -1,0 +1,87 @@
+name: Bug report
+description: 插件行为不对 / 报错 / 工具不可用
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先看两件事：
+        1. 如果**所有工具**都返回空的 `Error:`，或基本没法用 —— 请先按 [RELEASING.md](../blob/main/RELEASING.md)
+           的止血步骤加 `.disabled` 标记（放 `<DSH_HOME>/dsh-open-code-review.disabled` 或插件目录 `.disabled`），
+           再回来填这个表单。
+        2. 请**不要**粘贴完整的桥 token / API key。`ocr_status` 里它们是脱敏的，直接贴就行。
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      description: `ocr_status` 顶部或 `package.json` 里的 version
+      placeholder: "0.8.0"
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: DSH 版本、Node 版本、操作系统
+      placeholder: "DSH 0.6.x / Node 22.14 / Windows 11"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: ocr
+    attributes:
+      label: ocr 的状态
+      options:
+        - label: 已安装 `ocr`（`opencodereview --version` 能打印版本）
+        - label: 用的是 Windows 原生 `.exe`（不是 `.cmd` / `.bat` / `.ps1`）
+        - label: 设置了 `OCR_EXECUTABLE` 或 `OPENCODEREVIEW_BIN` 环境变量
+        - label: 完全没装 `ocr`
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: engine
+      description: 问题发生在哪一档？（`ocr_status` 或对应设置的 `ocr_review.engine`）
+      options:
+        - delegate（v0.8.0 起的默认）
+        - ocr
+        - auto
+        - reviewer.agent = spawn（独立评审子 agent）
+        - 不确定 / 没跑起来
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 实际发生了什么
+      description: 复现步骤 + 期望结果 + 实际结果。涉及长评审请注明耗时与 `timeoutMinutes`。
+      placeholder: |
+        1. 在 ... 上调用 ocr_review{scope:"workspace"}
+        2. 期望：...  实际：...
+        3. 耗时：约 5 分钟；timeoutMinutes: 10
+    validations:
+      required: true
+
+  - type: textarea
+    id: ocr-status
+    attributes:
+      label: ocr_status 输出
+      description: 直接粘贴（脱敏过的，安全）
+      render: text
+
+  - type: textarea
+    id: jobs
+    attributes:
+      label: Jobs 面板 / 进度行
+      description: 如果评审开了 job（`job_list`），贴那一行与最后几条进度/日志
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 其它日志
+      description: DSH 的启动日志、`ocr` 的 stderr、报错原文。有结果码（`OCR_*`）请一并写上。
+      render: text

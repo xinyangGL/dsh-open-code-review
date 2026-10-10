@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 先看排障表（README）
+    url: https://github.com/xinyangGL/dsh-open-code-review/blob/main/README.zh.md#排障
+    about: 装不上 ocr / 没有按钮 / 长评审像卡死 / token 对不上 —— 这些都有现成答案。
+  - name: 紧急制动（所有工具都返回空的 Error:）
+    url: https://github.com/xinyangGL/dsh-open-code-review/blob/main/SECURITY.md#紧急制动出事第一步
+    about: 先加 .disabled 标记止血，再回来报 issue。
+  - name: 私有漏洞报告
+    url: https://github.com/xinyangGL/dsh-open-code-review/security/advisories/new
+    about: 安全问题请不要开公开 issue。
