@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.6.1）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.6.2）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -370,6 +370,18 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
 
+### 加固（v0.6.2：第二次用真机 `ocr` 审自己（这次审 0.6.1 的 `lib/bridge.js`）—— 审出五条，一条真会坏事）
+
+| 问题 | 现在 |
+| --- | --- |
+| 上游在连续的 `tool-call-delta` 上不带 `index` 时，兜底 index 用的是 `state.toolCalls.length`，而它每建一个 slot 就 +1 ⇒ 同一次调用的第二个 delta `find` 永远查不到上一个 slot，`name` 与 `arguments` 被拆到两个半截调用上（`openAiMessage()` 甚至把 `arguments` 填成 `"{}"`），上游会报参数错误 | 无 `index` 的 delta **复用最近一个 slot**；只有当它带着新 `name` 而最近那个 slot 已有名字时才另开一个 slot（断言：两个无 index 的连续 delta → 1 个完整调用；带新 name 的 delta → 2 个调用） |
+| 模型流式吐出的思考过程（`reasoning-delta`）只累积进 `state.reasoning`，没有任何读取方 ⇒ 丢掉「模型把预算全烧在思考、正文为空」这种失败（真机见过 `finish_reason=length`、`reasoningTokens=16384`）唯一的线索 | 非流式放进 `message.reasoning_content`，流式先发一个 `delta.reasoning_content` 帧（正文帧照旧在后面） |
+| `messages` 不是数组时异常直接从 `toDshMessages` 抛穿到桥的 catch：既没走 `rejectRequest()`（`rejected`/`lastReject` 漏记，与「到达桥但没转发出去都要计 rejected」不符），又让下面 `empty_messages` 分支永远走不到（注释与行为不符） | 显式校验 + `rejectRequest("invalid_messages", …)` + 400；「是数组但没有可翻译内容」仍走 `empty_messages` |
+| `abortedBy()` 在外部用别的 reason 掐断时返回 `"unknown"`，却被写成「桥已关闭」⇒ 状态行的 `retrySkipReason` 指向错误原因 | 新增导出 `ABORT_SKIP_REASONS`（`timeout`/`client`/`closed`/`unknown`），未知原因也有自己的文案，且不再是嵌套三元 |
+| `content` 的嵌套三元（`state.text.length > 0 ? state.text : toolCalls.length > 0 ? null : ""`）藏着「有工具调用时 content 必须为 null」的语义 | 拆成显式分支 |
+
+`test/bridge-smoke.mjs` 从 99 增到 **103** 条；`test/smoke.mjs` 仍是 205 条（没装 ocr 198）—— 这五条都在桥内部，schema 与键集合没有变化。
+
 ### 加固（v0.6.1：第一次用真机 `ocr` 审自己的 0.6.0 —— 审出四条桥缺陷，逐条修掉）
 
 | 问题 | 现在 |
@@ -558,7 +570,7 @@ dsh-open-code-review/
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
-   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，99 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「半截正文也算截断」「桥自己的超时会给客户端交代并计入统计」「畸形请求体 → 400 invalid_body」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数、v0.6.1 的 rejected/lastReject 与 retrySkipReason 逐请求重置）：node test/bridge-smoke.mjs
+   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，103 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「半截正文也算截断」「桥自己的超时会给客户端交代并计入统计」「畸形请求体 → 400 invalid_body」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数、v0.6.1 的 rejected/lastReject 与 retrySkipReason 逐请求重置、v0.6.2 的无 index 工具调用合并与 reasoning_content）：node test/bridge-smoke.mjs
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录

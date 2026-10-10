@@ -3,6 +3,36 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.6.2] — 2026-10-10
+
+第二次用真机 `ocr` 审自己（这次审的是 0.6.1 的 `lib/bridge.js`，258.9s，同样走 DSH 本机桥），
+审出五条，逐条修掉。一条是真正会坏事的（无 `index` 的工具调用流被拆成两个半截调用），其余是
+记账/文案/可读性。
+
+Fixed
+- **上游不发 `index` 时，连续的 `tool-call-delta` 不再各建一个 slot**：旧兜底 index 是
+  `state.toolCalls.length`，而它每建一个 slot 就 +1，于是同一次调用的第二个 delta 用递增后的
+  index `find` 永远查不到上一个 slot —— `name` 和 `arguments` 被拆到两个 slot 上，
+  `openAiMessage()` 只拼出半截（甚至把 `arguments` 填成 `"{}"`），上游会报参数错误。现在无
+  `index` 的 delta 复用最近一个 slot；只有当它带着新 `name` 而最近那个已有名字时才另开 slot。
+- **`messages` 不是数组时显式 400 `invalid_messages`**：以前直接交给 `toDshMessages` 抛错穿透，
+  既漏记 `stats.rejected`/`lastReject`（与「到达桥但没转发出去都要计入 rejected」的设计不符），
+  又让 `empty_messages` 分支永远走不到（注释与行为不符）。「是数组但没有可翻译内容」仍是
+  `empty_messages`。
+- **思考过程（`reasoning-delta`）真的带出去了**：`state.reasoning` 以前只累积、没有任何读取方
+  （`openAiMessage()` / `openAiStreamFrames()` 都不消费），等于丢掉「模型把预算全烧在思考、
+  正文为空」这种失败（真机见过 `finish_reason=length` + `reasoningTokens=16384`）唯一的线索。
+  现在非流式放进 `message.reasoning_content`，流式先发一个 `delta.reasoning_content` 帧。
+- **`abortedBy()` 的 `"unknown"` 不再写成「桥已关闭」**：外部用别的 reason 掐断时，状态行的
+  `retrySkipReason` 会指向错误原因。现在四种取值（`timeout`/`client`/`closed`/`unknown`）各有
+  自己的文案，未知原因也有一句说明，且不再是嵌套三元。
+
+Tests
+- `test/bridge-smoke.mjs` 99 → **103**（无 index 的连续 delta 合并成一个调用 / 带新 name 的 delta
+  另开 slot / `messages` 非数组 → 400 且计入 rejected / 思考帧与 `reasoning_content` /
+  `ABORT_SKIP_REASONS` 四取值齐全）。
+- `test/smoke.mjs` 仍 **205**（没装 ocr **198**）：这五条都在桥内部，schema 与键集合没有变化。
+
 ## [0.6.1] — 2026-10-10
 
 第一次用真机 `ocr` 审自己的 0.6.0 改动（`ocr_review{scope:"scan",paths:["lib/bridge.js"]}`，393.5s，

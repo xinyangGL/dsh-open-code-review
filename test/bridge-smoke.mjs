@@ -5,6 +5,7 @@
  * 用法：node test/bridge-smoke.mjs
  */
 import {
+  ABORT_SKIP_REASONS,
   BRIDGE_COMPLETIONS_PATH,
   CLOSE_GRACE_MS,
   MAX_BODY_BYTES,
@@ -135,8 +136,11 @@ async function waitFor(predicate, timeoutMs = 3000) {
   acc.push({ type: "usage", usage: { promptTokens: 7, completionTokens: 3, totalTokens: 10 } });
   acc.push({ type: "finish", reason: { kind: "stop" } });
   check("累积器：文本 delta 拼接", acc.state.text === "pong", acc.state.text);
-  check("累积器：reasoning 单独记，不混进正文", acc.state.reasoning === "想一想" && acc.openAiMessage().content === "pong");
-  check("累积器：stop 的 finish_reason 是 stop", acc.finishReason() === "stop" && acc.failure() === null);
+  check(
+    "累积器：reasoning 单独记、不混进正文，但会作为 reasoning_content 带出去（v0.6.2：以前只累积不消费）",
+    acc.state.reasoning === "想一想" && acc.openAiMessage().content === "pong" && acc.openAiMessage().reasoning_content === "想一想",
+    text(acc.openAiMessage()),
+  );  check("累积器：stop 的 finish_reason 是 stop", acc.finishReason() === "stop" && acc.failure() === null);
   const completion = toOpenAiCompletion({ id: "chatcmpl-x", model: "m", created: 1, accumulator: acc });
   check(
     "toOpenAiCompletion：OpenAI 响应骨架",
@@ -145,7 +149,15 @@ async function waitFor(predicate, timeoutMs = 3000) {
   );
   check("toOpenAiCompletion：usage 归一成 prompt_tokens/completion_tokens/total_tokens", completion.usage.prompt_tokens === 7 && completion.usage.completion_tokens === 3 && completion.usage.total_tokens === 10, text(completion.usage));
   const frames = openAiStreamFrames({ id: "chatcmpl-x", model: "m", created: 1, accumulator: acc });
-  check("openAiStreamFrames：内容帧 + 终止帧 + usage 帧", frames.length === 3 && frames[0].choices[0].delta.content === "pong" && frames[1].choices[0].finish_reason === "stop" && frames[2].usage.total_tokens === 10, text(frames));
+  check(
+    "openAiStreamFrames：思考帧 + 内容帧 + 终止帧 + usage 帧",
+    frames.length === 4 &&
+      frames[0].choices[0].delta.reasoning_content === "想一想" &&
+      frames[1].choices[0].delta.content === "pong" &&
+      frames[2].choices[0].finish_reason === "stop" &&
+      frames[3].usage.total_tokens === 10,
+    text(frames),
+  );
 
   const toolAcc = createAccumulator();
   toolAcc.push({ type: "tool-call-delta", index: 0, id: "call_probe", name: "ocr_selftest", argumentsDelta: "{\"note\":" });
@@ -160,6 +172,42 @@ async function waitFor(predicate, timeoutMs = 3000) {
   check("累积器：有工具调用时 finish_reason 是 tool_calls", toolAcc.finishReason() === "tool_calls", toolAcc.finishReason());
   const toolFrames = openAiStreamFrames({ id: "chatcmpl-x", model: "m", created: 1, accumulator: toolAcc });
   check("openAiStreamFrames：工具帧先给 name 再给 arguments，最后 finish_reason=tool_calls", toolFrames[0].choices[0].delta.tool_calls[0].function.name === "ocr_selftest" && toolFrames[1].choices[0].delta.tool_calls[0].function.arguments === "{\"note\":\"x\"}" && toolFrames[2].choices[0].finish_reason === "tool_calls", text(toolFrames));
+
+  /* v0.6.2（真机 OCR 自审发现）：上游不发 index 时，旧实现拿 `state.toolCalls.length` 当兜底 index，
+     而它每建一个 slot 就 +1 ⇒ 同一次调用的连续 delta 各自新建 slot，name/arguments 被拆散。 */
+  const noIndexAcc = createAccumulator();
+  noIndexAcc.push({ type: "tool-call-delta", id: "call_a", name: "ocr_selftest", argumentsDelta: "{\"note\":" });
+  noIndexAcc.push({ type: "tool-call-delta", argumentsDelta: "\"x\"}" });
+  noIndexAcc.push({ type: "finish", reason: { kind: "stop" } });
+  const noIndexMessage = noIndexAcc.openAiMessage();
+  check(
+    "累积器（v0.6.2）：不带 index 的连续 tool-call-delta 复用同一个 slot（不再拆成两个半截调用）",
+    noIndexAcc.state.toolCalls.length === 1 &&
+      noIndexMessage.tool_calls.length === 1 &&
+      noIndexMessage.tool_calls[0].function.name === "ocr_selftest" &&
+      noIndexMessage.tool_calls[0].function.arguments === "{\"note\":\"x\"}",
+    text(noIndexMessage),
+  );
+  /* 反过来：不带 index 但带着一个「新名字」，而最近那个 slot 已经有名字 ⇒ 确实是第二次调用。 */
+  const twoCallAcc = createAccumulator();
+  twoCallAcc.push({ type: "tool-call-delta", id: "call_a", name: "first_tool", argumentsDelta: "{}" });
+  twoCallAcc.push({ type: "tool-call-delta", id: "call_b", name: "second_tool", argumentsDelta: "{}" });
+  twoCallAcc.push({ type: "finish", reason: { kind: "stop" } });
+  const twoCallMessage = twoCallAcc.openAiMessage();
+  check(
+    "累积器（v0.6.2）：不带 index 但带新 name 的 delta 另开 slot（两次调用不会被合并成一次）",
+    twoCallAcc.state.toolCalls.length === 2 &&
+      twoCallMessage.tool_calls.length === 2 &&
+      twoCallMessage.tool_calls[0].function.name === "first_tool" &&
+      twoCallMessage.tool_calls[1].function.name === "second_tool",
+    text(twoCallMessage),
+  );
+  check(
+    "桥（v0.6.2）：abortedBy() 的四种结果都有对应的「不重试原因」文案（unknown 不再被写成「桥已关闭」）",
+    ["timeout", "client", "closed", "unknown"].every((key) => typeof ABORT_SKIP_REASONS[key] === "string" && ABORT_SKIP_REASONS[key].length > 0) &&
+      ABORT_SKIP_REASONS.unknown.includes("原因不是桥超时"),
+    text(ABORT_SKIP_REASONS),
+  );
 
   const errAcc = createAccumulator();
   errAcc.push({ type: "finish", reason: { kind: "error", failure: { code: "UPSTREAM", message: "上游 500" } } });
@@ -293,18 +341,26 @@ const badJson = await post(happyBridge.url, happyBridge.token, "{不是 JSON");
 check("桥：请求体不是 JSON → 400", badJson.status === 400 && badJson.json.error.code === "invalid_json", String(badJson.status));
 const emptyMessages = await post(happyBridge.url, happyBridge.token, { model: "m", messages: [{ role: "system", content: "只有系统提示" }] });
 check("桥：messages 里没有可翻译内容 → 400", emptyMessages.status === 400 && emptyMessages.json.error.code === "empty_messages", emptyMessages.raw.slice(0, 120));
+/* v0.6.2（真机 OCR 自审发现）：`messages` 不是数组时以前直接交给 `toDshMessages` 抛错穿透 —— 既漏记
+   rejected，又让上面的 empty_messages 分支永远走不到。现在这里是显式闸门。 */
+const badMessages = await post(happyBridge.url, happyBridge.token, { model: "m", messages: "不是数组" });
+check(
+  "桥（v0.6.2）：messages 不是数组 → 400 invalid_messages（不再让异常穿透、也不漏记 rejected）",
+  badMessages.status === 400 && badMessages.json.error.code === "invalid_messages",
+  badMessages.status + " " + badMessages.raw.slice(0, 120),
+);
 /* v0.6.1（OCR 自审发现）：以前这些「没转发出去」的请求也记进 failed，于是诊断里出现
    「已转发 0 次 · 失败 1 次」，而且一次 401 会盖掉真正的上游失败。现在分开计数。 */
 check(
   "桥（v0.6.1）：「到达桥但没转发出去」的请求记进 rejected，不污染 failed（不出现「已转发 0 次 · 失败 1 次」）",
-  happyBridge.stats.rejected === 4 && happyBridge.stats.failed === 0 && happyBridge.describe().rejected === 4 && String(happyBridge.stats.lastReject).includes("empty_messages"),
+  happyBridge.stats.rejected === 5 && happyBridge.stats.failed === 0 && happyBridge.describe().rejected === 5 && String(happyBridge.stats.lastReject).includes("invalid_messages"),
   text({ rejected: happyBridge.stats.rejected, failed: happyBridge.stats.failed, lastReject: happyBridge.stats.lastReject }),
 );
 check(
   "桥（v0.6.1）：bridgeFailureNote 会点出「未转发即被拒」与其最近原因（否则用户只看到 ocr 的通用提示）",
   (() => {
     const note = bridgeFailureNote(happyBridge.describe());
-    return typeof note === "string" && note.includes("未转发即被拒 4 次") && note.includes("最近被拒");
+    return typeof note === "string" && note.includes("未转发即被拒 5 次") && note.includes("最近被拒");
   })(),
   String(bridgeFailureNote(happyBridge.describe())),
 );
