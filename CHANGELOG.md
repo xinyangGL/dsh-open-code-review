@@ -3,6 +3,27 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.6.0] — 2026-10-10
+
+`preTest` 按 `docs/pretest-gate-safety-design.md` 的方案 B 重构：**不再注册全局单调 guard**，
+闸门只挂在限定范围的 `tools/pre-execute` waterfall 上，并补上「出错放行」的可观测性。默认仍是
+`preTest: "off"`（行为不变）。
+
+Changed
+- **`preTest` 的唯一注册面变成 `ctx.on("tools/pre-execute", …)`**：非 shell 工具一次 `SHELL_TOOLS`
+  Set 查找后立即 `next()`（连配置都不读），非测试命令同样直接 `next()`，`off` 档直接 `next()`，
+  `remind` 只记 pending；只有 `gate` 档 + 没有评审覆盖才返回 `{kind:"deny",reason}`。
+  `ocr_status.preTest.mechanism` 因此收敛为 `pre-execute`（挂上了）或 `none`（宿主没有这个事件、
+  或插件被 `enabled=false` 关掉）——不再出现 `guard`。
+- **闸门自身异常一律 fail-open，并被计数**：新增 `preTest.failOpen` / `lastError` /
+  `lastDecision { tool, kind, at }` 进 `ocr_status`（日志按错误文本变化或 30 秒限速，避免刷屏）。
+  `statusText` 也会在 `failOpen > 0` 时点名「闸门自身出错放行 N 次」。
+- 源码级事故回归测试：读 `lib/index.js`（剥掉注释后）断言**代码里不再出现 `ctx.tools.guard(`**，
+  比行为断言更难绕过 —— 这条缺陷的防线就是「压根不注册它」。
+- 测试断言 201 → 204（没装 ocr 时 194 → 197）；[0.5.10] 的「宿主契约回归」用例改成按真实
+  waterfall 语义驱动（`next()` = 继续、`{kind:"deny",reason}` = 拒绝），旧 `off`/`enabled=false`/
+  端到端 flip 三个用例同步改写为不碰 guard 的版本。
+
 ## [0.5.10] — 2026-10-10
 
 **事故版。** v0.5.7 ~ v0.5.9 的 `preTest` 闸门会让**整个工具面不可用**：`pwsh`、`read`、`glob`、

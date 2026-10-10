@@ -611,13 +611,19 @@ check(
   `onDemand=${status.onDemand} skill=${JSON.stringify(status.skill)}`,
 );
 check(
-  "ocr_status（v0.5.7）：报出 preTest 的 mode / mechanism / 累计次数（自查到底拦没拦、用的哪种机制）",
+  "ocr_status（v0.5.7/v0.6.0）：报出 preTest 的 mode / mechanism / 累计次数 / fail-open 与最后一次判定",
   status.preTest !== null &&
     typeof status.preTest === "object" &&
     ["off", "remind", "gate"].includes(status.preTest.mode) &&
-    typeof status.preTest.mechanism === "string" &&
+    ["pre-execute", "none"].includes(status.preTest.mechanism) &&
     Number.isFinite(status.preTest.denials) &&
-    Number.isFinite(status.preTest.reminders),
+    Number.isFinite(status.preTest.reminders) &&
+    Number.isFinite(status.preTest.failOpen) &&
+    typeof status.preTest.lastError === "string" &&
+    typeof status.preTest.lastDecision === "object" &&
+    typeof status.preTest.lastDecision.tool === "string" &&
+    typeof status.preTest.lastDecision.kind === "string" &&
+    Number.isFinite(status.preTest.lastDecision.at),
   JSON.stringify(status.preTest),
 );
 
@@ -2311,16 +2317,40 @@ check(
     `${JSON.stringify(statusSchema?.properties?.skill).slice(0, 160)} | required=${(statusSchema?.required ?? []).join(",")}`,
   );
   check(
-    "v0.5.7：ocr_status 的 schema 声明了 preTest（mode/mechanism/denials/reminders）并进 required",
+    "v0.5.7/v0.6.0：ocr_status 的 schema 声明了 preTest（含 failOpen/lastError/lastDecision）并进 required",
     statusSchema?.properties?.preTest?.type === "object" &&
       (statusSchema?.properties?.preTest?.properties?.mode?.enum ?? []).join(",") === "off,remind,gate" &&
-      (statusSchema?.properties?.preTest?.required ?? []).join(",") === "mode,mechanism,denials,reminders" &&
+      (statusSchema?.properties?.preTest?.required ?? []).join(",") === "mode,mechanism,denials,reminders,failOpen,lastError,lastDecision" &&
+      (statusSchema?.properties?.preTest?.properties?.lastDecision?.required ?? []).join(",") === "tool,kind,at" &&
       (statusSchema?.required ?? []).includes("preTest"),
     `${JSON.stringify(statusSchema?.properties?.preTest ?? null).slice(0, 200)}`,
   );
 }
 
-/* v0.5.7：评审先于测试（preTest）—— gate 档用 ctx.tools.guard() 挡住没评审就开跑的测试命令，
+/* v0.6.0：preTest 只有 tools/pre-execute 一条注册路径（不再注册全局单调 guard ——
+   0.5.7~0.5.9 那次事故就是它：放行返回 "" 被宿主当成拒绝理由，所有工具都变成 Error: ）。
+   这里按宿主的 waterfall 语义驱动：有决定权就返回 {kind:"deny",reason}，否则必须 next()。 */
+const preExecute = (listeners) => {
+  const handlers = listeners.get("tools/pre-execute") ?? [];
+  return {
+    handlers,
+    ask: (exec) => {
+      let nexted = false;
+      let out = null;
+      for (const handler of handlers) {
+        out = handler(exec, () => {
+          nexted = true;
+          return { kind: "allow" };
+        });
+        if (out && out.kind === "deny") return { kind: "deny", reason: String(out.reason ?? ""), nexted };
+        if (nexted) break;
+      }
+      return { kind: nexted ? "allow" : "none", reason: "", nexted };
+    },
+  };
+};
+
+/* v0.5.7：评审先于测试（preTest）—— gate 档挡住没评审就开跑的测试命令，
    remind 档放行但回来提醒；覆盖状态由成功的 ocr_review 置位、成功的写工具清位。 */
 {
   check(
@@ -2357,60 +2387,99 @@ check(
     for (const handler of map.get("tools/result") ?? []) handler({ name, arguments: {}, agent: ptAgent }, result);
   };
 
-  /* gate：宿主有 tools.guard 时优先用它（官方约定的「与顺序无关的拒绝」）。 */
   const gateListeners = new Map();
   const gateCase = makeCtx({ listeners: gateListeners });
-  const guards = [];
-  gateCase.tools.guard = (fn) => {
-    guards.push(fn);
-    return () => {
-      const index = guards.indexOf(fn);
-      if (index >= 0) guards.splice(index, 1);
-    };
+  let guardRegistrations = 0;
+  gateCase.tools.guard = () => {
+    guardRegistrations += 1;
+    return () => {};
   };
   mod.apply(gateCase, mkConfig({ preTest: "gate" }));
-  check("preTest：gate 档挂到 ctx.tools.guard() 上（宿主认可的同步闸门）", guards.length === 1, `guards=${guards.length}`);
-  const denied = String(guards[0](ptExec("npm test")));
+  const gateDrive = preExecute(gateListeners);
+  check(
+    "v0.6.0：preTest 只注册 tools/pre-execute，完全不碰全局 ctx.tools.guard()（限定爆炸范围）",
+    gateDrive.handlers.length === 1 && guardRegistrations === 0 && mod.preTestStats().mechanism === "pre-execute",
+    `handlers=${gateDrive.handlers.length} guard=${guardRegistrations} mechanism=${mod.preTestStats().mechanism}`,
+  );
+  const denied = gateDrive.ask(ptExec("npm test"));
   check(
     "preTest：没有评审覆盖 → 闸门给拒绝理由（理由点明先跑 ocr_review，非测试命令放行）",
-    denied.includes("ocr_review") && denied.includes("评审先于测试") && guards[0](ptExec("ls -la")) === undefined,
-    denied.slice(0, 120),
+    denied.kind === "deny" && denied.reason.includes("ocr_review") && denied.reason.includes("评审先于测试") && gateDrive.ask(ptExec("ls -la")).kind === "allow",
+    denied.reason.slice(0, 120),
   );
   onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true } });
-  check("preTest：一次成功的 ocr_review 覆盖这批改动后放行", guards[0](ptExec("npm test")) === undefined);
+  check("preTest：一次成功的 ocr_review 覆盖这批改动后放行", gateDrive.ask(ptExec("npm test")).kind === "allow");
   onResult(gateListeners, "write", { isError: false, value: { ok: true } });
   check(
     "preTest：写文件成功后覆盖立刻作废（改完必须重新评审）",
-    String(guards[0](ptExec("npm test"))).includes("ocr_review"),
+    gateDrive.ask(ptExec("npm test")).kind === "deny",
   );
   onResult(gateListeners, "ocr_review", { isError: true, value: { ok: false, code: "OCR_RUN_FAILED" } });
   check(
     "preTest：失败的 ocr_review 不算「评过了」（fail-closed）",
-    String(guards[0](ptExec("npm test"))).includes("ocr_review"),
+    gateDrive.ask(ptExec("npm test")).kind === "deny",
   );
   onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true, preview: true } });
   check(
     "preTest：preview 的 ocr_review 也不算「评过了」（只列文件、没调 LLM，否则一条 preview 就能绕过闸门）",
-    String(guards[0](ptExec("npm test"))).includes("ocr_review"),
+    gateDrive.ask(ptExec("npm test")).kind === "deny",
   );
   const denialsBefore = mod.preTestStats().denials;
   const sameCall = (callId) => ({ name: "pwsh", arguments: { command: "npm test" }, agent: ptAgent, callId });
-  guards[0](sameCall("call-1"));
-  guards[0](sameCall("call-1"));
+  gateDrive.ask(sameCall("call-1"));
+  gateDrive.ask(sameCall("call-1"));
   check(
     "preTest：同一次工具调用被询问多次只记一次拦截（按 callId 去重）",
     mod.preTestStats().denials - denialsBefore === 1,
     `Δ=${mod.preTestStats().denials - denialsBefore}`,
   );
   onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true, preview: false } });
-  check("preTest：真正调过 LLM 的评审（preview=false）才放行", guards[0](ptExec("npm test")) === undefined);
+  check("preTest：真正调过 LLM 的评审（preview=false）才放行", gateDrive.ask(ptExec("npm test")).kind === "allow");
+
+  /* 非 shell 工具：一次 Set 查找后立刻 next()，完全不读配置、不参与判定。 */
+  const nonShell = gateDrive.ask({ name: "glob", arguments: { pattern: "*" }, agent: ptAgent });
+  check(
+    "preTest：非 shell 工具直接 next()（一次 Set 查找后就不参与判定，也不会为它读配置）",
+    nonShell.kind === "allow" && nonShell.nexted === true,
+    JSON.stringify(nonShell),
+  );
+
+  /* fail-open：闸门自身出任何错都必须放行并留下痕迹（可选功能不能拖垮工具面）。 */
+  const failOpenBefore = mod.preTestStats().failOpen;
+  const boomExec = {
+    name: "pwsh",
+    get arguments() {
+      throw new Error("注入的爆炸");
+    },
+    agent: ptAgent,
+  };
+  const boom = gateDrive.ask(boomExec);
+  const failOpenStats = mod.preTestStats();
+  check(
+    "preTest：闸门自身抛异常 → fail-open（放行 + 计数 + lastError + lastDecision.kind=fail-open）",
+    boom.kind === "allow" &&
+      boom.nexted === true &&
+      failOpenStats.failOpen - failOpenBefore === 1 &&
+      failOpenStats.lastError.includes("注入的爆炸") &&
+      failOpenStats.lastDecision.kind === "fail-open",
+    `failOpen=${failOpenStats.failOpen} lastError=${JSON.stringify(failOpenStats.lastError)} last=${JSON.stringify(failOpenStats.lastDecision)}`,
+  );
+  check(
+    "preTest：lastDecision 记下最后一次判定（工具名 + kind + 时间戳）",
+    (() => {
+      gateDrive.ask(sameCall("call-last"));
+      const d = mod.preTestStats().lastDecision;
+      return d.tool === "pwsh" && d.kind === "allow" && Number.isFinite(d.at) && d.at > 0;
+    })(),
+    JSON.stringify(mod.preTestStats().lastDecision),
+  );
 
   /* remind：闸门照样挂上（只记账、不拦），否则测试结果回来时没有任何 pending 可提醒。 */
   const remindListeners = new Map();
   const remindCase = makeCtx({ listeners: remindListeners });
-  const remindGuards = [];
-  remindCase.tools.guard = (fn) => {
-    remindGuards.push(fn);
+  let remindGuardCalls = 0;
+  remindCase.tools.guard = () => {
+    remindGuardCalls += 1;
     return () => {};
   };
   mod.apply(remindCase, mkConfig({ preTest: "remind" }));
@@ -2418,11 +2487,17 @@ check(
   const followed = [];
   remindAgent.followup = (message) => followed.push(message);
   const remindExec = { name: "pwsh", arguments: { command: "npm test" }, agent: remindAgent };
-  const remindVerdict = remindGuards.length === 1 ? remindGuards[0](remindExec) : "（没挂闸门）";
+  const remindDrive = preExecute(remindListeners);
+  const remindVerdict = remindDrive.ask(remindExec);
   check(
     "preTest：remind 档也挂闸门但一律放行（只记账；不挂的话测试结果回来时根本没有 pending）",
-    remindGuards.length === 1 && remindVerdict === undefined && mod.preTestStats().mode === "remind" && mod.preTestStats().mechanism === "guard",
-    `guards=${remindGuards.length} verdict=${JSON.stringify(remindVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
+    remindDrive.handlers.length === 1 &&
+      remindGuardCalls === 0 &&
+      remindVerdict.kind === "allow" &&
+      remindVerdict.nexted === true &&
+      mod.preTestStats().mode === "remind" &&
+      mod.preTestStats().mechanism === "pre-execute",
+    `handlers=${remindDrive.handlers.length} guard=${remindGuardCalls} verdict=${JSON.stringify(remindVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
   );
   for (const handler of remindListeners.get("tools/result") ?? []) {
     handler(remindExec, { isError: false, value: { ok: true } });
@@ -2433,51 +2508,44 @@ check(
     followed.map(textOf).join(" | ").slice(0, 120),
   );
 
-  /* 老宿主没有 tools.guard 时回落到 tools/pre-execute waterfall。 */
-  const fbListeners = new Map();
-  const fbCase = makeCtx({ listeners: fbListeners });
-  mod.apply(fbCase, mkConfig({ preTest: "gate" }));
-  const fbHandlers = fbListeners.get("tools/pre-execute") ?? [];
-  const fbAgent = Object.assign(makeAgent(), { id: "session-pretest-fb" });
-  const fbExec = (command) => ({ name: "pwsh", arguments: { command }, agent: fbAgent });
-  const fbDeny = fbHandlers.length === 1 ? fbHandlers[0](fbExec("npm test"), () => ({ kind: "allow" })) : null;
-  const fbPass = fbHandlers.length === 1 ? fbHandlers[0](fbExec("ls -la"), () => ({ kind: "allow" })) : null;
+  /* v0.6.0 事故回归（源码级）：0.5.7~0.5.9 的全局 guard 是「放行返回 "" 被宿主当成拒绝
+     理由 ⇒ 所有工具变成 Error: 」的直接来源。防线是**压根不注册**它，所以这里直接检查
+     源码里不再有 tools.guard 调用（比行为断言更难绕过：无论配置是什么都不该出现）。 */
+  const indexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+  /* 注释里提到这次事故是允许的（甚至是希望的文档），所以先把注释剥掉再看调用点。 */
+  const indexCode = indexSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
   check(
-    "preTest：没有 tools.guard 的老宿主回落到 tools/pre-execute（测试命令 → {kind:deny,reason}，其它命令 → next()）",
-    fbHandlers.length === 1 &&
-      fbDeny?.kind === "deny" &&
-      String(fbDeny?.reason ?? "").includes("ocr_review") &&
-      fbPass?.kind === "allow" &&
-      mod.preTestStats().mechanism === "pre-execute",
-    `handlers=${fbHandlers.length} deny=${JSON.stringify(fbDeny)?.slice(0, 60)} pass=${JSON.stringify(fbPass)}`,
+    "v0.6.0 事故回归：lib/index.js 的代码里不再出现 ctx.tools.guard（唯一的注册面是 tools/pre-execute）",
+    !/tools\s*\.\s*guard\s*\(/.test(indexCode) && !/\bguards?\s*\.\s*append\s*\(/.test(indexCode),
+    `matches=${(indexCode.match(/tools\s*\.\s*guard\s*\(/g) ?? []).length}（注释里提到 ${(indexSource.match(/tools\s*\.\s*guard/g) ?? []).length} 次）`,
   );
 }
 
-/* 真实宿主的 guard 判定：第一个 !== undefined 的返回值即拒绝（空字符串也算）。
-   这条用例直接复刻宿主语义，防止再把「放行」写成 "" 而导致全工具 `Error: `。 */
+/* v0.6.0 契约回归：宿主对 tools/pre-execute（waterfall）的语义是「返回
+   {kind:"deny",reason} 即拒绝，必须 next() 才继续」。这条用例自己实现该语义，
+   防止再把「放行」写成假值/空字符串而让整个工具面变成 Error: —— 0.5.7~0.5.9 就是这样坏的。 */
 {
   const contractListeners = new Map();
   const contractCase = makeCtx({ listeners: contractListeners });
-  const contractGuards = [];
-  contractCase.tools.guard = (fn) => {
-    contractGuards.push(fn);
+  let contractGuardCalls = 0;
+  contractCase.tools.guard = () => {
+    contractGuardCalls += 1;
     return () => {};
   };
   mod.apply(contractCase, mkConfig({ preTest: "gate" }));
-  const decide = (exec) => {
-    for (const guard of contractGuards) {
-      const reason = guard(exec);
-      if (reason !== undefined) return { kind: "deny", reason };
-    }
-    return { kind: "allow" };
-  };
+  const contractDrive = preExecute(contractListeners);
   const contractAgent = Object.assign(makeAgent(), { id: "session-pretest-contract" });
-  const nonTest = decide({ name: "glob", arguments: { pattern: "*" }, agent: contractAgent });
-  const test = decide({ name: "pwsh", arguments: { command: "npm test" }, agent: contractAgent });
+  const nonTest = contractDrive.ask({ name: "glob", arguments: { pattern: "*" }, agent: contractAgent });
+  const test = contractDrive.ask({ name: "pwsh", arguments: { command: "npm test" }, agent: contractAgent });
   check(
-    "宿主契约回归：guard 放行必须返回 undefined（空字符串会被判成拒绝）",
-    nonTest.kind === "allow" && test.kind === "deny" && String(test.reason ?? "").includes("ocr_review"),
-    `nonTest=${JSON.stringify(nonTest)} test=${JSON.stringify(test)?.slice(0, 100)}`,
+    "v0.6.0 契约回归：闸门一个全局 tools.guard 都不注册，只走 pre-execute（非测试命令 next() 放行、测试命令给 {kind:deny,reason}）",
+    contractGuardCalls === 0 &&
+      contractDrive.handlers.length === 1 &&
+      nonTest.kind === "allow" &&
+      nonTest.nexted === true &&
+      test.kind === "deny" &&
+      test.reason.includes("ocr_review"),
+    `guard=${contractGuardCalls} handlers=${contractDrive.handlers.length} nonTest=${JSON.stringify(nonTest)} test=${JSON.stringify(test).slice(0, 120)}`,
   );
 }
 
@@ -2488,36 +2556,36 @@ check(
 {
   const offListeners = new Map();
   const offCase = makeCtx({ listeners: offListeners });
-  const offGuards = [];
-  offCase.tools.guard = (fn) => {
-    offGuards.push(fn);
+  let offGuardCalls = 0;
+  offCase.tools.guard = () => {
+    offGuardCalls += 1;
     return () => {};
   };
   mod.apply(offCase, mkConfig({ preTest: "off" }));
   const offAgent = Object.assign(makeAgent(), { id: "session-pretest-off" });
   const offExec = { name: "pwsh", arguments: { command: "npm test" }, agent: offAgent };
-  const offVerdict = offGuards.length === 1 ? offGuards[0](offExec) : "（没挂闸门）";
+  const offDrive = preExecute(offListeners);
+  const offVerdict = offDrive.ask(offExec);
   check(
     "v0.5.8：preTest=off 时闸门也挂着（只是放行）—— 这样 config.json 改成 gate 立刻按新档位办事，不用重挂",
-    offGuards.length === 1 &&
-      offVerdict === undefined &&
+    offDrive.handlers.length === 1 &&
+      offGuardCalls === 0 &&
+      offVerdict.kind === "allow" &&
+      offVerdict.nexted === true &&
       mod.preTestStats().mode === "off" &&
-      mod.preTestStats().mechanism === "guard",
-    `guards=${offGuards.length} verdict=${JSON.stringify(offVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
+      mod.preTestStats().mechanism === "pre-execute",
+    `handlers=${offDrive.handlers.length} guard=${offGuardCalls} verdict=${JSON.stringify(offVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
   );
 
   const disabledListeners = new Map();
   const disabledCase = makeCtx({ listeners: disabledListeners });
-  const disabledGuards = [];
-  disabledCase.tools.guard = (fn) => {
-    disabledGuards.push(fn);
-    return () => {};
-  };
   mod.apply(disabledCase, mkConfig({ enabled: false }));
   check(
-    "v0.5.8：enabled=false 才真的卸掉闸门（mechanism=none，一个 guard 都不注册）",
-    disabledGuards.length === 0 && mod.preTestStats().mode === "off" && mod.preTestStats().mechanism === "none",
-    `guards=${disabledGuards.length} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
+    "v0.5.8：enabled=false 才真的卸掉闸门（mechanism=none，一个 pre-execute 监听都不注册）",
+    (disabledListeners.get("tools/pre-execute") ?? []).length === 0 &&
+      mod.preTestStats().mode === "off" &&
+      mod.preTestStats().mechanism === "none",
+    `handlers=${(disabledListeners.get("tools/pre-execute") ?? []).length} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
   );
 
   const syncListeners = new Map();
@@ -2557,9 +2625,9 @@ check(
   const prevEnv = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
   const flipListeners = new Map();
   const flipCase = makeCtx({ listeners: flipListeners });
-  const flipGuards = [];
-  flipCase.tools.guard = (fn) => {
-    flipGuards.push(fn);
+  let flipGuardCalls = 0;
+  flipCase.tools.guard = () => {
+    flipGuardCalls += 1;
     return () => {};
   };
   try {
@@ -2567,7 +2635,7 @@ check(
     process.env.DSH_OPEN_CODE_REVIEW_CONFIG = tmpConfig;
     mod.apply(flipCase, mkConfig({ auto: "off", autoReview: "off" }));
     const modeBefore = mod.preTestStats().mode;
-    const keep = flipGuards.length === 1 ? flipGuards[0]({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-keep" }) }) : "（没挂闸门）";
+    const keep = preExecute(flipListeners).ask({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-keep" }) });
 
     /* 文件层改成 gate：不改任何设置页字段、不重挂监听器 */
     writeFileSync(tmpConfig, JSON.stringify({ preTest: "gate" }));
@@ -2579,16 +2647,18 @@ check(
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const modeAfter = mod.preTestStats().mode;
-    /* 宿主 tools.guard() 的契约是「返回字符串=拒绝，undefined=放行」；空字符串同样会被
-       判成拒绝（历史上就是它导致所有工具返回 "Error: "）。这里按真实契约断。 */
-    const verdict = flipGuards.length === 1 ? flipGuards[0]({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-deny" }) }) : "（没挂闸门）";
+    /* 宿主对 waterfall 的契约是「返回 {kind:"deny",reason} = 拒绝，next() = 继续」；
+       这里按真实契约断（不是按我们自己的返回值形状）。 */
+    const verdict = preExecute(flipListeners).ask({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-deny" }) });
     check(
       "v0.5.8：文件层 off → gate 之后，下一次 tools/result 就按新档位拦下测试命令（端到端，不用重启也不用设置页）",
       modeBefore === "off" &&
-        keep === undefined &&
+        keep.kind === "allow" &&
+        keep.nexted === true &&
+        flipGuardCalls === 0 &&
         modeAfter === "gate" &&
-        typeof verdict === "string" &&
-        verdict.includes("评审先于测试"),
+        verdict.kind === "deny" &&
+        verdict.reason.includes("评审先于测试"),
       `before=${modeBefore} keep=${JSON.stringify(keep)} after=${modeAfter} verdict=${JSON.stringify(verdict)}`,
     );
   } finally {

@@ -11,7 +11,7 @@
     "timeoutMinutes 同时决定 ocr 的 --timeout 和插件侧硬超时（同一个来源），并被 maxTimeoutMinutes 夹住；maxTimeoutMinutes 自身有 24 小时硬上界。",
     "v0.5.0 起 auto 的出厂默认是 off：默认不自动评审，改成「按需」——每条已完成回合尾部有「启动代码审核」按钮，模型也能通过 runtime skill ocr-on-demand-review 自己发起。想恢复旧的自动评审就把 auto 改成 adaptive / inject / followup；onDemand=false 会同时关掉按钮与 skill。",
     "reviewer.agent=spawn（默认 off）时评审改由独立子 agent 执行：每轮起一个只读子 agent（只有 read/grep/glob），把结构化 findings 回传，改完自动开下一轮复审，直到没有问题或到 reviewer.rounds 上限。",
-    "preTest（v0.5.7，默认 off）把评审接进「跑测试之前」这道标准流程：off=不管；remind=放行测试、结果回来后提醒模型先评审；gate=这次改动还没被一次成功的 ocr_review 覆盖时，直接跑测试命令会被挡回（判定只看内存状态，不改任何命令）。写文件成功会作废覆盖状态。"
+    "preTest（v0.5.7，默认 off；v0.6.0 起闸门只挂在限定范围的 tools/pre-execute 上，不再注册全局 tools.guard）把评审接进「跑测试之前」这道标准流程：off=不管；remind=放行测试、结果回来后提醒模型先评审；gate=这次改动还没被一次成功的 ocr_review 覆盖时，直接跑测试命令会被挡回（判定只看内存状态，不改任何命令）。写文件成功会作废覆盖状态；闸门自身出错一律放行（fail-open）并计入 ocr_status.preTest.failOpen / lastError / lastDecision。"
   ],
   "enabled": true,
   "engine": "auto",

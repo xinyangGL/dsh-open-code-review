@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.5.10）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.6.0）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -243,19 +243,16 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | `remind` | 测试照跑；这次测试**结果回来后**，给模型发一条提醒，让它补一次 `ocr_review` |
 | `gate` | 这批改动还没被一次**成功**的 `ocr_review` 覆盖时，**直接跑测试会被挡回**（模型收到拒绝理由，测试根本不会执行） |
 
-实现方式（`lib/index.js` 的 `createPreTest`）用的是宿主认可的两种机制，按优先级自动选：
+实现方式（`lib/index.js` 的 `createPreTest`）：**只注册一条** `ctx.on("tools/pre-execute", …)` 的 waterfall 监听（限定范围）。非 shell 工具一次 `SHELL_TOOLS` Set 查找后立刻 `next()`（连配置都不读）；`off` 与「不是测试命令」的调用同样直接 `next()`；`remind` 只记 pending（一律放行）；只有 `gate` 且这批改动没有成功评审覆盖时，才返回 `{ kind: "deny", reason }`。`ocr_status.preTest.mechanism` 因此只有两种取值：`"pre-execute"`（挂上了）/ `"none"`（宿主没有这个事件，或插件被 `enabled=false` 关掉）。
 
-1. `ctx.tools.guard(fn)` —— 官方约定的「与顺序无关的同步拒绝」入口，**返回字符串即拒绝、返回 `undefined` 才放行**，返回值是摘除句柄。`ocr_status.preTest.mechanism === "guard"` 表示走的是这条路。
-2. 老宿主没有 `tools.guard` 时回落到 `ctx.on("tools/pre-execute", …)`，返回 `{ kind: "deny", reason }`（waterfall 里不拥有决定权时必须 `next()`）。mechanism 显示 `"pre-execute"`。
-
-> ⚠️ **0.5.10 事故与合约细节**：v0.5.7 ~ v0.5.9 把放行写成了返回 `""`。宿主实现是
+> ⚠️ **0.5.10 事故与合约细节**：v0.5.7 ~ v0.5.9 另外注册了**全局单调**的 `ctx.tools.guard()`，并把放行写成了返回 `""`。宿主实现是
 > `guardReason(exec) { for (const guard of guards) { const reason = guard(exec); if (reason !== void 0) return reason; } }`
 > —— **空字符串同样算拒绝理由**，于是每一次工具调用都被渲染成 `Error: `（理由是空的），
-> `pwsh`/`read`/`glob`/浏览器/状态查询全部不可用。0.5.10 把放行改成返回 `undefined`，并让
-> guard 与 `tools/pre-execute` 两条路径在**自身抛异常时 fail-open**。v0.6.0 计划彻底移除全局
-> guard，只保留限定范围的 `tools/pre-execute` 拦截器（非 shell 工具一次 `Set` 查找后立刻
-> `next()`），详见 `docs/pretest-gate-safety-design.md`。原则：**可选功能不能拥有「让全部工具
-> 不可用」的失败模式。**
+> `pwsh`/`read`/`glob`/浏览器/状态查询全部不可用。0.5.10 先修边界（放行返回 `undefined`）；**0.6.0
+> 按 `docs/pretest-gate-safety-design.md` 的方案 B 把全局 guard 整个删掉**，只留上面那条限定范围的
+> `pre-execute` 拦截器，并补上「闸门自身出错 → fail-open + 计数」：`ocr_status.preTest` 现在会报
+> `failOpen` / `lastError` / `lastDecision { tool, kind, at }`（日志按错误文本变化或 30 秒限速）。
+> 原则：**可选功能不能拥有「让全部工具不可用」的失败模式。**
 
 判定与覆盖规则：
 
@@ -370,8 +367,16 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 刚装好/刚重启就问 `ocr_status`，报「桥还没就绪」并回落静态端点 | v0.5.2 已修：本机桥是异步 `listen` 的，`resolveLlmRoute()` 现在会等这次启动完成（最多 2 秒）再算路由，所以**第一次**查询就走桥。慢机器上尤其明显（本机有 `ocr` 时只是因为 `ocr --version` 子进程恰好拖了几十毫秒才侥幸躲过） |
 | 机器上**没装** `ocr` 时 `ocr_status` 自相矛盾（路由行写着本机桥地址，`bridge` 却是 `null`、`llmEnv` 为空）；`ocr_review` 只丢一句「设置 `ocrPath`」，可用户其实还没装 | v0.5.3 已修：与装没装 ocr 无关的字段（`bridge`/`llmEnv`/`onDemand` 备注）改到定位之前算，`ocr_status` 末尾再按最新桥统计刷新一次；定位失败时把安装指引（`installHint`）同时写进 `ocr_review` 的 notes、自动评审的投递文本和 `ocr_status.notes` |
 | 改了 `config.json` 里的 `auto` / `onDemand` / `preTest`，行为没变 | v0.5.8 已修，**两个**原因：① 设置页（schema 实例）带着默认值把这些键整层遮住了（取值等于出厂默认现在不算覆盖项）；② 这三个是「装/卸监听器」的决定，以前只在启动与设置页写入时重算，文件层改动只改了值没重算决定。现在闸门只要插件没被关掉就挂着（`off` 只放行），且三个开关会在下一次工具调用/回合收尾时按文件指纹重新 sync；`ocr_status.preTest.mode` 也是现算的，不会再与文件矛盾 |
-| **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
-| `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `guard`（老宿主没有 `tools.guard()` 时回落 `tools/pre-execute`）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+| **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
+| `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+
+### 加固（v0.6.0：把 preTest 从全局 guard 搬到限定范围的拦截器 —— 爆炸半径不再等于整个工具面）
+
+| 问题 | 现在 |
+| --- | --- |
+| 0.5.10 只修了「`""` vs `undefined`」这个边界，**全局单调 guard 本身**还在：闸门一旦在里面出别的错（读配置、判命令、拿工具名），仍然能影响应用里的每一次工具调用 | 按 `docs/pretest-gate-safety-design.md` 的方案 B 重构：**不再注册 `ctx.tools.guard()`**，只留一条限定范围的 `ctx.on("tools/pre-execute", …)`；非 shell 工具一次 `SHELL_TOOLS` Set 查找后立刻 `next()`（连配置都不读），`off`/非测试命令直接 `next()`，`remind` 只记 pending，只有 `gate` + 无覆盖才返回 `{kind:"deny",reason}`。`ocr_status.preTest.mechanism` 收敛为 `pre-execute` / `none`（不再有 `guard`） |
+| 闸门自身出错时「静默放行」看不出发生过什么，排查只能靠猜 | `preTest.failOpen` 计数 + `lastError` + `lastDecision { tool, kind, at }` 三样进 `ocr_status`（`statusText` 也会在 `failOpen > 0` 时点名「闸门自身出错放行 N 次」）；日志按错误文本变化或 30 秒限速，避免刷屏 |
+| 修完还可能被下一次改动「顺手加回」全局 guard | 新增**源码级事故回归**断言：读 `lib/index.js`（剥掉注释后）检查代码里不再出现 `tools.guard(`；旧的四条 guard 语义用例（契约回归 / `off` 档 / `enabled=false` / 文件层 off→gate 端到端）全部改写成按 waterfall 语义驱动（断言 201 → 204；没装 `ocr` 时 194 → 197） |
 
 ### 加固（v0.5.10：preTest 的全局 guard 让所有工具都坏了 —— 可选功能不能拖垮整个工具面）
 
@@ -540,7 +545,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 201 项 / 没装 194 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / guard 与 pre-execute 两种机制 / 覆盖状态随评审与写文件变化 / 文件层指纹与启停同步））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 204 项 / 没装 197 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs

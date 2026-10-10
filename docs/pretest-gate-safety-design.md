@@ -2,7 +2,12 @@
 
 > 适用版本：dsh-open-code-review v0.5.9+
 > 事故日期：2026-10-10
-> 状态：方案提案（v0.6.0 候选）；v0.5.10 已先落地最小热修复
+> 状态：**方案 B 已实现并发布（v0.6.0，2026-10-10）**；v0.5.10 先落地了最小热修复。
+> v0.6.0 实际落点：`lib/index.js` 的 `createPreTest()` 只剩 `ctx.on("tools/pre-execute", …)` 一条注册路径
+> （`gate()` 先 `SHELL_TOOLS` Set 查找 → `isTestCommand` → `preTestVerdict`，非 shell/非测试/off 一律 `next()`；
+> `arm()` 里已无任何 `ctx.tools.guard()` 调用），`mechanism` 收敛为 `pre-execute`/`none`，
+> `ocr_status.preTest` 增加 `failOpen`/`lastError`/`lastDecision`，并有源码级回归断言
+> 「`lib/index.js` 里不再出现 `tools.guard(`」。第 7 节的测试矩阵与第 8 节的回滚顺序仍然适用。
 
 ## 1. 事故与根因
 
