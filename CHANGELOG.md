@@ -3,6 +3,32 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.10] — 2026-10-10
+
+**事故版。** v0.5.7 ~ v0.5.9 的 `preTest` 闸门会让**整个工具面不可用**：`pwsh`、`read`、`glob`、
+浏览器、状态查询……每一次工具调用都返回内容为空的 `Error: `。升级到 0.5.10 即可恢复。默认
+`preTest` 本来就是 `off`，所以只有把 `preTest` 设成 `remind`/`gate`（或设置页勾选后写入）的
+用户会撞上；但闸门在 `off` 档也挂着，所以**装了 0.5.7 ~ 0.5.9 的机器随时可能中招**。
+
+Fixed
+- **preTest 的全局 guard 用空字符串表示放行，导致所有工具被拒**：`createPreTest()` 注册了
+  **全局** `ctx.tools.guard()`（单调、对所有工具生效），放行时 `return ""`。而宿主的契约是
+  「a returned string denies the execution」，实现是
+  `guardReason(exec) { for (const guard of this.guards.values()) { const reason = guard(exec); if (reason !== void 0) return reason; } }`
+  —— **空字符串同样被当成拒绝理由**，随后管线渲染成 `content: [{ type: "text", text: \`Error: ${denialReason}\` }]`
+  ⇒ 每次工具调用都变成 `Error: `（理由为空）。这是我们自己的边界错误（`""` vs `undefined`），
+  不是宿主升级导致的。现在放行统一返回 `undefined`。
+- **闸门异常一律 fail-open**：`tools.guard()` 与 `tools/pre-execute` 两条路径都包了 try/catch，
+  插件内部出错时放行（宁可漏拦一次测试，也不能让整个工具面挂掉）。
+- 新增「宿主契约回归」测试：直接复刻宿主 `reason !== undefined` 的判定，断言非测试工具放行、
+  `gate` 档 + 无评审覆盖的测试命令被拒 —— 防止再犯同一个边界错误。
+
+Added
+- `docs/pretest-gate-safety-design.md`：事故复盘 + v0.6.0 重构方案（把 preTest 从**全局 monotonic
+  guard** 迁到限定范围的 `tools/pre-execute` waterfall，非 shell 工具一次 Set 查找后立即 `next()`，
+  并补 `failOpen` / `lastDecision` / `lastError` 可观测性）。核心原则：**可选功能不能拥有
+  「让全部工具不可用」的失败模式。**
+
 ## [0.5.9] — 2026-10-10
 
 第七轮自审（`ocr scan lib/config.js,lib/index.js` → 9 条）逐条处置；其中三条是「会让 v0.5.8 修好的

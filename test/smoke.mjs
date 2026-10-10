@@ -2373,11 +2373,11 @@ check(
   const denied = String(guards[0](ptExec("npm test")));
   check(
     "preTest：没有评审覆盖 → 闸门给拒绝理由（理由点明先跑 ocr_review，非测试命令放行）",
-    denied.includes("ocr_review") && denied.includes("评审先于测试") && guards[0](ptExec("ls -la")) === "",
+    denied.includes("ocr_review") && denied.includes("评审先于测试") && guards[0](ptExec("ls -la")) === undefined,
     denied.slice(0, 120),
   );
   onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true } });
-  check("preTest：一次成功的 ocr_review 覆盖这批改动后放行", guards[0](ptExec("npm test")) === "");
+  check("preTest：一次成功的 ocr_review 覆盖这批改动后放行", guards[0](ptExec("npm test")) === undefined);
   onResult(gateListeners, "write", { isError: false, value: { ok: true } });
   check(
     "preTest：写文件成功后覆盖立刻作废（改完必须重新评审）",
@@ -2403,7 +2403,7 @@ check(
     `Δ=${mod.preTestStats().denials - denialsBefore}`,
   );
   onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true, preview: false } });
-  check("preTest：真正调过 LLM 的评审（preview=false）才放行", guards[0](ptExec("npm test")) === "");
+  check("preTest：真正调过 LLM 的评审（preview=false）才放行", guards[0](ptExec("npm test")) === undefined);
 
   /* remind：闸门照样挂上（只记账、不拦），否则测试结果回来时没有任何 pending 可提醒。 */
   const remindListeners = new Map();
@@ -2421,7 +2421,7 @@ check(
   const remindVerdict = remindGuards.length === 1 ? remindGuards[0](remindExec) : "（没挂闸门）";
   check(
     "preTest：remind 档也挂闸门但一律放行（只记账；不挂的话测试结果回来时根本没有 pending）",
-    remindGuards.length === 1 && remindVerdict === "" && mod.preTestStats().mode === "remind" && mod.preTestStats().mechanism === "guard",
+    remindGuards.length === 1 && remindVerdict === undefined && mod.preTestStats().mode === "remind" && mod.preTestStats().mechanism === "guard",
     `guards=${remindGuards.length} verdict=${JSON.stringify(remindVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
   );
   for (const handler of remindListeners.get("tools/result") ?? []) {
@@ -2453,6 +2453,34 @@ check(
   );
 }
 
+/* 真实宿主的 guard 判定：第一个 !== undefined 的返回值即拒绝（空字符串也算）。
+   这条用例直接复刻宿主语义，防止再把「放行」写成 "" 而导致全工具 `Error: `。 */
+{
+  const contractListeners = new Map();
+  const contractCase = makeCtx({ listeners: contractListeners });
+  const contractGuards = [];
+  contractCase.tools.guard = (fn) => {
+    contractGuards.push(fn);
+    return () => {};
+  };
+  mod.apply(contractCase, mkConfig({ preTest: "gate" }));
+  const decide = (exec) => {
+    for (const guard of contractGuards) {
+      const reason = guard(exec);
+      if (reason !== undefined) return { kind: "deny", reason };
+    }
+    return { kind: "allow" };
+  };
+  const contractAgent = Object.assign(makeAgent(), { id: "session-pretest-contract" });
+  const nonTest = decide({ name: "glob", arguments: { pattern: "*" }, agent: contractAgent });
+  const test = decide({ name: "pwsh", arguments: { command: "npm test" }, agent: contractAgent });
+  check(
+    "宿主契约回归：guard 放行必须返回 undefined（空字符串会被判成拒绝）",
+    nonTest.kind === "allow" && test.kind === "deny" && String(test.reason ?? "").includes("ocr_review"),
+    `nonTest=${JSON.stringify(nonTest)} test=${JSON.stringify(test)?.slice(0, 100)}`,
+  );
+}
+
 /* v0.5.8：文件层（config.json）没有事件通知，而 auto / onDemand / preTest 的启停是
    「装/卸监听器」级别的决定 —— 真机上把 preTest 写成 gate，闸门一直没挂上、ocr_status
    也跟着报 off。修法：闸门只要插件没被关掉就挂着（off 只是放行）+ 借本来就会流的事件
@@ -2472,7 +2500,7 @@ check(
   check(
     "v0.5.8：preTest=off 时闸门也挂着（只是放行）—— 这样 config.json 改成 gate 立刻按新档位办事，不用重挂",
     offGuards.length === 1 &&
-      offVerdict === "" &&
+      offVerdict === undefined &&
       mod.preTestStats().mode === "off" &&
       mod.preTestStats().mechanism === "guard",
     `guards=${offGuards.length} verdict=${JSON.stringify(offVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
@@ -2551,13 +2579,13 @@ check(
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const modeAfter = mod.preTestStats().mode;
-    /* `tools.guard()` 的契约是「返回拒绝理由字符串；放行返回空串」（pre-execute 那条路才是
-       {kind:deny,reason}），所以这里按字符串断。 */
+    /* 宿主 tools.guard() 的契约是「返回字符串=拒绝，undefined=放行」；空字符串同样会被
+       判成拒绝（历史上就是它导致所有工具返回 "Error: "）。这里按真实契约断。 */
     const verdict = flipGuards.length === 1 ? flipGuards[0]({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-deny" }) }) : "（没挂闸门）";
     check(
       "v0.5.8：文件层 off → gate 之后，下一次 tools/result 就按新档位拦下测试命令（端到端，不用重启也不用设置页）",
       modeBefore === "off" &&
-        keep === "" &&
+        keep === undefined &&
         modeAfter === "gate" &&
         typeof verdict === "string" &&
         verdict.includes("评审先于测试"),
