@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.6.2）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.7.0）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -331,7 +331,40 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 205 项 / 没装 198 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 212 项 / 没装 205 项）。
+
+---
+
+## 紧急制动（v0.7.0 起）
+
+如果插件出问题到了「不敢让应用自己去修」的程度，或者工具面已经坏了、设置页根本打不开，有一个**不经过插件自身代码路径**的停法。两种任选：
+
+| 方式 | 具体做法 |
+| --- | --- |
+| 环境变量 | 启动 DSH 时带上 `DSH_OPEN_CODE_REVIEW_DISABLE=1`（也认 `true` / `yes` / `on`）。去掉变量重启即恢复。 |
+| 标记文件 | 新建 `<DSH_HOME>/dsh-open-code-review.disabled`（一般是 `~/.dsh/dsh-open-code-review.disabled`，`DSH_HOME` 可覆盖）。插件目录里放一个 `.disabled` 同样有效。删掉文件即恢复。 |
+
+「停下来」的确切含义：`apply()` 只注册 `ocr_review` 与 `ocr_status` 两个工具，然后直接返回 —— 不注册斜杠命令、不挂任何事件监听（连 `preTest` 闸门也不挂）、不起本机 LLM 桥、不注册按需 skill、不做任何服务注入。两个工具仍然会回答，所以你能问出原因：
+
+- `ocr_review` fail-closed 返回 `code: "OCR_DISABLED"`，摘要里说明标记在哪；
+- `ocr_status` 报 `disabled: true`、`disabledBy: "env" | "file"`、标记路径，渲染文本第一行就是 `⚠️ 紧急制动已生效`，并跳过 LLM 连通性探测（停下来的插件不花钱）。
+
+制动在运行期也会复查：DSH 跑着的时候新建标记，自动评审与闸门会在下一次事件时停手；钩子要等重启才挂回来（`ocr_status.hooks` 会如实报当前挂上了什么）。`test/killswitch-smoke.mjs` 覆盖两种来源、真值与假值，并在最后一条断言里确认它写的标记没有落进真实插件目录。
+
+## 宿主契约（v0.7.0 起）
+
+`ocr_status.host` 回答「这台宿主到底给没给插件要的东西」：
+
+```json
+{ "ok": true, "missing": [], "errors": [],
+  "capabilities": [ { "id": "inject.jobs", "label": "Jobs 服务（ctx.jobs.start）", "surface": "host",
+                      "required": false, "present": false,
+                      "degrade": "没有 Jobs 面板里的进度行（会话内进度行仍在）。" } ] }
+```
+
+必需能力只有两项（`tools.register`、`subprocess.spawn`）——缺了插件等于没装；其余都是可选，每一项的 `degrade` 写了替代路径。`present: null` 表示宿主侧探测不到、只能由人在浏览器界面确认（客户端槽位）。完整表格、怎么新增一条能力、以及为什么**故意不做版本门**，见 [docs/host-contract.md](docs/host-contract.md)。
+
+实测基线：DSH `0.2.0-rc.2` 桌面版、Node 20/22/24、`ocr 1.12.12`；这份声明同时写在 `package.json` 的 `dsh.host` 里。宿主的清单只读 `dsh.bundle` / `dsh.profile` / `dsh.client`，所以 `dsh.host` 是给人看的元数据 —— 权威答案就是上面那个运行期探测。
 
 ---
 
@@ -339,6 +372,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 | 现象 | 处理 |
 | --- | --- |
+| 插件像是死了（没有按钮、不自动评审、`ocr_review` 直接拒绝） | 先看 `ocr_status.disabled` / `disabledBy`（v0.7.0 起）：紧急制动的标记文件或 `DSH_OPEN_CODE_REVIEW_DISABLE` 生效时，插件只注册两个工具。删掉 `<DSH_HOME>/dsh-open-code-review.disabled`（或插件目录里的 `.disabled`、或那个环境变量）再重启。若 `disabled` 是 false，再看 `hooks`（实际挂上了什么）与 `host`（宿主实际提供了什么）——`preTest.mechanism` 若为 `none` 说明闸门压根没挂上 |
 | 插件整个不见了：`ocr_review` / `ocr_status` 变成 unknown tool，或设置页里没有这个条目 | host fiber 加载失败。`ctx.tools.register` 会用宿主自己的 JSON Schema 子集校验 `output.schema`，违规（最常见的是 `type: ["object","null"]` 这类 **type 数组**，`anyOf` 也不支持）就抛 `JsonSchemaError`，整个插件不加载。日志里搜 `assertSupportedJsonSchema`；`node test/smoke.mjs` 现在跑同一套规则（`test/schema-subset.mjs`），改完 schema 先跑它 |
 | 调用报 `tool "ocr_review" returned invalid output: "value.xxx" is not a declared property`（或 `is required` / `must be a boolean`） | **调用期**宿主还会拿 `output.schema` 校验 execute 的返回值：payload 里多了没声明的字段或少了必填字段。把字段补进 `lib\index.js` 的 `REVIEW_TOOL_OUTPUT`。`test/smoke.mjs` 的假 register 已把 execute 包住，每次工具调用的返回值都会被同一套规则检查 |
 | 真实引擎跑评审时 `all N file review(s) failed`，而 `ocr_status` 的桥那行写着 `最近错误：Cannot read properties of undefined (reading 'replayState')` | 桥翻译历史消息时漏了宿主的**硬契约**：转给 `ctx.llm.stream` 的每条 `assistant` 消息都必须带 `source`（`{kind:"model",provider,model}`，`lib\bridge.js` 的 `toDshMessages` 负责补）。缺了它，宿主 `dsh-llm` 的 `forAdapter()` 一读 `message.source.replayState` 就 TypeError，且异常被吞成「上游 error」502 —— 症状是**每个文件的第 2 次请求（带 assistant 历史／工具往返）才失败**，单看桥的 stats 只有失败计数。`role: "tool"` 同理要 `source: {kind:"tool",callId}`。`test\bridge-smoke.mjs` 现在按 `hostAssistantSourceProblems()` 逐条复刻这条读取路径 |
@@ -369,6 +403,19 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 改了 `config.json` 里的 `auto` / `onDemand` / `preTest`，行为没变 | v0.5.8 已修，**两个**原因：① 设置页（schema 实例）带着默认值把这些键整层遮住了（取值等于出厂默认现在不算覆盖项）；② 这三个是「装/卸监听器」的决定，以前只在启动与设置页写入时重算，文件层改动只改了值没重算决定。现在闸门只要插件没被关掉就挂着（`off` 只放行），且三个开关会在下一次工具调用/回合收尾时按文件指纹重新 sync；`ocr_status.preTest.mode` 也是现算的，不会再与文件矛盾 |
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+
+### 加固（v0.7.0：紧急制动 + 宿主契约 + 爆炸半径 —— 可选功能的失败只能影响它自己）
+
+对着 CPO 成熟度评估逐条落地的四个小机制（不是新功能）：
+
+| 机制 | 做了什么 |
+| --- | --- |
+| 应用外紧急制动 | `lib\killswitch.js`：`DSH_OPEN_CODE_REVIEW_DISABLE`（真值 `1`/`true`/`yes`/`on`）或 `<DSH_HOME>/dsh-open-code-review.disabled`（插件目录的 `.disabled` 亦可）。命中时 `apply()` 只注册 `ocr_review`/`ocr_status` 两个工具就返回，不注册命令、不挂任何事件监听、不起 LLM 桥、不注册 skill、不做服务注入；两个工具仍回答（`ocr_review` → `OCR_DISABLED`，`ocr_status` → `disabled`/`disabledBy`/标记路径 + 顶部横幅，并跳过会花钱的连通性探测）。读取完全不依赖配置，所以「配置读不出来」时也有效 |
+| 宿主契约清单 + 探针 | `lib\host-contract.js`：14 条能力（必需只有 `tools.register` 与 `subprocess.spawn`），每条写清 `required`、`detect`、缺了怎么降级；`ocr_status.host` 直接回放探测结果；**故意不做版本门**（新宿主可能多能力少事件，跟着实测走） |
+| 爆炸半径预算 | `lib\hooks.js` 的 `armHook()`：只有白名单里 5 个事件名能注册、每个回调包 try/catch、注册失败记账并按 30 秒限速记日志，永不抛；`safeInject()`：宿主没有 `ctx.inject`、或注入抛错都不许拖垮 `apply`。`lib\index.js` 里已无任何裸 `ctx.on(` / `ctx.inject(`（源码级断言钉住） |
+| 如实报告机制 | `ocr_status.hooks`（`registered`/`counts`/`errors`/`blocked`）与 `preTest.mechanism`（只有 `pre-execute` 或 `none`）都是从**实际注册结果**读回来的，不再假设「配了就等于挂上了」 |
+
+`test/killswitch-smoke.mjs` **35** 条（两种来源 × 真值/假值 × 命中时到底注册了什么 × 工具回答 × 结尾断言标记没写进真实插件目录）、`test/host-contract.mjs` **23** 条（逐条「缺一」验证降级 + 中毒 ctx 不炸 + 源码级登记扫描）；`test/smoke.mjs` 从 205 增到 **212** 条（没装 ocr 从 198 增到 205）。设计取舍见 [docs/host-contract.md](docs/host-contract.md) 与 [docs/pretest-gate-safety-design.md](docs/pretest-gate-safety-design.md)。
 
 ### 加固（v0.6.2：第二次用真机 `ocr` 审自己（这次审 0.6.1 的 `lib/bridge.js`）—— 审出五条，一条真会坏事）
 
@@ -562,11 +609,14 @@ dsh-open-code-review/
 │  ├─ bridge.js          # 本机 LLM 桥：OpenAI 兼容 /v1/chat/completions ⇄ ctx.llm.stream（含宿主硬契约：assistant 消息补 source{kind:"model",provider,model}、tool 消息补 source{kind:"tool",callId}）
 │  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section + 会话内进度行（conversation.input.dock），渲染设置表单（`FIELDS` 25 行 = 基础 6 + 随父开关出现的从属 6 行 + 「高级设置」折叠 13 项；bundle 卡片只渲染只读摘要），文案走 Client locale
 │  ├─ config.js          # 三层配置合并、schemaOverrides（读 volatile 引用）
+│  ├─ killswitch.js      # 紧急制动（v0.7.0）：环境变量 / 标记文件两条不依赖配置的「存在即禁用」判定
+│  ├─ hooks.js           # 爆炸半径（v0.7.0）：armHook（事件名白名单 + try/catch + 注册失败记账，永不抛）、safeInject、hookStats
+│  ├─ host-contract.js   # 宿主契约清单与探针（v0.7.0）：14 条能力的 required/detect/degrade + probeHost，喂给 ocr_status.host
 │  ├─ job.js             # 评审进度：把每次评审登记成 background job（进度行/输出流/停止/结算），宿主没有 jobs 服务时整条链路降级成空操作
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 205 项 / 没装 198 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 212 项 / 没装 205 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
@@ -574,6 +624,8 @@ dsh-open-code-review/
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
+   ├─ killswitch-smoke.mjs # 紧急制动冒烟（35 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏）：node test/killswitch-smoke.mjs
+   ├─ host-contract.mjs  # 宿主契约冒烟（23 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里）：node test/host-contract.mjs
    ├─ zprobe3.mjs        # schema 预检：25 个字段是否都带 volatile/description/default
    └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs [仓库路径] [status-only]
                           #   status-only 只做连通性自检（免费）；E2E_LLM_MODEL 换模型；

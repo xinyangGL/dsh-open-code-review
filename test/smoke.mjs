@@ -2845,6 +2845,91 @@ const preExecute = (listeners) => {
   );
 }
 
+/* v0.7.0：爆炸半径预算（lib/hooks.js）。0.5.7~0.5.9 的教训是「钩子写错语义 / 挂错事件 /
+   注册本身抛错，都可能把整个工具面拖下水」，所以从这一版起挂钩子只有一条路：armHook()
+   —— 白名单 + try/catch + 记账，任何异常只是少一个功能，绝不冒泡到宿主。 */
+{
+  const hooksMod = await import(new URL("../lib/hooks.js", import.meta.url));
+  hooksMod.resetHookStats();
+  const hookCalls = [];
+  const hookCtx = {
+    on(event, handler) {
+      hookCalls.push({ event, handler });
+      return () => {};
+    },
+  };
+  const unwatch = hooksMod.armHook(hookCtx, "tools/pre-execute", () => {});
+  check(
+    "v0.7.0：白名单内的事件挂得上，并返回可调用的卸载函数",
+    hookCalls.length === 1 && hookCalls[0].event === "tools/pre-execute" && typeof unwatch === "function",
+    `calls=${hookCalls.length}`,
+  );
+  const blockedOff = hooksMod.armHook(hookCtx, "tools/guard", () => {});
+  check(
+    "v0.7.0：白名单外的事件一律拒绝注册（挂错事件 = 静默失效或越权）",
+    hookCalls.length === 1 && typeof blockedOff === "function" && hooksMod.hookStats().blocked.includes("tools/guard"),
+    JSON.stringify(hooksMod.hookStats().blocked),
+  );
+  const throwingCtx = {
+    on() {
+      throw new Error("宿主拒绝了这次注册");
+    },
+  };
+  let hookThrew = false;
+  let throwingOff = null;
+  try {
+    throwingOff = hooksMod.armHook(throwingCtx, "tools/result", () => {});
+  } catch {
+    hookThrew = true;
+  }
+  check(
+    "v0.7.0：注册抛错不冒泡（只是少一个功能），并记进 errors",
+    hookThrew === false && typeof throwingOff === "function" && hooksMod.hookStats().errors.some((line) => line.includes("宿主拒绝了这次注册")),
+    JSON.stringify(hooksMod.hookStats().errors),
+  );
+  const noOnOff = hooksMod.armHook({}, "tools/result", () => {});
+  check(
+    "v0.7.0：宿主没有 ctx.on 时也不抛，并记一笔（不谎报已挂）",
+    typeof noOnOff === "function" && hooksMod.hookStats().errors.some((line) => line.includes("没有 ctx.on")),
+    JSON.stringify(hooksMod.hookStats().errors),
+  );
+  /* 源码级：lib/index.js 里所有宿主事件注册都必须经过 armHook（出现裸的 ctx.on( 就是回归）。 */
+  const hookIndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+  const hookIndexCode = hookIndexSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const bareOn = hookIndexCode.match(/(?<![\w.$])ctx\s*\.\s*on\s*\(/g) ?? [];
+  const armCalls = hookIndexCode.match(/armHook\s*\(/g) ?? [];
+  check(
+    "v0.7.0：lib/index.js 里没有裸的 ctx.on( —— 事件钩子一律走 armHook 白名单",
+    bareOn.length === 0 && armCalls.length >= 6,
+    `ctx.on=${bareOn.length} armHook=${armCalls.length}`,
+  );
+}
+
+/* v0.7.0：ocr_status 要能回答「你到底挂了哪些钩子、有没有挂失败」—— 事故当天最缺的就是这个。 */
+{
+  const hookStatusCtx = makeCtx({ listeners: new Map() });
+  mod.apply(hookStatusCtx, mkConfig({ preTest: "gate" }));
+  const hookStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+  const hookSchema = tools.get("ocr_status")?.output?.schema?.properties?.hooks ?? {};
+  check(
+    "v0.7.0：ocr_status 报出事件钩子账目（registered/counts/errors/blocked 四件套，且能看出闸门已挂）",
+    Array.isArray(hookStatus.hooks?.registered) &&
+      hookStatus.hooks.registered.includes("tools/pre-execute") &&
+      typeof hookStatus.hooks.counts === "object" &&
+      Number.isFinite(hookStatus.hooks.counts?.["tools/pre-execute"]) &&
+      Array.isArray(hookStatus.hooks.errors) &&
+      Array.isArray(hookStatus.hooks.blocked),
+    JSON.stringify(hookStatus.hooks).slice(0, 240),
+  );
+  check(
+    "v0.7.0：ocr_status 的 schema 声明了 hooks 并进 required",
+    hookSchema.type === "object" &&
+      (hookSchema.required ?? []).join(",") === "registered,counts,errors,blocked" &&
+      (tools.get("ocr_status")?.output?.schema?.required ?? []).includes("hooks"),
+    JSON.stringify(hookSchema).slice(0, 200),
+  );
+}
+
 /* v0.5.4：命令注册失败这条路以前是静默的（register() 抛错 → 命令没了，但 ocr_status 与回合尾部按钮
    都以为它在）。放在最后跑：会重新 apply 一个「commands 服务坏掉」的实例并覆盖全局 tools 注册表。 */
 {

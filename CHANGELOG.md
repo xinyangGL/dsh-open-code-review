@@ -3,6 +3,46 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.7.0] — 2026-10-10
+
+安全底座。这一版不加功能，只回答 CPO 成熟度评估里那三个「不是文档能补的」问题：
+出事时**能不能从应用外停住**、插件到底**依赖宿主的什么**、以及一个可选功能的失败**会不会拖垮整个工具面**。
+
+Added
+- **应用外紧急制动**（`lib/killswitch.js`）：`DSH_OPEN_CODE_REVIEW_DISABLE=1`（也认 `true`/`yes`/`on`）
+  或标记文件 `<DSH_HOME>/dsh-open-code-review.disabled`（插件目录下的 `.disabled` 亦可）。
+  命中时 `apply()` 只注册 `ocr_review` 与 `ocr_status` 就返回：不注册斜杠命令、不挂任何事件监听
+  （连 `preTest` 闸门也不挂）、不起本机 LLM 桥、不注册按需 skill、不做服务注入。两个工具仍然回答
+  （`ocr_review` → `OCR_DISABLED`，`ocr_status` → `disabled`/`disabledBy`/标记路径 + 顶部横幅，
+  并跳过会花钱的连通性探测）。判定只读文件系统与环境变量，不碰配置 —— 「配置读不出来」时也有效。
+- **宿主契约清单与探针**（`lib/host-contract.js` + `docs/host-contract.md`）：14 条能力（必需只有
+  `tools.register` 与 `subprocess.spawn`），每条写清 `required`/`detect`/`degrade`；`ocr_status.host`
+  回放探测结果（`ok`/`missing`/`errors`/`capabilities`，客户端槽位报 `present: null`）。
+- **`package.json` 的兼容性声明**：`dsh.host` 记下实测宿主 `0.2.0-rc.2`、Node 20/22/24、
+  `ocr 1.12.12` 与用到的能力清单。诚实说明写在 `docs/host-contract.md`：宿主的清单只读
+  `dsh.bundle`/`dsh.profile`/`dsh.client`，`dsh.host` 是给我们和将来的市场看的声明，**故意不做版本门**，
+  权威答案永远是运行期探测。
+- **`ocr_status` 新增四个字段**：`disabled`、`disabledBy`、`hooks`（`registered`/`counts`/`errors`/`blocked`）、
+  `host`；`preTest` 增 `failOpen`/`lastError`/`lastDecision`。`statusText` 相应多出「禁用横幅」「事件钩子」
+  「宿主能力」三行。全部进 schema 的 `required`，多一个键宿主会在调用期拒收整个返回值。
+
+Changed
+- **所有事件注册改走 `armHook()`**（`lib/hooks.js`）：事件名必须在白名单里（`tools/result`、
+  `tools/pre-execute`、`agent/turn-stopping`、`loader/volatile-update`、`theme/change`），回调包 try/catch，
+  注册失败或抛错都记账并按 30 秒限速记日志，永不抛。`lib/index.js` 里已无任何裸 `ctx.on(`（源码级断言钉住）。
+- **服务注入改走 `safeInject()`**：宿主没有 `ctx.inject`、或注入抛错，都不再可能拖垮 `apply`。
+- `preTest.mechanism` 如实报告：从「实际注册结果」读回来，只有 `pre-execute` 或 `none`。
+
+Tests
+- 新增 `test/killswitch-smoke.mjs`（35 条：两种来源 × 真值/假值 × 命中时到底注册了什么 × 两个工具的回答；
+  标记只写临时 `DSH_HOME`，最后断言真实插件目录没被写脏）与 `test/host-contract.mjs`（23 条：14 条能力
+  逐条「缺一」验证降级、`ctx` 为 `null`/被写坏/访问器抛错时不炸、源码级扫描 `lib/index.js` 用到的扩展点
+  是否都登记在清单里）。
+- `test/smoke.mjs` 205 → **212**（没装 ocr 198 → **205**）：`armHook` 白名单内外、注册抛错不冒泡并记账、
+  没有 `ctx.on` 时记一笔、源码级「无裸 `ctx.on(` 且 `armHook` 出现 7 次」、`ocr_status.hooks` 四件套、
+  schema 声明 `disabled`/`disabledBy`/`hooks`/`host` 并进 `required`。
+- `npm test` 现在跑八套（新增的两套排在最前）。
+
 ## [0.6.2] — 2026-10-10
 
 第二次用真机 `ocr` 审自己（这次审的是 0.6.1 的 `lib/bridge.js`，258.9s，同样走 DSH 本机桥），
