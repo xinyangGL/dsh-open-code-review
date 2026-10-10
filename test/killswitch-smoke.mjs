@@ -46,6 +46,10 @@ const homeMarker = join(homeDir, HOME_MARKER_NAME);
 /** 测试开始前真实插件目录里是否已有 .disabled（测试不该动它，最后要一模一样）。 */
 const pluginMarkerBefore = existsSync(markerPaths()[1]);
 
+/** lib/killswitch.js 的源码（剥掉注释）—— 用于源码级防漂移断言（3.5、3.6 两组都用）。 */
+const ksSource = readFileSync(new URL("../lib/killswitch.js", import.meta.url), "utf8");
+const ksCode = ksSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
 /** 假 ctx：只记录被调用了什么，不真的接宿主。 */
 function fakeCtx() {
   const calls = { tools: [], commands: [], injects: 0, ons: [], effects: 0 };
@@ -104,8 +108,6 @@ try {
        Windows 上造不出稳定的非 ENOENT 失败（文件当目录 → ENOENT、超长路径 → ENOENT、
        process.env 里的 NUL 会被 Node 截断），所以这条分支由源码级断言钉住；
        Linux 上的 ENOTDIR/ELOOP 会走它，CI 也在 Linux 上跑。 */
-    const ksSource = readFileSync(new URL("../lib/killswitch.js", import.meta.url), "utf8");
-    const ksCode = ksSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
     check("v0.7.1：只有非 ENOENT 的读标记失败才记 error（正常不存在不算错），且该分支真的在代码里",
       clean.error === "" && /err\?\.code !== "ENOENT"[\s\S]{0,80}out\.error/.test(ksCode),
       `cleanError=${JSON.stringify(clean.error)} nonEnoentBranch=${/err\?\.code !== "ENOENT"/.test(ksCode)}`);
@@ -115,10 +117,30 @@ try {
       !/\bexistsSync\b/.test(ksCode) && /\bstatSync\b/.test(ksCode) && /ENOENT/.test(ksCode),
       `existsSync=${/\bexistsSync\b/.test(ksCode)} statSync=${/\bstatSync\b/.test(ksCode)}`);
     check("v0.7.1：路径解析（dshHome/join）在 try 里，两条消息共用同一份结果，错误只记首次",
-      /const resolveMarkerPaths = \(\) => \{[\s\S]*?try\s*\{[\s\S]*?markerPaths\(\)/.test(ksCode) &&
+      /const safePath = \(build\) => \{[\s\S]*?try\s*\{/.test(ksCode) &&
         /!out\.error/.test(ksCode) &&
         !/markerPaths\(\)\.join/.test(ksCode),
-      `resolve=${/const resolveMarkerPaths = \(\) => \{[\s\S]*?try\s*\{[\s\S]*?markerPaths\(\)/.test(ksCode)}`);
+      `safePath=${/const safePath = \(build\) => \{[\s\S]*?try\s*\{/.test(ksCode)}`);
+  }
+
+  /* ---- 3.6) v0.7.3：第 5 轮真机自审在 killswitch 上提的四条（各自独立解析 / 不隐式读盘 /
+     日志复用同一份状态 / 未制动时别打出「本次只注册两个工具」）---- */
+  {
+    const perPath =
+      /safePath\(\(\) => join\(dshHome\(\), HOME_MARKER_NAME\)\)/.test(ksCode) &&
+      /safePath\(\(\) => join\(PLUGIN_DIR, PLUGIN_MARKER_NAME\)\)/.test(ksCode);
+    check("v0.7.3：两条标记路径各自独立解析（一条抛错不再连带丢掉插件目录的兜底标记）",
+      /const safePath = \(build\) => \{[\s\S]*?try\s*\{/.test(ksCode) &&
+        perPath &&
+        !/export function markerPaths\(\) \{\s*return \[/.test(ksCode),
+      `perPath=${perPath}`);
+    check("v0.7.3：killSwitchText/killSwitchLogText 没拿到状态时返回空串（不再隐式重读环境变量+磁盘）",
+      killSwitchText() === "" && killSwitchLogText() === "" &&
+        killSwitchText(clean) === "" && killSwitchLogText(clean) === "",
+      `text()=${JSON.stringify(killSwitchText())} log()=${JSON.stringify(killSwitchLogText())} log(clean)=${JSON.stringify(killSwitchLogText(clean))}`);
+    check("v0.7.3：状态里带着解析好的 paths（日志与判定复用同一份，不再各解析一次）",
+      Array.isArray(clean.paths) && clean.paths.length === 2 && clean.paths[0] === homeMarker,
+      JSON.stringify(clean.paths));
   }
 
   /* ---- 4) 标记文件命中 ---- */
@@ -132,6 +154,10 @@ try {
   const logText = killSwitchLogText(byFile);
   check("killSwitchLogText 同时点出环境变量与两个标记位置",
     logText.includes(DISABLE_ENV) && logText.includes(HOME_MARKER_NAME) && logText.includes(PLUGIN_MARKER_NAME));
+  check("v0.7.3：日志里的标记位置就是判定时解析出的那份 paths（不再自己重解析一遍）",
+    Array.isArray(byFile.paths) && byFile.paths.length === 2 &&
+      byFile.paths.every((entry) => logText.includes(entry)),
+    JSON.stringify(byFile.paths));
   check("runtimeDisabled()：命中后为 true", runtimeDisabled() === true);
 
   /* ---- 5) 制动命中时 apply()：只留两个工具，零钩子 ---- */

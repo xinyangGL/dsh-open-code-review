@@ -3,6 +3,41 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.7.3] — 2026-10-10
+
+v0.7.2 的第一次真机自检。又跑了 `ocr scan`（`lib/host-contract.js` + `lib/killswitch.js`，203.6 秒、7 条），
+其中 6 条修掉、1 条明确不采纳。这一版仍然只动这两个模块，行为面不变。
+
+Fixed
+- **两条标记路径各自独立解析**（第 1 条）：`markerPaths()` 以前把
+  `join(dshHome(), …)` 与 `join(PLUGIN_DIR, …)` 放在同一个数组字面量里 —— 第一段抛错会让整个函数抛出，
+  于是「DSH_HOME 都不知道在哪时戳插件目录」的那份兜底标记被一起丢掉，恰好是最需要它的时候没有它。
+  现在走 `safePath(build)` 一条一条解析，任一条失败只记 `error`（失败的那条不进 `paths`）。
+- **制动状态带出解析好的 `paths`**（第 3 条）：`killSwitchLogText` 原先自己再调一次 `resolveMarkerPaths()`，
+  两次读取之间若抛错或环境变化，日志里的标记位置会与实际生效的来源不一致。现在 `killSwitchState()`
+  把 `paths` 一起返回，日志与判定复用同一份结果。
+- **未制动时不再打「本次只注册两个工具…」**（第 4 条）：`killSwitchLogText` 没校验 `sw.disabled`，
+  未命中时 `killSwitchText` 返回空串，它却照样输出那句与事实不符的日志；现在未制动（或没传状态）直接返回空串。
+- **两个文本助手不再隐式读盘**（第 2 条）：`killSwitchText(sw = killSwitchState())` 的默认参数会让
+  「只想格式化一段文本」的调用方顺手重读环境变量 + `statSync` 磁盘。现在默认是 `null`，
+  状态必须由调用方显式传入（未传即返回空串）。
+- **行名兜底合成一个工具**（第 6 条）：`rowLabel`/`rowId` 是同一段「label/id 二选一 + 占位符」的两次实现，
+  只差优先级；现在合成 `rowName(row, priority)`，避免两处兜底规则将来漂移。
+- **`hostSummary` 有行数据时以行数据为准**（第 7 条）：只信入参字段时，手工拼装/写坏的对象会输出
+  「宿主必需能力齐备；缺少 xxx」这种自相矛盾的句子。现在有 `capabilities` 行时由行数据推导
+  `ok`/缺失项（`required === true && present !== true`），没有行数据才回落到字段。
+
+Not changed (and why)
+- **`readService` 的真值判定保留**（第 5 条发现：建议改成显式判空）。`reflect.get(name, false)` 读不到时
+  返回 `undefined`（也可能是 `null`），而服务实例恒为对象 —— 「读到 falsy 值」正是**继续退让**的信号；
+  改成显式判空反而会在第一种读法失败时就停下，把正当读法挡在外面。已在源码里写下这条理由。
+
+Tests
+- `test/killswitch-smoke.mjs` 40 → **44**（新增：两条路径各自独立解析的源码级断言；未传状态/未制动时
+  `killSwitchText()`/`killSwitchLogText()` 必须返回空串；状态里带 `paths` 且日志逐条包含它们）。
+- `test/host-contract.mjs` 35 → **37**（新增：`ok=true` 但行数据说必需能力缺失时，措辞以行数据为准；
+  `rowName` 在行缺 id/label 时仍不出现字面量 `undefined`、改用「（未命名能力）」）。
+
 ## [0.7.2] — 2026-10-10
 
 v0.7.1 的第一次真机自检。修完探针的假阴性之后，`ocr_status.host` 真的报出了「宿主能力齐备」，

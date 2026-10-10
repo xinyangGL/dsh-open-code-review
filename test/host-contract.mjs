@@ -209,6 +209,25 @@ function ctxWithout(id) {
       capabilities: [{ id: "inject.llm", label: "LLM 服务", surface: "host", present: false }],
     }),
   );
+  /* v0.7.3（第 5 轮真机自审第 7 条）：只信入参字段时，手工拼装/写坏的对象会输出自相矛盾的句子。
+     现在有行数据就以行数据为准；没有行数据才回落字段。 */
+  const requiredAbsentRow = {
+    ok: true,
+    capabilities: [{ id: "inject.llm", label: "LLM 服务", surface: "host", required: true, present: false }],
+  };
+  check(
+    "v0.7.3：入参 ok=true 但行数据说必需能力缺失时，措辞以行数据为准（不再自相矛盾）",
+    hostSummary(requiredAbsentRow).includes("宿主缺必需能力：inject.llm") &&
+      !hostSummary(requiredAbsentRow).includes("必需能力齐备"),
+    hostSummary(requiredAbsentRow),
+  );
+  check(
+    "v0.7.3：rowName 一个工具按 priority 取名（行缺 id/label 时仍不出现字面量 undefined）",
+    !hostSummary({ capabilities: [{ surface: "host", present: false, required: true }] }).includes("undefined") &&
+      hostSummary({ capabilities: [{ surface: "host", present: false, required: true }] }).includes("未命名能力") &&
+      hostNotes({ capabilities: [{ surface: "host", present: false }] }).every((line) => line.includes("未命名能力")),
+    hostSummary({ capabilities: [{ surface: "host", present: false, required: true }] }),
+  );
   /* v0.7.2：账目按 ctx 取（自审第 1 条）—— 模块级账目只代表「这份实例挂了什么」，
      不能拿去回答别的 ctx，否则同一进程里的两份实例会互相串账。 */
   resetHookStats();

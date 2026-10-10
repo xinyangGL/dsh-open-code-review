@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.7.2）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.7.3）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -404,6 +404,21 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
 
+### 加固（v0.7.3：第二次真机自检 —— 六条修掉，一条明确不采纳）
+
+v0.7.2 上真机后又审了一轮（`lib/host-contract.js` + `lib/killswitch.js`，203.6 秒、7 条）。这一版**只动这两个模块**，用户能看到的行为没有变化。
+
+| 问题 | 现在 |
+| --- | --- |
+| 两条标记路径写在**同一个数组字面量**里：`join(dshHome(), …)` 一抛错，整个 `markerPaths()` 就抛，插件目录那份「DSH_HOME 都不知道在哪时」的兜底标记也一起丢掉 —— 偏偏是最需要它的时候没有它 | 走 `safePath(build)` 一条一条解析，任一条失败只记 `error`（失败的那条不进 `paths`），另一条照旧有效 |
+| `killSwitchLogText` 自己再解析一次路径（两次读取之间若抛错/环境变化，日志里的位置与实际生效来源不一致），且没校验 `disabled`：未命中时仍打「本次只注册两个工具…」 | 复用 `killSwitchState()` 一起返回的 `paths`；未制动（或没传状态）直接返回空串 |
+| `killSwitchText(sw = killSwitchState())` 的默认参数：调用方以为只是格式化文本，实际顺手重读环境变量 + `statSync` 磁盘 | 默认改成 `null`，状态必须显式传入（未传即返回空串） |
+| `rowLabel`/`rowId` 是同一段「label/id 二选一 + 占位符」的两次实现，只差优先级、占位符字面量还重复 | 合成 `rowName(row, priority)`，避免两处兜底规则将来漂移 |
+| `hostSummary` 完全信任入参字段：手工拼装/写坏的对象（`{ok:true, capabilities:[{required:true,present:false}]}`）会输出「宿主必需能力齐备；缺少 xxx」 | 有行数据时以**行数据**为准推导 `ok`/缺失项（`required === true && present !== true`），没有行数据才回落到字段 |
+| `readService` 退让链用真值判定（建议改成显式判空） | **不采纳**：读不到时 `reflect.get(name, false)` 返回 `undefined`（也可能是 `null`），而服务实例恒为对象 —— falsy 正是「这一步没读到、继续退让」的信号；改成显式判空反而会在第一种读法失败时停下。理由已写进源码注释 |
+
+`test/killswitch-smoke.mjs` 从 40 增到 **44** 条（新增：两条路径各自独立解析的源码级断言、未传状态/未制动时必须返回空串、状态里带 `paths` 且日志逐条包含它们）、`test/host-contract.mjs` 从 35 增到 **37** 条（新增：入参 `ok=true` 但行数据说必需能力缺失时以行数据为准；行缺 id/label 时不出现 `undefined`）；`test/smoke.mjs` 仍是 218（没装 ocr 211）。
+
 ### 加固（v0.7.2：v0.7.1 的第一次真机自检 —— 兜底兜住了不抛，但把 `undefined` 说给用户听）
 
 v0.7.1 上真机后，`ocr_status.host` 终于老实说「宿主能力齐备」，紧急制动也在真机上逐条走通（写标记 → `ocr_review` 报 `OCR_DISABLED`；删标记 → 两个工具立刻回来，不用重启）。把 `lib\host-contract.js` 这些新模块再送进真机 `ocr` 审一遍（1 个文件、382 秒、3 条），加上制动走查时自己看到的一处矛盾，凑成这一版 —— 全是「兜底本身在撒谎」，行为一个都没改：
@@ -653,8 +668,8 @@ dsh-open-code-review/
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
-   ├─ killswitch-smoke.mjs # 紧急制动冒烟（40 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏；v0.7.1 起还覆盖「标记是目录也算命中」与 statSync/ENOENT 的源码级守卫；v0.7.2 起断言拒绝表头写的是 engine=未执行）：node test/killswitch-smoke.mjs
-   ├─ host-contract.mjs  # 宿主契约冒烟（35 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里；v0.7.1 起还覆盖「服务只藏在 ctx.reflect.get(name,false) 后面也认」与「有 ctx.on 但没挂上钩子时四条事件能力必须报缺失」；v0.7.2 起还覆盖「文案里不出现字面量 undefined」「账目按 ctx 取」）：node test/host-contract.mjs
+   ├─ killswitch-smoke.mjs # 紧急制动冒烟（44 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏；v0.7.1 起还覆盖「标记是目录也算命中」与 statSync/ENOENT 的源码级守卫；v0.7.2 起断言拒绝表头写的是 engine=未执行）：node test/killswitch-smoke.mjs
+   ├─ host-contract.mjs  # 宿主契约冒烟（37 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里；v0.7.1 起还覆盖「服务只藏在 ctx.reflect.get(name,false) 后面也认」与「有 ctx.on 但没挂上钩子时四条事件能力必须报缺失」；v0.7.2 起还覆盖「文案里不出现字面量 undefined」「账目按 ctx 取」）：node test/host-contract.mjs
    ├─ zprobe3.mjs        # schema 预检：25 个字段是否都带 volatile/description/default
    └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs [仓库路径] [status-only]
                           #   status-only 只做连通性自检（免费）；E2E_LLM_MODEL 换模型；
