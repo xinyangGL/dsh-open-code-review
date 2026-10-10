@@ -3,6 +3,50 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.7.1] — 2026-10-10
+
+v0.7.0 的第一次真机自检。`ocr_status.host` 一上来就报「宿主缺少 `llm`/`jobs`/`skills`/`subagents`」，
+可同一份输出里本机桥已就绪、按需 skill 已注册 —— **错的是探针**：cordis 里访问没有 inject 的服务会抛
+`cannot get property "…" without inject`，`detect` 直接读 `ctx.llm` 并把那个抛错当成了「宿主没这个能力」。
+这一版把假阴性修掉，并顺手处理把这版补丁拿去真机 `ocr` 审出的其余问题（3 个文件、167 秒、13 条）。
+
+Fixed
+- **服务探测改走宿主文档里的无 inject 读法**：新增 `readService(ctx, name)`，依次试
+  `ctx.reflect.get(name, false)`（docblock 原文就是 *Read a service from the store without the inject
+  requirement*）、`ctx.root.reflect.get(name, false)`、`ctx.get(name)`、最后 `ctx[name]`，每一步都包
+  try/catch，任一步拿到真值即返回；四条 `inject.*` 能力的 `detect` 全部改用它。探针自身的异常依旧
+  一律按「缺这个能力」处理，绝不抛。
+- **四条事件能力不再假阳性**：以前 `detect` 只查 `hasFn(ctx, "on")`，只要宿主有 `ctx.on` 就报「能力齐备」，
+  哪怕一个钩子都没挂上（与它们自己 `degrade` 里写的「不会触发」自相矛盾，紧急制动下也这样）。现在要求
+  「宿主有这个事件 **且** 插件自己的挂载账目里真有它」（`hookArmed()` 读 `lib/hooks.js` 的实时账目，
+  `probeHost(ctx, deps)` 支持注入）。
+- **`lib/killswitch.js` 的读取路径不再吞错**：`existsSync` 会把 `EACCES`/`ENOTDIR` 和「文件不存在」一样
+  返回 `false`，于是 `killSwitchState()` 那个 `error` 字段永远是空的（诊断路径是死的）；改用 `statSync` +
+  `try/catch`，`ENOENT` 视为「正常没标记」，其余错误记进 `error`（只记首次，不再被后一个候选路径覆盖）。
+  另外 `markerPaths()`（含 `dshHome()`/`join()`）以前在 `try` 之外，路径解析抛错会违背「读取阶段 fail-open」
+  的承诺 —— 现在包进 `resolveMarkerPaths()`，状态查询与日志文案共用同一份结果。
+- **`lib/hooks.js` 的六处自伤**：导出的是可变 `Set`（导入方 `.add()` 即可绕过白名单）→ 集合私有，导出冻结
+  数组 `HOOK_WHITELIST` 与 `isWhitelistedHook()`；`String(event)` 在 `try` 之外（带抛错 `toString` 的对象能
+  破坏「永不抛」）→ `safeEventName()` 兜住；`handler` 不做类型校验 → 非函数即拒绝并记一笔；卸载函数不回收
+  自己的账目（重复 arm/unarm 让 `ocr_status.hooks` 虚高）→ 账目改成 `{event, active}`，卸载时置灰、摘除并
+  幂等调用宿主 `off()`；`errors`/`blocked` 无界 → 各限 50 条；注册失败只悄悄记账 → 新增 `setHookLogger()`，
+  `lib/index.js` 把它接到 `log("warn", …)`。
+- **`hostSummary()`/`present` 的兜底**：`hostSummary({ok:false})` 以前直接 TypeError（假定 `missing` 一定是
+  数组），现在按「入参可能是任何形状」写；`present = verdict === null ? null : verdict === true` 会把
+  「服务实例」这类真值判成 `false`，现在一律 `Boolean(verdict)`，只有 `null`/`undefined` 才是 `null`。
+- **`package.json` 的 `dsh.host.capabilities` 与代码清单不再各说各话**：两边的 id 词表曾经不同
+  （`tools/pre-execute` vs `events.tools/pre-execute`、`jobs` vs `inject.jobs`），现在统一成清单里的 14 个 id，
+  并由测试断言两份必须是同一个集合。`testedWith.ocr` 同时登记 `1.12.12 / 1.12.13`。
+
+Tests
+- `test/killswitch-smoke.mjs` 35 → **39**（标记是**目录**也算命中；源码级钉住 statSync + 容忍 `ENOENT`、
+  错误只记首次、路径解析在 `try` 内、`existsSync` 不再出现）。
+- `test/host-contract.mjs` 23 → **31**（服务只藏在 `ctx.reflect.get(name, false)` 后面也认；`ctx.on` 存在但
+  没挂钩子时四条事件能力必须报缺失；`hostSummary`/`hostNotes` 对残缺入参不抛；`package.json` 的
+  `dsh.host.capabilities` 与清单 id 集合相等）。
+- `test/smoke.mjs` 212 → **218**（没装 ocr 205 → **211**）：白名单是冻结副本、卸载回收且幂等、非函数 handler
+  被拒、事件名 `toString()` 抛错被拒、`setHookLogger` 让失败进日志、诊断各限 50 条。
+
 ## [0.7.0] — 2026-10-10
 
 安全底座。这一版不加功能，只回答 CPO 成熟度评估里那三个「不是文档能补的」问题：

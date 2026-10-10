@@ -2893,6 +2893,100 @@ const preExecute = (listeners) => {
     typeof noOnOff === "function" && hooksMod.hookStats().errors.some((line) => line.includes("没有 ctx.on")),
     JSON.stringify(hooksMod.hookStats().errors),
   );
+
+  /* v0.7.1：以下五条来自「拿 v0.7.0 的新模块去问 ocr」那一轮评审的发现。 */
+  const whitelistReadonly = (() => {
+    const before = hooksMod.HOOK_WHITELIST.length;
+    let mutationThrew = false;
+    try {
+      hooksMod.HOOK_WHITELIST.push("tools/guard");
+    } catch {
+      mutationThrew = true;
+    }
+    return {
+      frozen: Object.isFrozen(hooksMod.HOOK_WHITELIST),
+      unchanged: hooksMod.HOOK_WHITELIST.length === before,
+      mutationThrew,
+      guardRejected: hooksMod.isWhitelistedHook("tools/guard") === false,
+      resultAllowed: hooksMod.isWhitelistedHook("tools/result") === true,
+    };
+  })();
+  check(
+    "v0.7.1：白名单集合保持私有（导出的是冻结副本 + isWhitelistedHook 判定），导入方改不动",
+    whitelistReadonly.frozen &&
+      whitelistReadonly.unchanged &&
+      whitelistReadonly.guardRejected &&
+      whitelistReadonly.resultAllowed,
+    JSON.stringify(whitelistReadonly),
+  );
+
+  hooksMod.resetHookStats();
+  let hostOffCalls = 0;
+  const reclaimCtx = {
+    on() {
+      return () => {
+        hostOffCalls += 1;
+      };
+    },
+  };
+  const reclaimOff = hooksMod.armHook(reclaimCtx, "tools/result", () => {});
+  const armedCounts = { ...hooksMod.hookStats().counts };
+  reclaimOff();
+  const afterOff = hooksMod.hookStats();
+  reclaimOff(); // 第二次必须是空操作（卸载函数幂等）
+  check(
+    "v0.7.1：卸载函数回收自己那条账（不再虚高）、只调一次宿主 off、重复调用安全",
+    armedCounts["tools/result"] === 1 &&
+      afterOff.counts["tools/result"] === undefined &&
+      !afterOff.registered.includes("tools/result") &&
+      hostOffCalls === 1,
+    JSON.stringify({ armedCounts, afterOff: afterOff.counts, hostOffCalls }),
+  );
+
+  hooksMod.resetHookStats();
+  const notFunctionOff = hooksMod.armHook({ on: () => () => {} }, "tools/result", "不是函数");
+  check(
+    "v0.7.1：handler 不是函数时拒绝注册并记一笔（不谎报、不抛）",
+    typeof notFunctionOff === "function" &&
+      hooksMod.hookStats().errors.some((line) => line.includes("不是函数")) &&
+      !hooksMod.hookStats().registered.includes("tools/result"),
+    JSON.stringify(hooksMod.hookStats()),
+  );
+
+  const throwingNameOff = hooksMod.armHook(
+    { on: () => () => {} },
+    { toString() { throw new Error("事件名炸了"); } },
+    () => {},
+  );
+  check(
+    "v0.7.1：事件名 toString 抛错也不冒泡（String() 本身也在保护范围里），按拒绝处理",
+    typeof throwingNameOff === "function" &&
+      hooksMod.hookStats().blocked.some((line) => line.includes("无法解析")),
+    JSON.stringify(hooksMod.hookStats().blocked),
+  );
+
+  hooksMod.resetHookStats();
+  const hookLogs = [];
+  hooksMod.setHookLogger((text) => hookLogs.push(String(text)));
+  hooksMod.armHook({}, "tools/result", () => {});
+  hooksMod.setHookLogger(null);
+  check(
+    "v0.7.1：挂载失败会进日志（用户不问也能知道少挂了一个钩子）",
+    hookLogs.some((line) => line.includes("没有 ctx.on")),
+    JSON.stringify(hookLogs),
+  );
+
+  hooksMod.resetHookStats();
+  for (let i = 0; i < 60; i += 1) hooksMod.armHook({ on: () => () => {} }, "tools/guard", () => {});
+  for (let i = 0; i < 60; i += 1) hooksMod.armHook({}, "tools/result", () => {});
+  const cappedStats = hooksMod.hookStats();
+  check(
+    "v0.7.1：诊断账目有上限（blocked/errors 各不超过 50 条），不会长成第二个内存问题",
+    cappedStats.blocked.length <= 50 && cappedStats.errors.length <= 50 && cappedStats.blocked.length > 0,
+    `blocked=${cappedStats.blocked.length} errors=${cappedStats.errors.length}`,
+  );
+  hooksMod.resetHookStats();
+
   /* 源码级：lib/index.js 里所有宿主事件注册都必须经过 armHook（出现裸的 ctx.on( 就是回归）。 */
   const hookIndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
   const hookIndexCode = hookIndexSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");

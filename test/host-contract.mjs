@@ -10,6 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { HOST_CONTRACT, hostNotes, hostSummary, probeHost } from "../lib/host-contract.js";
+import { hookStats } from "../lib/hooks.js";
 
 const results = [];
 let failures = 0;
@@ -33,6 +34,16 @@ function fullCtx() {
     subagents: { start: () => {} },
   };
 }
+
+/**
+ * v0.7.1：事件类能力不再只看 `ctx.on` 在不在 —— 还要看**这个事件真的接上了没有**，
+ * 所以探针接受一份可注入的挂载账目（不传就读 lib/hooks.js 的实时账目）。
+ * 这里给一份「四个事件都挂上了」的账目，代表一次正常启动。
+ */
+const ARMED_HOOKS = {
+  hooks: { counts: { "tools/result": 2, "agent/turn-stopping": 1, "tools/pre-execute": 1, "loader/volatile-update": 1 } },
+};
+const NOT_ARMED_HOOKS = { hooks: { counts: {} } };
 
 const clone = (ctx) => JSON.parse(JSON.stringify({})) ?? ctx; // 占位：下面用手工裁剪
 
@@ -90,11 +101,30 @@ function ctxWithout(id) {
     ["host", "node", "ocr"].every((key) => typeof HOST_CONTRACT.verifiedWith?.[key] === "string" && HOST_CONTRACT.verifiedWith[key].length > 0),
     JSON.stringify(HOST_CONTRACT.verifiedWith),
   );
+  /* v0.7.1：package.json 的 dsh.host.capabilities 与这份清单必须是同一套 id。
+     原来一个写 `events.tools/pre-execute`、一个写 `tools/pre-execute`，两份「同样的话」
+     各说各的 —— 声明类信息最怕这种漂移，评审的人根本没法比对（第 10 条发现）。 */
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const declared = pkg?.dsh?.host?.capabilities;
+  check(
+    "v0.7.1：package.json 的 dsh.host.capabilities 与 HOST_CONTRACT 用的是同一套 id（集合相等）",
+    Array.isArray(declared) &&
+      declared.length === ids.length &&
+      declared.every((id) => ids.includes(id)) &&
+      ids.every((id) => declared.includes(id)),
+    `declared=${JSON.stringify(declared)} ids=${JSON.stringify(ids)}`,
+  );
+  check(
+    "v0.7.1：package.json 的 dsh.host 也写明了 dsh 版本范围与实测环境（给人看的兼容性声明）",
+    typeof pkg?.dsh?.host?.dsh === "string" &&
+      ["dsh", "node", "ocr"].every((key) => typeof pkg?.dsh?.host?.testedWith?.[key] === "string"),
+    JSON.stringify(pkg?.dsh?.host ?? null),
+  );
 }
 
 /* --------------------------------------------------------------- 全能力宿主 */
 {
-  const host = probeHost(fullCtx());
+  const host = probeHost(fullCtx(), ARMED_HOOKS);
   const hostRows = host.capabilities.filter((row) => row.surface === "host");
   check(
     "v0.7.0：能力齐备的宿主 → ok=true、missing 为空、每项 host 能力 present=true、client 槽位 present=null",
@@ -124,12 +154,42 @@ function ctxWithout(id) {
     hostSummary(host).includes("齐备") && hostSummary(null) === "未探测",
     hostSummary(host),
   );
+  /* v0.7.1：宿主有 ctx.on 但插件一个钩子都没挂上（紧急制动、或注册全失败）时，
+     四条事件能力必须报「缺」，而不是跟着 ctx.on 一起报 true —— 那正是第 11 条发现：
+     原来的写法会一边说「能力齐备」一边在 degrade 里说「不会触发」，自相矛盾。 */
+  const unarmed = probeHost(fullCtx(), NOT_ARMED_HOOKS);
+  const unarmedEvents = unarmed.capabilities.filter((row) => row.id.startsWith("events."));
+  check(
+    "v0.7.1：只有 ctx.on、一个钩子都没挂上时，四条事件能力报「缺」（不再假阳性）",
+    unarmedEvents.length === 4 && unarmedEvents.every((row) => row.present === false),
+    unarmedEvents.map((row) => `${row.id}=${row.present}`).join(" "),
+  );
+  check(
+    "v0.7.1：不传账目时读实时账目；四条事件能力的 present 与 hookStats().counts 一致",
+    unarmed.capabilities
+      .filter((row) => row.id.startsWith("events."))
+      .every((row) => row.present === (Number(hookStats().counts?.[row.id.replace(/^events\./, "")] ?? 0) > 0)),
+    JSON.stringify(hookStats().counts ?? {}),
+  );
+  /* v0.7.1：入参被写坏时 hostSummary/hostNotes 不许抛（第 13 条发现：hostSummary({ok:false}) 原来会 TypeError）。 */
+  const brokenSummaries = [
+    hostSummary({ ok: false }),
+    hostSummary({ ok: false, missing: "tools.register" }),
+    hostSummary({ ok: true, capabilities: [{ surface: "host", present: false }] }),
+  ];
+  check(
+    "v0.7.1：hostSummary/hostNotes 对残缺入参也不抛（missing 不是数组、行缺字段都兜住）",
+    brokenSummaries.every((line) => typeof line === "string" && line.length > 0) &&
+      hostNotes({ ok: false }).length === 0 &&
+      hostNotes({ capabilities: [{ surface: "host", present: false }] }).length === 1,
+    brokenSummaries.join(" | "),
+  );
 }
 
 /* ----------------------------------------------------------- 逐条「缺一」验证降级 */
 for (const capability of HOST_CONTRACT.capabilities) {
   if (capability.surface === "client") continue;
-  const host = probeHost(ctxWithout(capability.id));
+  const host = probeHost(ctxWithout(capability.id), ARMED_HOOKS);
   const row = host.capabilities.find((item) => item.id === capability.id);
   const expectedOk = capability.required !== true;
   check(
@@ -178,6 +238,64 @@ for (const capability of HOST_CONTRACT.capabilities) {
     "v0.7.0：服务访问器本身抛错时也按「缺这个能力」处理，并记进 errors（探针不能成为新的崩溃点）",
     poisonedHost.ok === false && poisonedHost.errors.some((line) => line.includes("宿主服务访问器炸了")),
     JSON.stringify(poisonedHost.errors),
+  );
+}
+
+/* ------------------------- 服务藏在 inject 后面时也必须认得出来（v0.7.1 的真机事故） */
+{
+  /** 复刻真机：服务由别的 fiber 提供，直接读属性抛 cordis 的基错，只有 reflect 读得到。 */
+  function injectOnlyCtx() {
+    const services = {
+      llm: { stream: () => {} },
+      jobs: { start: () => {} },
+      skills: { register: () => () => {} },
+      subagents: { start: () => {} },
+    };
+    const ctx = {
+      tools: { register: () => () => {} },
+      subprocess: { spawn: () => {}, resolveExecutable: async () => "" },
+      commands: { register: () => () => {} },
+      credentials: { resolve: async () => "" },
+      on: () => () => {},
+      reflect: { get: (name) => services[name] },
+    };
+    for (const name of Object.keys(services)) {
+      Object.defineProperty(ctx, name, {
+        enumerable: true,
+        get() {
+          throw new Error(`cannot get property "${name}" without inject`);
+        },
+      });
+    }
+    return ctx;
+  }
+
+  const host = probeHost(injectOnlyCtx());
+  const injectRows = host.capabilities.filter((row) => row.id.startsWith("inject."));
+  check(
+    "v0.7.1：服务藏在 inject 后面（直接读 ctx.llm 抛 cannot get property … without inject）时，探针仍靠 ctx.reflect.get(name,false) 认出 llm/jobs/skills/subagents",
+    host.errors.length === 0 && injectRows.length === 4 && injectRows.every((row) => row.present === true),
+    `errors=${JSON.stringify(host.errors)} present=${injectRows.map((row) => row.present).join(",")}`,
+  );
+
+  const broken = injectOnlyCtx();
+  broken.reflect = {
+    get() {
+      throw new Error("reflect 也炸了");
+    },
+  };
+  const brokenHost = probeHost(broken);
+  check(
+    "v0.7.1：reflect 自己抛错时按「缺」处理但绝不抛出去（探针不能成为新的崩溃点）",
+    brokenHost.capabilities.filter((row) => row.id.startsWith("inject.")).every((row) => row.present === false) && brokenHost.errors.length === 0,
+    JSON.stringify(brokenHost.errors),
+  );
+
+  const viaCtxGet = { ...fullCtx(), get: (name) => (name === "llm" ? { stream: () => {} } : undefined) };
+  check(
+    "v0.7.1：没有 reflect、只有 ctx.get(name) 的宿主也认（第三种读法）",
+    probeHost(viaCtxGet).capabilities.find((row) => row.id === "inject.llm")?.present === true,
+    "",
   );
 }
 

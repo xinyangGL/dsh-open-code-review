@@ -11,7 +11,7 @@
  *
  * 用法：node test/killswitch-smoke.mjs
  */
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as mod from "../lib/index.js";
@@ -84,6 +84,42 @@ try {
   check("无标记且无环境变量：未制动", clean.disabled === false && clean.source === "" && clean.path === "");
   check("无标记且无环境变量：没有意外报错", clean.error === "");
   check("runtimeDisabled() 与 killSwitchState() 一致", runtimeDisabled() === clean.disabled);
+
+  /* ---- 3.5) v0.7.1：读不到标记时要说清原因；标记路径解析本身也在保护范围里 ----
+     这一组是 v0.7.0 真机评审对 lib/killswitch.js 提的四条（第 6~9 条发现）的回归门。 */
+  {
+    /* 3.5a 标记是个目录也算命中：statSync 的成功路径与文件完全一样（存在即禁用）。 */
+    const dirHome = mkdtempSync(join(tmpdir(), "ocr-killswitch-dir-"));
+    process.env.DSH_HOME = dirHome;
+    mkdirSync(join(dirHome, HOME_MARKER_NAME));
+    const byDir = killSwitchState();
+    process.env.DSH_HOME = homeDir;
+    rmSync(dirHome, { recursive: true, force: true });
+    check("v0.7.1：标记路径存在（哪怕是个目录）即判定禁用 —— statSync 的成功路径与文件一致",
+      byDir.disabled === true && byDir.source === "file" && byDir.path === join(dirHome, HOME_MARKER_NAME),
+      JSON.stringify(byDir));
+
+    /* 3.5b 非 ENOENT 的失败必须留下原因（原来用 existsSync：EACCES/ENOTDIR/非法路径全被吞成
+       「没标记」，于是 error 字段永远是空的，那条诊断路径是死的）。
+       Windows 上造不出稳定的非 ENOENT 失败（文件当目录 → ENOENT、超长路径 → ENOENT、
+       process.env 里的 NUL 会被 Node 截断），所以这条分支由源码级断言钉住；
+       Linux 上的 ENOTDIR/ELOOP 会走它，CI 也在 Linux 上跑。 */
+    const ksSource = readFileSync(new URL("../lib/killswitch.js", import.meta.url), "utf8");
+    const ksCode = ksSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+    check("v0.7.1：只有非 ENOENT 的读标记失败才记 error（正常不存在不算错），且该分支真的在代码里",
+      clean.error === "" && /err\?\.code !== "ENOENT"[\s\S]{0,80}out\.error/.test(ksCode),
+      `cleanError=${JSON.stringify(clean.error)} nonEnoentBranch=${/err\?\.code !== "ENOENT"/.test(ksCode)}`);
+
+    /* 3.5c 源码级防漂移：不许回到 existsSync；错误只记首次；两条消息共用同一份路径解析。 */
+    check("v0.7.1：killswitch 不再用 existsSync（它把一切错误吞成 false），改用 statSync + ENOENT 特判",
+      !/\bexistsSync\b/.test(ksCode) && /\bstatSync\b/.test(ksCode) && /ENOENT/.test(ksCode),
+      `existsSync=${/\bexistsSync\b/.test(ksCode)} statSync=${/\bstatSync\b/.test(ksCode)}`);
+    check("v0.7.1：路径解析（dshHome/join）在 try 里，两条消息共用同一份结果，错误只记首次",
+      /const resolveMarkerPaths = \(\) => \{[\s\S]*?try\s*\{[\s\S]*?markerPaths\(\)/.test(ksCode) &&
+        /!out\.error/.test(ksCode) &&
+        !/markerPaths\(\)\.join/.test(ksCode),
+      `resolve=${/const resolveMarkerPaths = \(\) => \{[\s\S]*?try\s*\{[\s\S]*?markerPaths\(\)/.test(ksCode)}`);
+  }
 
   /* ---- 4) 标记文件命中 ---- */
   writeFileSync(homeMarker, "disabled by test\n", "utf8");

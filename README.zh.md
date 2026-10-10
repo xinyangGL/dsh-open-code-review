@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.7.0）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.7.1）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -404,6 +404,22 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
 
+### 加固（v0.7.1：v0.7.0 的第一次真机自检 —— 探针把宿主说错了，顺手修掉五处自己身上的毛病）
+
+v0.7.0 刚上真机，`ocr_status.host` 就报「宿主缺少 `llm`/`jobs`/`skills`/`subagents`」——可同一份输出里明明白白写着本机桥已就绪、按需 skill 已注册。**错的是探针，不是宿主**：cordis 里访问一个没 inject 的服务会抛 `cannot get property "…" without inject`，而 `detect` 直接读 `ctx.llm`，捕获后当成「宿主没这个能力」。这一版把这条读法换成宿主自己文档里的 `ctx.reflect.get(name, false)`（**不带 inject 要求**的读法），并用 `ctx.get(name)` / 直接属性访问兜底，每一步都包 try/catch。
+
+那一版补丁又拿去让真机 `ocr` 审了一遍（3 个文件、167 秒、13 条问题），逐条处置如下：
+
+| 问题 | 现在 |
+| --- | --- |
+| 四条 `events.*` 的 `detect` 都只查 `hasFn(ctx, "on")` ⇒ 只要宿主有 `ctx.on` 就报「能力齐备」，哪怕一个钩子都没挂上（和它自己 `degrade` 里写的「不会触发」自相矛盾；紧急制动下也这样） | 事件类能力改为「宿主有这个事件 **且** 插件自己的挂载账目里真有它」（`hookArmed()` + `lib\hooks.js` 的实时账目，`probeHost(ctx, deps)` 可注入） |
+| `killSwitchState()` 用 `existsSync`：它把一切错误吞成 `false`（`EACCES`/`ENOTDIR` 和「文件不存在」长得一样）⇒ 那个 `error` 字段永远是空的，诊断路径是死的；另外 `markerPaths()`（含 `dshHome()`/`join()`）在 try 之外，路径解析抛错会违背 fail-open；`out.error` 还会被后一个路径覆盖 | 改用 `statSync` + `try/catch`（`ENOENT` = 正常没标记，其余错误记 `error`），错误只记首次；路径解析包进 `resolveMarkerPaths()`（同样不抛），状态查询与日志文案共用同一份结果 |
+| `lib\hooks.js` 导出的是可变 `Set`（导入方 `.add()` 就能绕过白名单）、白名单外的注册不记失败原因、`String(event)` 在 try 之外（带抛错 `toString` 的对象能破坏「永不抛」）、`handler` 不做类型校验、卸载函数**不回收**自己的账目（重复 arm/unarm 让 `ocr_status.hooks.counts` 虚高）、诊断账目无界、注册失败只悄悄记账 | 集合私有 + 导出冻结数组 `HOOK_WHITELIST` 与 `isWhitelistedHook()`；`safeEventName()` 把 `String()` 也纳入保护；`handler` 非函数即拒绝并记一笔；账目改成 `{event, active}`，卸载函数置灰 + 摘除 + 幂等调用宿主 `off`；`errors`/`blocked` 各限 50 条；新增 `setHookLogger()`，`lib\index.js` 把挂载失败接进 `log("warn", …)` |
+| `hostSummary()` 假定 `host.missing` 一定是数组（`hostSummary({ok:false})` 直接 TypeError）；`present = verdict === null ? null : verdict === true` 把「服务实例」这类真值判成 false | 两处都按「入参可能是任何形状」写：残缺字段兜底、真值一律布尔化 |
+| `package.json` 的 `dsh.host.capabilities` 与 `lib\host-contract.js` 的 id 词表各说各话（`tools/pre-execute` vs `events.tools/pre-execute`、`jobs` vs `inject.jobs`） | 统一成清单里的 14 个 id，并加断言：两份**必须**是同一个集合（这类「同样的话说两遍」最容易漂） |
+
+`test/host-contract.mjs` 从 23 增到 **31** 条、`test/killswitch-smoke.mjs` 从 35 增到 **39** 条、`test/smoke.mjs` 从 212 增到 **218** 条（没装 ocr 从 205 增到 211）。
+
 ### 加固（v0.7.0：紧急制动 + 宿主契约 + 爆炸半径 —— 可选功能的失败只能影响它自己）
 
 对着 CPO 成熟度评估逐条落地的四个小机制（不是新功能）：
@@ -415,7 +431,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 爆炸半径预算 | `lib\hooks.js` 的 `armHook()`：只有白名单里 5 个事件名能注册、每个回调包 try/catch、注册失败记账并按 30 秒限速记日志，永不抛；`safeInject()`：宿主没有 `ctx.inject`、或注入抛错都不许拖垮 `apply`。`lib\index.js` 里已无任何裸 `ctx.on(` / `ctx.inject(`（源码级断言钉住） |
 | 如实报告机制 | `ocr_status.hooks`（`registered`/`counts`/`errors`/`blocked`）与 `preTest.mechanism`（只有 `pre-execute` 或 `none`）都是从**实际注册结果**读回来的，不再假设「配了就等于挂上了」 |
 
-`test/killswitch-smoke.mjs` **35** 条（两种来源 × 真值/假值 × 命中时到底注册了什么 × 工具回答 × 结尾断言标记没写进真实插件目录）、`test/host-contract.mjs` **23** 条（逐条「缺一」验证降级 + 中毒 ctx 不炸 + 源码级登记扫描）；`test/smoke.mjs` 从 205 增到 **212** 条（没装 ocr 从 198 增到 205）。设计取舍见 [docs/host-contract.md](docs/host-contract.md) 与 [docs/pretest-gate-safety-design.md](docs/pretest-gate-safety-design.md)。
+`test/killswitch-smoke.mjs` **39** 条（两种来源 × 真值/假值 × 命中时到底注册了什么 × 工具回答 × 结尾断言标记没写进真实插件目录）、`test/host-contract.mjs` **31** 条（逐条「缺一」验证降级 + 中毒 ctx 不炸 + 源码级登记扫描）；`test/smoke.mjs` 从 205 增到 **212** 条（没装 ocr 从 198 增到 205）。设计取舍见 [docs/host-contract.md](docs/host-contract.md) 与 [docs/pretest-gate-safety-design.md](docs/pretest-gate-safety-design.md)。（v0.7.1 把这三套加起来又加了 16 条，见上一节。）
 
 ### 加固（v0.6.2：第二次用真机 `ocr` 审自己（这次审 0.6.1 的 `lib/bridge.js`）—— 审出五条，一条真会坏事）
 
@@ -616,7 +632,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 212 项 / 没装 205 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 218 项 / 没装 211 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
@@ -624,8 +640,8 @@ dsh-open-code-review/
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
-   ├─ killswitch-smoke.mjs # 紧急制动冒烟（35 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏）：node test/killswitch-smoke.mjs
-   ├─ host-contract.mjs  # 宿主契约冒烟（23 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里）：node test/host-contract.mjs
+   ├─ killswitch-smoke.mjs # 紧急制动冒烟（39 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏；v0.7.1 起还覆盖「标记是目录也算命中」与 statSync/ENOENT 的源码级守卫）：node test/killswitch-smoke.mjs
+   ├─ host-contract.mjs  # 宿主契约冒烟（31 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里；v0.7.1 起还覆盖「服务只藏在 ctx.reflect.get(name,false) 后面也认」与「有 ctx.on 但没挂上钩子时四条事件能力必须报缺失」）：node test/host-contract.mjs
    ├─ zprobe3.mjs        # schema 预检：25 个字段是否都带 volatile/description/default
    └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs [仓库路径] [status-only]
                           #   status-only 只做连通性自检（免费）；E2E_LLM_MODEL 换模型；
