@@ -10,7 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { HOST_CONTRACT, hostNotes, hostSummary, probeHost } from "../lib/host-contract.js";
-import { hookStats } from "../lib/hooks.js";
+import { armHook, hookStats, hookStatsFor, resetHookStats } from "../lib/hooks.js";
 
 const results = [];
 let failures = 0;
@@ -150,7 +150,7 @@ function ctxWithout(id) {
     JSON.stringify(host.capabilities[0]),
   );
   check(
-    "v0.7.0：hostSummary 一句话说得清（齐备时说齐备，缺失时点名）",
+    "v0.7.0：hostSummary 一句话说得清（必需能力齐备时说齐备，缺失时点名）",
     hostSummary(host).includes("齐备") && hostSummary(null) === "未探测",
     hostSummary(host),
   );
@@ -184,6 +184,57 @@ function ctxWithout(id) {
       hostNotes({ capabilities: [{ surface: "host", present: false }] }).length === 1,
     brokenSummaries.join(" | "),
   );
+  /* v0.7.2：v0.7.1 的兜底「兜住了不抛，但把 undefined 当文案渲染出去了」——
+     拿 v0.7.1 去真机自审找出来的三条里有两条就是这个（第 2、3 条发现）。 */
+  check(
+    "v0.7.2：兜底文案里不许出现字面量 undefined（行缺 id/label/degrade 时也要有可读的名字）",
+    brokenSummaries.every((line) => !line.includes("undefined")) &&
+      hostNotes({ capabilities: [{ surface: "host", present: false }] }).every(
+        (line) => !line.includes("undefined"),
+      ),
+    `${brokenSummaries.join(" | ")} || ${hostNotes({ capabilities: [{ surface: "host", present: false }] }).join(" | ")}`,
+  );
+  check(
+    "v0.7.2：ok=true 只说「必需能力齐备」——不再一边说齐备、一边说缺少可选能力（自相矛盾）",
+    hostSummary({
+      ok: true,
+      capabilities: [{ id: "inject.llm", label: "LLM 服务", surface: "host", present: false }],
+    }).includes("必需能力齐备") &&
+      hostSummary({
+        ok: true,
+        capabilities: [{ id: "inject.llm", label: "LLM 服务", surface: "host", present: false }],
+      }).includes("缺少 inject.llm"),
+    hostSummary({
+      ok: true,
+      capabilities: [{ id: "inject.llm", label: "LLM 服务", surface: "host", present: false }],
+    }),
+  );
+  /* v0.7.2：账目按 ctx 取（自审第 1 条）—— 模块级账目只代表「这份实例挂了什么」，
+     不能拿去回答别的 ctx，否则同一进程里的两份实例会互相串账。 */
+  resetHookStats();
+  const ctxA = { on: () => () => {} };
+  const ctxB = { on: () => () => {} };
+  const emptyForBoth =
+    !hookStatsFor(ctxA).counts["tools/result"] && !hookStatsFor(ctxB).counts["tools/result"];
+  armHook(ctxA, "tools/result", () => {});
+  const ledgerA = hookStatsFor(ctxA);
+  const eventsForA = probeHost(ctxA).capabilities.filter((row) => row.id.startsWith("events."));
+  const eventsForB = probeHost(ctxB).capabilities.filter((row) => row.id.startsWith("events."));
+  check(
+    "v0.7.2：还没挂钩子时任意 ctx 都拿到实时账目（不误判成「有钩子」）",
+    emptyForBoth,
+    `A=${JSON.stringify(hookStatsFor(ctxB).counts)}`,
+  );
+  check(
+    "v0.7.2：账目跟着 ctx 走 —— A 挂上的事件在 B 那里必须是 0（多实例/热重载不串账）",
+    ledgerA.counts["tools/result"] === 1 &&
+      Number(hookStatsFor(ctxB).counts["tools/result"] ?? 0) === 0 &&
+      eventsForA.filter((row) => row.present === true).map((row) => row.id).join(",") ===
+        "events.tools/result" &&
+      eventsForB.every((row) => row.present === false),
+    `A=${ledgerA.counts["tools/result"]} B=${hookStatsFor(ctxB).counts["tools/result"]} eventsA=${eventsForA.map((row) => `${row.id}=${row.present}`).join(",")} eventsB=${eventsForB.map((row) => row.present).join(",")}`,
+  );
+  resetHookStats();
 }
 
 /* ----------------------------------------------------------- 逐条「缺一」验证降级 */

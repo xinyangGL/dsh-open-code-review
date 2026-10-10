@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.7.1）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.7.2）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -404,6 +404,19 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
 
+### 加固（v0.7.2：v0.7.1 的第一次真机自检 —— 兜底兜住了不抛，但把 `undefined` 说给用户听）
+
+v0.7.1 上真机后，`ocr_status.host` 终于老实说「宿主能力齐备」，紧急制动也在真机上逐条走通（写标记 → `ocr_review` 报 `OCR_DISABLED`；删标记 → 两个工具立刻回来，不用重启）。把 `lib\host-contract.js` 这些新模块再送进真机 `ocr` 审一遍（1 个文件、382 秒、3 条），加上制动走查时自己看到的一处矛盾，凑成这一版 —— 全是「兜底本身在撒谎」，行为一个都没改：
+
+| 问题 | 现在 |
+| --- | --- |
+| 探针账目是模块级单例，`hookArmed()` 一律读全局 `hookStats()`：同一进程里的第二份实例（热重载、另一个 profile）会拿**别人的账目**回答自己 | 新增 `hookStatsFor(ctx)`：账目没有主人（还没挂过任何钩子）或主人就是本 ctx 时给实时账目，否则给空账目；`armHook()` 首次成功注册时记住主人 |
+| `hostSummary()` 同一句里「宿主能力齐备」+「缺少 llm、jobs」自相矛盾 —— `ok` 为真只代表**必需**能力齐备 | 改成「宿主必需能力齐备；缺少 …（各有降级）」；摘要里的名字优先用能力 id（好对着清单 grep），备注里优先用中文 label |
+| 行缺 `id`/`label`/`degrade` 时把字面量渲染出去：「缺少 undefined（各有降级）」「宿主没有「undefined」：undefined」（测试里就故意传了这种行） | 新增 `rowLabel()`/`rowId()` 回退（label → id → 「（未命名能力）」），`degrade` 缺失也有替代说明 |
+| 被紧急制动拦住时，表头写着 `engine=auto … code=OCR_DISABLED`，可实际上一个引擎都没跑（`mkResult(null)` 的默认值） | 拒绝路径把 `engine` 置空，表头渲染成 `engine=未执行`（`REVIEW_TOOL_OUTPUT.engine` 是 string，空串合法，不加字段） |
+
+`test/host-contract.mjs` 从 31 增到 **35** 条、`test/killswitch-smoke.mjs` 从 39 增到 **40** 条（新增：制动拒绝的表头必须是 `engine=未执行`）；`test/smoke.mjs` 仍是 218（没装 ocr 211）。默认引擎仍是 `auto`、默认仍不自动评审 —— 改默认引擎是 v0.8.0 的事。
+
 ### 加固（v0.7.1：v0.7.0 的第一次真机自检 —— 探针把宿主说错了，顺手修掉五处自己身上的毛病）
 
 v0.7.0 刚上真机，`ocr_status.host` 就报「宿主缺少 `llm`/`jobs`/`skills`/`subagents`」——可同一份输出里明明白白写着本机桥已就绪、按需 skill 已注册。**错的是探针，不是宿主**：cordis 里访问一个没 inject 的服务会抛 `cannot get property "…" without inject`，而 `detect` 直接读 `ctx.llm`，捕获后当成「宿主没这个能力」。这一版把这条读法换成宿主自己文档里的 `ctx.reflect.get(name, false)`（**不带 inject 要求**的读法），并用 `ctx.get(name)` / 直接属性访问兜底，每一步都包 try/catch。
@@ -640,8 +653,8 @@ dsh-open-code-review/
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
-   ├─ killswitch-smoke.mjs # 紧急制动冒烟（39 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏；v0.7.1 起还覆盖「标记是目录也算命中」与 statSync/ENOENT 的源码级守卫）：node test/killswitch-smoke.mjs
-   ├─ host-contract.mjs  # 宿主契约冒烟（31 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里；v0.7.1 起还覆盖「服务只藏在 ctx.reflect.get(name,false) 后面也认」与「有 ctx.on 但没挂上钩子时四条事件能力必须报缺失」）：node test/host-contract.mjs
+   ├─ killswitch-smoke.mjs # 紧急制动冒烟（40 项断言：环境变量各真值/假值、两种标记路径、命中时 apply 只注册两个工具、两个工具的回答、ocr_status 顶部横幅与跳过探测；标记只写临时 DSH_HOME，最后断言真实插件目录没有被写脏；v0.7.1 起还覆盖「标记是目录也算命中」与 statSync/ENOENT 的源码级守卫；v0.7.2 起断言拒绝表头写的是 engine=未执行）：node test/killswitch-smoke.mjs
+   ├─ host-contract.mjs  # 宿主契约冒烟（35 项断言：14 条能力逐条「缺一」验证降级、ctx 为 null/被写坏/访问器抛错时不炸、源码级断言 lib/index.js 用到的扩展点都登记在清单里；v0.7.1 起还覆盖「服务只藏在 ctx.reflect.get(name,false) 后面也认」与「有 ctx.on 但没挂上钩子时四条事件能力必须报缺失」；v0.7.2 起还覆盖「文案里不出现字面量 undefined」「账目按 ctx 取」）：node test/host-contract.mjs
    ├─ zprobe3.mjs        # schema 预检：25 个字段是否都带 volatile/description/default
    └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs [仓库路径] [status-only]
                           #   status-only 只做连通性自检（免费）；E2E_LLM_MODEL 换模型；

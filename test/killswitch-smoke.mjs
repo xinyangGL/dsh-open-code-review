@@ -159,6 +159,14 @@ try {
   check("制动命中：拒绝理由里带解除办法", String(refused.summary || "").includes("重启"));
   check("制动命中：拒绝时说明 ocr_status 不受影响",
     (refused.notes || []).some((note) => note.includes("ocr_status 不受紧急制动影响")));
+  /* v0.7.2：真机复验时看到拒绝表头写着 engine=auto（其实一个引擎都没跑）——
+     拒绝路径必须把 engine 置空，渲染成「未执行」（schema 里 engine 是 string，空串合法）。 */
+  check("v0.7.2：制动拒绝的表头不谎报引擎（没有任何引擎跑过 → engine=未执行）",
+    refused.engine === "" &&
+      (await reviewTool.output.render({}, refused))[0].text.startsWith(
+        "阿里 OpenCodeReview · engine=未执行 · scope=",
+      ),
+    JSON.stringify((await reviewTool.output.render({}, refused))[0].text.split("\n")[0]));
 
   /* ---- 6) 环境变量命中（与文件等价的第二只手） ---- */
   rmSync(homeMarker, { force: true });

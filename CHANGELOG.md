@@ -3,6 +3,35 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.7.2] — 2026-10-10
+
+v0.7.1 的第一次真机自检。修完探针的假阴性之后，`ocr_status.host` 真的报出了「宿主能力齐备」，
+紧急制动也在真机上逐条验过（写标记 → `ocr_review` 报 `OCR_DISABLED`；删标记 → 立刻恢复，无需重启）。
+把这两个新模块再送进 `ocr` 审一遍，又抓出三条 —— 两条是 v0.7.1 的兜底「兜住了不抛，却把 `undefined`
+当文案渲染出去」，一条是账目越界。这一版按最小改动修掉它们。
+
+Fixed
+- **探针账目按 `ctx` 取，不再越界**（真机自审第 1 条）：挂载账目是模块级单例，原先
+  `hookArmed()` 一律读全局 `hookStats()`，同一进程里第二份实例（热重载/多 profile）会拿别人的账目
+  回答自己 —— 新增 `hookStatsFor(ctx)`：账目主人为 `null`（还没挂过任何钩子）或就是本 ctx 时给实时账目，
+  否则返回空账目；`armHook()` 在首次成功注册时记住主人。
+- **`hostSummary` 不再自相矛盾**（第 2 条）：`ok` 为真只代表**必需**能力齐备，原来的「宿主能力齐备；
+  缺少 llm、jobs（各有降级）」把两件事写进同一句。现在写成「宿主必需能力齐备；缺少 …（各有降级）」。
+  摘要里的名字优先用能力 id（好对着清单 grep），备注里优先用中文 label。
+- **兜底文案不再渲染字面量 `undefined`**（第 2、3 条）：行缺 `id`/`label`/`degrade` 时，`hostSummary` 会输出
+  「缺少 undefined（各有降级）」、`hostNotes` 会输出「宿主没有「undefined」：undefined」。现在走
+  `rowLabel()`/`rowId()` 回退（label → id → 「（未命名能力）」），degrade 缺失也有替代说明。
+- **制动拒绝的表头不再谎报引擎**（真机复验时自己发现的）：`ocr_review` 被紧急制动拦住时，结果里
+  `engine` 还是 `mkResult(null)` 的 `"auto"`，于是表头写着 `engine=auto … code=OCR_DISABLED`，
+  而实际上一个引擎都没跑。现在拒绝路径把 `engine` 置空，`valueToText` 渲染成 `engine=未执行`
+  （`REVIEW_TOOL_OUTPUT.engine` 是 string，空串合法，不新增字段）。
+
+Tests
+- `test/host-contract.mjs` 23 → **35**（新增：兜底文案里不许出现 `undefined`；`ok=true` 的措辞不再矛盾；
+  账目按 ctx 取 —— `armHook(ctxA, …)` 之后 A 的 `events.tools/result` 为真而 B 的四条全为假）。
+- `test/killswitch-smoke.mjs` 39 → **40**（新增：制动拒绝的表头必须是 `engine=未执行`）。
+- 运行时行为无变化：默认引擎仍是 `auto`，默认不自动评审 —— 改默认引擎是 v0.8.0 的事（B1）。
+
 ## [0.7.1] — 2026-10-10
 
 v0.7.0 的第一次真机自检。`ocr_status.host` 一上来就报「宿主缺少 `llm`/`jobs`/`skills`/`subagents`」，
