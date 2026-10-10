@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.7.3）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.8.0）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -16,13 +16,32 @@
 | `/ocr-review` | 斜杠命令 | 你在输入框敲 `/ocr-review`（可带附加要求） |
 | 自动评审 | 回合钩子 | 本回合有 `write`/`edit` 等文件写入，且回合即将关闭（`agent/turn-stopping`）时自动跑一次并把结果交给模型 |
 
-引擎两档：
+引擎三档：
 
-- **`ocr`**：跑 OpenCodeReview 自己的「确定性工程 × LLM」流水线。**默认 LLM 路由是 `dsh`**：插件在本机起一个只监听 `127.0.0.1` 的小桥（随机端口 + 随机 token），把 ocr 的 `/chat/completions` 翻译成 DSH 的 `ctx.llm.stream` —— 模型、provider、密钥、账号轮换与配额全由 DSH 决定，插件配置里不用填地址和 key（见下文「LLM 路由」）。
-- **`delegate`**：**不需要 key**。插件用 `ocr delegate preview` + `ocr delegate rule` 拿到「可审文件 + 按内容分组的审查规则」，再附上 `git diff`，拼成一份审查规格交给当前模型自己审（OpenCodeReview 官方为宿主 Agent 设计的 Delegation Mode）。
-- **`auto`（默认）**：先试 `ocr`，如果报 `no valid LLM endpoint configured` 就自动降级为 `delegate`，所以**开箱即用**（`dsh` 路由下宿主有 `llm` 服务、设置页选好模型就直接跑 `ocr` 流水线；`endpoint` 路由则还要端点 + 凭据引用）。
+- **`delegate`（v0.8.0 起的出厂默认）**：**不需要 key、不花评审的 token、几秒出规格**。插件用 `ocr delegate preview` + `ocr delegate rule` 拿到「可审文件 + 按内容分组的审查规则」，再附上 `git diff`，拼成一份审查规格交给当前模型自己审（OpenCodeReview 官方为宿主 Agent 设计的 Delegation Mode）。注意它省掉的是 **ocr 内部那次 LLM 调用**，`ocr` 二进制本身仍然要装、仍然要跑。
+- **`ocr`**：跑 OpenCodeReview 自己的「确定性工程 × LLM」流水线。**默认 LLM 路由是 `dsh`**：插件在本机起一个只监听 `127.0.0.1` 的小桥（随机端口 + 随机 token），把 ocr 的 `/chat/completions` 翻译成 DSH 的 `ctx.llm.stream` —— 模型、provider、密钥、账号轮换与配额全由 DSH 决定，插件配置里不用填地址和 key（见下文「LLM 路由」）。真机历史：**每个文件 176~600 秒**、按 tokens 计费（scan 单文件约 $0.16）。
+- **`auto`**：先试 `ocr`，报 `no valid LLM endpoint configured` 就自动降级为 `delegate`。它和 `ocr` 一样会真的调 LLM —— v0.8.0 起这两档都改成**显式选择**：要不要为一次评审花钱，应该是你决定的，不是出厂默认替你决定的。
 
 ---
+
+## 五分钟上手
+
+给从没装过 `ocr` 的机器（以 Windows 为例）。预算：Node 约 1 分钟、`ocr` 约 2 分钟、装插件 + 验证约 1 分钟、第一次评审约 1 分钟。
+
+| 步骤 | 做什么 | 判断成功的标志 |
+| --- | --- | --- |
+| 1 | `node -v`，需要 ≥ 20 | 打印 `v20.x` / `v22.x` / `v24.x` |
+| 2 | `npm i -g @alibaba-group/open-code-review` | `opencodereview --version` 有版本号 |
+| 3 | 给 `ocr` 一个模型。保持 `llmMode = dsh`（默认）时**什么都不用填** —— DSH 把自己的模型、密钥与配额借给它；想用自己的端点就选 `endpoint`，再填 `llmBaseUrl` + `llmApiKeyRef`（值是 DSH 凭据的**名字**，不是明文 key） | `ocr_status` 里 LLM 路由有值，且没有 `no valid LLM endpoint configured` |
+| 4 | `dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`，重启 DSH | `ocr_status` 报出可执行文件 + 版本、LLM 路由、配置来源 |
+| 5 | `/ocr-review`，或在写完文件的回合尾部点「启动代码审核」 | 列出逐条问题，或明确说「没有问题」 |
+
+**先读这一段再动手**（这几条以前被文档埋得太深）：
+
+- `ocr` 是**外部前置依赖**，插件不能替你装；而且**每一条代码路径都要跑那个二进制** —— `delegate` 省掉的只是 `ocr` 内部那次 LLM 调用，不是 `ocr` 本身。「插件没有运行时依赖」指的是 npm 包，**不包含**这个 CLI。
+- Windows 上 `ocrPath` 必须指向真正的 `opencodereview.exe`；`.cmd` / `.bat` / `.ps1` 这类脚本壳会被宿主以 `EINVAL` 拒绝（宿主 spawn 不经过 shell）。
+- `engine = delegate`（默认）不花评审 token、几秒出规格；`engine = ocr` / `auto` 才会跑 OCR 的 LLM 流水线：真机**每文件 176~600 秒**、按 tokens 计费（单文件约 $0.16）。**不要**这样直接接到 CI 里。
+- `ocr_status` 报 `OCR_NOT_FOUND` 时，它会顺带打印当前平台的一键安装指引 —— 照那个做，别猜。
 
 ## 安装
 
@@ -108,7 +127,7 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 | `enabled` | `true` | 基础 | 总开关：关掉后停自动评审，`ocr_review`/`/ocr-review` 拒绝执行（`ocr_status` 仍可用于诊断） |
 | `ocrPath` | `""` | 高级·运行与诊断 | `ocr` 可执行文件绝对路径；留空=自动探测 |
 | `ocrCandidates` | `[]` | 仅文件层 | 额外候选路径 |
-| `engine` | `"auto"` | 基础 | `auto` \| `ocr` \| `delegate` |
+| `engine` | `"delegate"` | 基础 | `delegate`（**v0.8.0 起的出厂默认**，不调 LLM、不花 token、几秒出规格）\| `ocr` \| `auto`；只有 `ocr` 与 `auto` 会真的调 LLM。工具调用可以逐次覆盖它 |
 | `autoEngine` | `""` | 仅文件层 | 自动评审用的引擎；留空=跟随 `engine` |
 | `audience` | `"agent"` | 高级·运行与诊断 | 传给 `ocr --audience`：`agent`（仅摘要）/`human`（进度条） |
 | `timeoutMinutes` | `15` | 高级·运行与诊断 | 单次评审超时，传给 `ocr --timeout`，同时作为插件侧硬超时（表单上限固定为出厂值 60，要更大就写文件层） |
@@ -331,7 +350,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 212 项 / 没装 205 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 225 项 / 没装 218 项）。
 
 ---
 
@@ -392,6 +411,8 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 自动评审太频繁 | 设置页调小「每会话最多自动评审次数」、调大「最小间隔」，或把「自动评审」设为 `off` |
 | `ocr_status` 说「本机桥没有就绪」，状态行也显示回落 | `dsh` 路由需要宿主加载了提供 `llm` 服务的插件（本机是 `llm-commandcode` / `llm-pi-ai` 之类）。缺它就自动回落 `endpoint` 路由：要么修好 profile 里的提供方插件，要么把「LLM 路由」切成 `endpoint` 填好地址与凭据引用 |
 | 设置页文案变成英文 | 界面文案走 Client locale 服务（跟随 DSH 语言）：`locale/*.json` 只放卡片标题与描述，界面文案在 `lib\client.js` 的 `TEXT_ZH`/`TEXT_EN`；没有 locale 服务或词典缺键时自动回落中文 |
+| 长评审看起来卡死了，进度行几分钟没动 | v0.8.0 起长跑每 30 秒会打一次心跳，不再留一行静默：`ocr 运行中 2m10s · 还没有任何输出（超时 15 分钟；等不及可以改用 engine=delegate，几秒出规格）`；开始有输出后变成 `……最近一次输出在 4.0s 前`。「还没有任何输出」持续好几分钟，就是那几次 600 秒真机跑给我们的信号：缩小范围（`paths`/`exclude`）、加大 `timeoutMinutes`，或直接换 `engine: "delegate"` —— 规格还是同一份 ocr 规则，但几秒就回来 |
+| 评审在烧 token，可我没要它花钱 | 出厂默认引擎自 v0.8.0 起是 `delegate`（不调 LLM、不花 token）；只有 `ocr` 与 `auto` 会跑 OCR 自己的流水线。**会调 LLM 的每一次运行**现在都会在第一条备注里说清（`成本提示：engine=… 真机历史 176~600s/文件、按 tokens 计费…`），失败结果末尾还会给一行 `下一步：…`，不用自己猜。若设置页或配置文件里 pin 了 `engine`，以那个为准 —— `ocr_status` 会报出实际生效的引擎与来源 |
 | 插件卡片没有图标 / 标题显示成包名 | 清单读取失败：确认 `package.json` 的 `icon` 是相对路径且文件存在、`exports` 含 `"./locale/*.json"`、`locale/{zh,en}.json` 有 `meta.title/description`（`node test/smoke.mjs` 会校验这几条） |
 | `DSH_OPEN_CODE_REVIEW_CONFIG` 指向的文件不存在 | v0.5.0 起不再就此停住：继续回落 `<DSH_HOME>\dsh-open-code-review.json` → 插件目录，并在 `ocr_status` 的备注里明说「指向的 … 不存在，已回落到 …」。升级前那种「静默按出厂默认跑」的情况没有了 |
 | 设置页下拉框看不清（白底白字，或深色主题下深字） | v0.5.0 已修：`<select>` / `<option>` 的颜色改用宿主主题 token（`--dsw-alias-label-primary` / `--dsw-alias-bg-layer-2` / `--dsw-alias-bg-overlay`）并按当前主题声明 `color-scheme`（跟随 `theme/change` 热更新），原生下拉弹层在深浅主题下都可读。升级后若还不对，先刷新页面 |
@@ -403,6 +424,19 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 改了 `config.json` 里的 `auto` / `onDemand` / `preTest`，行为没变 | v0.5.8 已修，**两个**原因：① 设置页（schema 实例）带着默认值把这些键整层遮住了（取值等于出厂默认现在不算覆盖项）；② 这三个是「装/卸监听器」的决定，以前只在启动与设置页写入时重算，文件层改动只改了值没重算决定。现在闸门只要插件没被关掉就挂着（`off` 只放行），且三个开关会在下一次工具调用/回合收尾时按文件指纹重新 sync；`ocr_status.preTest.mode` 也是现算的，不会再与文件矛盾 |
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+
+### 加固（v0.8.0：把默认改成不花钱的那档 —— 成本、心跳与「下一步」都摆到台面上）
+
+这一版来自那份成熟度评估（`docs/maturity-assessment-2026-10-10.md`），不是来自事故。只改了一个默认值，外加三处「别再让用户猜」。
+
+| 问题 | 现在 |
+| --- | --- |
+| 出厂默认 `engine = auto` = 「只要配了 LLM 就走最贵的那条流水线」：真机历史 **176~600 秒/文件**、按 tokens 计费（scan 单文件约 $0.16），而它曾经是**开箱默认**，用户没有任何机会拒绝 | 出厂默认改成 **`delegate`**（`lib/config.js` 的 `DEFAULTS.engine`、`pickEngine()` 兜底、工具描述、设置页顺序、EN/中文文案五处同步）。`ocr` 与 `auto` 变成**显式选择**；用户自己在配置文件里 pin 过的 `engine` 不受影响（只有出厂默认移动了） |
+| 一次会长跑好几分钟，期间进度行是静的，没有任何提示能区分「在跑」和「卡死」 | 长跑每 **30 秒**打一次心跳：`ocr 运行中 2m10s · 还没有任何输出（超时 15 分钟；等不及可以改用 engine=delegate，几秒出规格）`；开始有输出后切成 `……最近一次输出在 4.0s 前`。用纯 `setInterval`（`unref()`，不用 `ctx.setInterval`），每次写进度都包 try/catch |
+| 花钱这件事只在事后可见（跑完看 token 统计），启动前没有任何提示 | 任何**会真的调 LLM** 的运行，第一条备注就是成本提示：`成本提示：engine=… 走 OCR 的 LLM 流水线 —— 真机历史 176~600s/文件、按 tokens 计费（scan 单文件约 $0.16），本次给了 N 个路径…想省钱用 engine=delegate`；`delegate` 不提示（它不花钱） |
+| 失败结果只给一个错误码 + 一句通用解释，用户得自己猜下一步 | 每个失败码都有 `nextStep`（`lib/review.js` 的 `NEXT_STEPS`：13 个 `CODES` + 2 个 `REVIEWER_CODES` 全覆盖，测试断言它们必须是可执行动作、且不含「请联系/无法解决/自行排查」这类空话），失败正文渲染成一行 `下一步：…`，`ocr_review` 的 schema 也带 `nextStep`（不进 required） |
+
+`test/smoke.mjs` 从 218 增到 **225** 条（没装 ocr 从 211 增到 **218**）：新增默认引擎与 `pickEngine` 三例、码表全覆盖 + 反空话、`nextStep` 渲染、`costHint` 三例（delegate 静默 / 说明规模 / 非扫面范围）、心跳文案两例、schema 字段，以及 `startHeartbeat(` / `clockedSink(chunkSink(job), beat)` / `finally { beat.stop(); }` 的源码级接线断言。顺带修掉一条**本来就有的脆弱断言**：`auto：无 LLM 端点时降级 delegate` 那条以前靠「本机 `config.json` 恰好 pin 了 `engine: "auto"`」才成立，现在显式传 `engine: "auto"`；同理默认引擎那条改用 `normalizeConfig({})` 断言，不再读机器上的真实配置文件。
 
 ### 加固（v0.7.3：第二次真机自检 —— 六条修掉，一条明确不采纳）
 
@@ -660,7 +694,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 218 项 / 没装 211 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 225 项 / 没装 218 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host）、v0.8.0 默认引擎与成本/心跳（默认 delegate 且不读机器上的真实配置、pickEngine 三例、每个失败码都有可执行的 nextStep、costHint 对 delegate 静默、心跳区分「还没输出」与「刚有输出」、nextStep 进 schema、心跳接线源码级断言））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs

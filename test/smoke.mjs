@@ -555,7 +555,9 @@ checkEither(
   HAS_OCR ? `${delegated.summary} | spec=${delegated.reviewSpec.length} 字符` : `${delegated.code} | ${delegated.summary}`,
 );
 
-const auto = await tools.get("ocr_review").execute({}, exec);
+/* v0.8.0 起「不传 engine」= 跟着配置走（出厂是 delegate），所以这里显式点名 auto，
+   否则这条断言会随本机 config.json 是否 pin 了 engine 而变味。 */
+const auto = await tools.get("ocr_review").execute({ engine: "auto" }, exec);
 checkEither(
   "auto：无 LLM 端点时降级 delegate 并给出配置指引（没装 ocr 时先报 OCR_NOT_FOUND）",
   auto.ok === true && auto.engine === "delegate" && auto.configHint.includes("no valid LLM endpoint configured"),
@@ -565,6 +567,71 @@ checkEither(
 
 const bad = await tools.get("ocr_review").execute({ scope: "commit" }, exec);
 check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.code === "OCR_INVALID_ARGS" && bad.summary.includes("需要 commit"), `${bad.code} | ${bad.summary}`);
+
+/* ---------------- v0.8.0：便宜的那档才是默认 / 成本前置 / 失败给下一步 / 长评审心跳 ---------------- */
+const reviewerCodeValues = Object.values((await import(new URL("../lib/reviewer.js", import.meta.url))).REVIEWER_CODES);
+
+check(
+  "v0.8.0：默认引擎是 delegate（不调 LLM、几秒出规格），空配置也不再有「默认走 LLM 流水线」",
+  cfgMod.DEFAULTS.engine === "delegate" &&
+    cfgMod.normalizeConfig({}).engine === "delegate" &&
+    review.pickEngine(undefined, {}) === "delegate" &&
+    review.pickEngine("ocr", {}) === "ocr" &&
+    review.pickEngine("bogus", { engine: "也坏" }) === "delegate",
+  `DEFAULTS=${cfgMod.DEFAULTS.engine} normalizeConfig(空)=${cfgMod.normalizeConfig({}).engine} pickEngine(空)=${review.pickEngine(undefined, {})}`,
+);
+
+const allCodes = [...Object.values(review.CODES), ...reviewerCodeValues];
+const missingSteps = allCodes.filter((code) => review.nextStepForCode(code) === "");
+check(
+  "v0.8.0：每个失败码都有「下一步」文案，且不写「请联系维护者」这类空话",
+  missingSteps.length === 0 && allCodes.every((code) => !/请联系|无法解决|自行排查/.test(review.nextStepForCode(code))),
+  `缺失=${missingSteps.join(",") || "无"} 共 ${allCodes.length} 个码`,
+);
+check(
+  "v0.8.0：失败结果自带 nextStep，并渲染成「下一步：…」一行",
+  bad.nextStep.includes("字段名") &&
+    review
+      .valueToText(
+        { ok: false, engine: "ocr", scope: "workspace", exitCode: 1, durationMs: 1000, code: "OCR_RUN_FAILED", nextStep: "先用 engine=delegate 确认工具链" },
+        {},
+      )
+      .includes("下一步：先用 engine=delegate 确认工具链"),
+  `${bad.code} nextStep=${bad.nextStep.slice(0, 30)}…`,
+);
+check(
+  "v0.8.0：成本前置提示只在会烧 LLM 的档出现（delegate 不提示），并说清规模与计费口径",
+  review.costHint({ engine: "delegate" }) === "" &&
+    /2 个路径/.test(review.costHint({ engine: "ocr", scope: "scan", paths: ["a.js", "b.js"] })) &&
+    /按 tokens 计费/.test(review.costHint({ engine: "auto", scope: "workspace" })) &&
+    /engine=delegate/.test(review.costHint({ engine: "ocr" })),
+  review.costHint({ engine: "ocr", scope: "scan", paths: ["a.js", "b.js"] }).slice(0, 60),
+);
+check(
+  "v0.8.0：心跳文案区分「一直没输出」与「刚刚还在输出」（真机 600s 那次就是前者）",
+  review.heartbeatLine(95000).includes("还没有任何输出") &&
+    review.heartbeatLine(95000).includes("1m35s") &&
+    review.heartbeatLine(95000, 4000, 15).includes("最近一次输出在 4.0s 前") &&
+    review.heartbeatLine(95000, 4000, 15).includes("超时 15 分钟"),
+  review.heartbeatLine(95000),
+);
+const nextStepSchema = tools.get("ocr_review")?.output?.schema?.properties?.nextStep;
+check(
+  "v0.8.0：ocr_review 的输出 schema 声明 nextStep（string、不进 required，成功时是空串）",
+  nextStepSchema?.type === "string" && !(tools.get("ocr_review").output.schema.required ?? []).includes("nextStep"),
+  JSON.stringify(nextStepSchema),
+);
+{
+  const indexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+  check(
+    "v0.8.0：长评审真的挂了心跳（runOcrOnce 里 startHeartbeat + clockedSink，且 finally 里 stop）",
+    /startHeartbeat\(job/.test(indexSource) &&
+      /clockedSink\(chunkSink\(job\), beat\)/.test(indexSource) &&
+      /} finally \{\s*\n\s*beat\.stop\(\);/.test(indexSource) &&
+      /out\.notes\.push\(cost\)/.test(indexSource),
+    `startHeartbeat=${(indexSource.match(/startHeartbeat\(job/g) ?? []).length} clockedSink=${(indexSource.match(/clockedSink\(chunkSink/g) ?? []).length}`,
+  );
+}
 
 /* 用全新空目录当"非 git 仓库"样本：插件自己现在是个 git 仓库（用户要求建 GitHub 仓库时 git init 过），
    不能再拿它当反例。 */

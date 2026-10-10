@@ -3,6 +3,49 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.8.0] — 2026-10-10
+
+这一版把「默认引擎」从最贵的那档挪到不花钱的那档，并把成本、进度与「下一步」都摆到台面上
+（B1–B4）。B1 是行为变更，所以单独发一版、不掺其它改动。
+
+Changed
+- **`engine` 的出厂默认 `auto` → `delegate`**（`lib/config.js` 的 `DEFAULTS.engine`）。以前 `auto` 会先跑
+  `ocr` 自己那条 LLM 流水线（真机历史 3~10 分钟/文件、按 tokens 计费），而那是插件的默认行为、
+  用户不需要做任何选择就会发生。现在默认的 `delegate` 只调 `ocr delegate` 拿规格（规则 + 可审文件 +
+  unified diff），**再由当前模型按规则评审**，几秒出结果、不额外烧 token；会花钱的 `ocr` 与 `auto`
+  变成显式选择。
+  - 同步的五处：`lib/review.js` 的 `pickEngine()` 兜底、`lib/index.js` 的 `mkResult()` / job 启动行 /
+    自动评审取引擎、`ocr_review` 的参数与工具描述、`lib/client.js` 的设置页下拉顺序与文案（中英）。
+  - **在配置文件里 pin 过 `engine` 的用户值不变**，移动的只是出厂默认；`ocr_status` 照旧显示
+    生效值与来源。
+- 设置页的「默认引擎」下拉把 `delegate` 排到第一项并标注「（v0.8.0 起默认）」。
+
+Added
+- **成本前置提示**：`ocr`/`auto` 的评审在结果 `notes` 与过程行里先说明「走 OCR 的 LLM 流水线 ——
+  真机历史 176~600s/文件、按 tokens 计费（scan 单文件约 $0.16）…想省钱用 `engine=delegate`」，
+  并带上本次给了几个路径。`delegate` 没有这句（它不花这笔钱）。
+- **30 秒心跳**：评审超过 30 秒没有任何输出时，进度行会写「`ocr 运行中 1m35s · 还没有任何输出
+  （超时 15 分钟；等不及可以改用 engine=delegate，几秒出规格）`」；有输出之后改成
+  「…最近一次输出在 4.0s 前」。实现是纯 `setInterval` + `unref()`（不用宿主定时器），
+  每一次子进程输出都会重置计时，`finally` 里一定停掉。
+- **每个失败码的 `nextStep`**：`lib/review.js` 新增 `NEXT_STEPS`（13 个 `CODES` + 2 个 `REVIEWER_CODES`
+  全覆盖）与 `nextStepForCode()`，失败的返回值与正文都带上「下一步：…」（例如
+  `OCR_NOT_FOUND` → 装 ocr 的具体命令；`OCR_TIMEOUT` → 缩小范围或改 `delegate` 先确认工具链）。
+  `ocr_review` 的返回值 schema 也声明了 `nextStep`（成功为空、不进 required）。
+
+Fixed
+- 两条离线断言本来就脆弱，顺手改成不依赖「本机恰好 pin 了什么」：默认引擎那条改用
+  `normalizeConfig({})` 而不是读插件目录的真实 `config.json`；`auto` 降级/进度那条显式传
+  `engine: "auto"`，不再靠本机配置文件里恰好写着 `auto` 才成立。
+
+Tests
+- `test/smoke.mjs` 218 → **225**（没装 ocr 时 211 → **218**）：新增 7 条 v0.8.0 断言 ——
+  出厂默认与 `pickEngine` 三例、`CODES ∪ REVIEWER_CODES` 每个码都有非空 `nextStep` 且不含
+  「请联系/无法解决/自行排查」这类空话、失败正文渲染「下一步：」、`costHint` 对 `delegate` 静默、
+  `heartbeatLine` 区分「还没输出」与「刚有输出」、`nextStep` 进 schema 且不在 required、
+  以及心跳接线的源码级断言（`startHeartbeat(job`、`clockedSink(chunkSink(job), beat)`、
+  `finally { beat.stop();`、`out.notes.push(cost)`）。
+
 ## [0.7.3] — 2026-10-10
 
 v0.7.2 的第一次真机自检。又跑了 `ocr scan`（`lib/host-contract.js` + `lib/killswitch.js`，203.6 秒、7 条），
