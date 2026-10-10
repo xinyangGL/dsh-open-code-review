@@ -3,6 +3,38 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.9.0] — 2026-10-10
+
+**按入口记账**（`ocr_status.stats`）。这条来自成熟度评估的 P1-1：判据是「连续两周按钮点击 0 次 ⇒
+回合尾部按钮这个默认入口的价值假设不成立」，而插件里此前一个计数都没有，判据无从落地 ——
+「能不能给别人用」这种问题不该靠体感回答。
+
+改动动了**工具返回值 schema**（`RELEASING.md` 划的外部接口），所以单独一版，不和仓库整理混在一起。
+
+Added
+- `ocr_status.stats = { since, byEntry }`，四个桶 `tool` / `command` / `button` / `auto`，每桶
+  `started` / `ok` / `failed` / `lastAt` / `lastCode`。本次进程内计数，重启清零（`since` 是起始时刻）。
+- 状态文本新增一行「按入口记账（v0.9.0，本次进程内，重启清零）：…」，按钮为 0 时在同一行补
+  「· 其中按钮 0 次」——不用读 JSON 就知道该看哪一条。
+- 自动评审（`auto` 桶）在开跑处记一笔、每次结算（成功 / 轮次上限 / 异常）各配一笔结果，
+  保证 `started === ok + failed`（否则「跑了几次」和「成/败几次」会自相矛盾）。
+
+Changed
+- 回合尾部按钮执行宿主命令时带内部标记 `/ocr-review --entry=button`；插件在 handler 里收下即**剥掉**，
+  模型看到的提示词里没有它，手输不带标记 ⇒ 记成 `command`。命令与按钮本身不执行评审（只注入一句指令），
+  所以入口只能在「模型真的调 `ocr_review`」那一刻认领：命令处理器留一个 60 秒内有效的待认领标记。
+
+Not added (and why)
+- **没有 `skill` 桶**。模型自发调用与按 on-demand skill 说明调用在工具层是同一次调用，分不开；
+  硬报一个数就是编数字。入口记账要么可核对，要么不做。
+
+Tests
+- `test/smoke.mjs` 236 → **243**（没装 `ocr` 时 229 → **236**）：七条断言用「必然失败的参数」
+  （`scope: "commit"` 不给 hash ⇒ `OCR_INVALID_ARGS`，不 spawn 子进程）驱动，与这台机器装没装 `ocr` 无关；
+  覆盖四个桶的归属、失败码留痕、标记不进提示词、schema 形状、auto 两处记账（源码级）与
+  「不许造第五个桶」。
+- `test/client-smoke.mjs` 里那条「点击走宿主命令」改成断言带标记的整行（208 项不变）。
+
 ## [0.8.2] — 2026-10-10
 
 这一版**没有代码行为变更**，是把仓库收拾成「能给别人用」的样子：社区文件、发布纪律、以及 CI 上

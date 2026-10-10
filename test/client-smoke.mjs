@@ -1160,8 +1160,12 @@ check("按钮订阅了本会话的任务行", tailWatched.includes("s1"), JSON.s
 tailButton(idleTree).props.onClick();
 await tick();
 check(
-  '点击走宿主命令：execute(sessionId, "/ocr-review", [])',
-  executed.length === 1 && executed[0][0] === "s1" && executed[0][1] === "/ocr-review" && Array.isArray(executed[0][2]) && executed[0][2].length === 0,
+  '点击走宿主命令：execute(sessionId, "/ocr-review --entry=button", [])（v0.9.0 起带入口标记）',
+  executed.length === 1 &&
+    executed[0][0] === "s1" &&
+    executed[0][1] === "/ocr-review --entry=button" &&
+    Array.isArray(executed[0][2]) &&
+    executed[0][2].length === 0,
   JSON.stringify(executed),
 );
 const doneText = textOf(renderTail([]));

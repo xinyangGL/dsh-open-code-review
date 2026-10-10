@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.8.1）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.9.0）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -259,6 +259,8 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 把 `onDemand` 设为 `false`（或 `enabled = false`）就只剩模型工具与 `/ocr-review` 命令：不注册 skill、没有按钮。
 
+**v0.9.0 起还记一笔「按入口的账」**（本次进程内，重启清零），让「按钮到底有没有人点」不再靠猜：`ocr_status.stats.byEntry` 只有四个诚实的桶 —— `tool`（模型调了 `ocr_review`，不管是你说一句话触发的，还是 skill 说明里教它调的）、`command`（你手输 `/ocr-review`）、`button`（回合尾部按钮，浏览器半侧在命令行尾部带上 `--entry=button`，插件收下即剥掉、不进提示词）、`auto`（自动评审）。状态文本会在按钮为 0 时直接写「· 其中按钮 0 次」，`RELEASING.md` 里那条 14 天判据就是建在它上面的。**故意没有 `skill` 桶**：在工具这一层，「模型自发调用」与「按 skill 说明调用」是同一次调用，硬报一个数就是编。
+
 ### 评审先于测试（`preTest`，v0.5.7 起）
 
 「agent 改完代码会自己跑单元测试」这种标准流程里，评审应该排在测试**之前**。`preTest` 就是把这个接进标准流程的三档开关（出厂 `"off"`，什么都不干预）：
@@ -431,6 +433,20 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 改了 `config.json` 里的 `auto` / `onDemand` / `preTest`，行为没变 | v0.5.8 已修，**两个**原因：① 设置页（schema 实例）带着默认值把这些键整层遮住了（取值等于出厂默认现在不算覆盖项）；② 这三个是「装/卸监听器」的决定，以前只在启动与设置页写入时重算，文件层改动只改了值没重算决定。现在闸门只要插件没被关掉就挂着（`off` 只放行），且三个开关会在下一次工具调用/回合收尾时按文件指纹重新 sync；`ocr_status.preTest.mode` 也是现算的，不会再与文件矛盾 |
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+
+### 加固（v0.9.0：把「按钮到底有没有人点」变成一个可核对的数）
+
+这一版只加一件事：**按入口记账**。CPO 评估的 P1-1 判据是「连续两周按钮点击 0 次 ⇒ 说明回合尾部按钮这个默认入口的价值假设不成立」，而在此之前插件里连一个计数都没有 —— 判据无从落地。现在 `ocr_status.stats.byEntry` 有四桶（`tool` / `command` / `button` / `auto`），每桶 `started` / `ok` / `failed` / `lastAt` / `lastCode`，状态文本在按钮为 0 时直接写「· 其中按钮 0 次」。
+
+| 问题 | 现在 |
+| --- | --- |
+| 命令与按钮自己**不执行评审**（只往会话里注入一句指令）⇒ 入口没法在命令处认领 | 认领点放在「模型真的调 `ocr_review`」那一刻：命令处理器留一个待认领标记（60 秒内有效），随后那次工具调用把它领走；没有待认领就记 `tool` |
+| 按钮与手输命令在宿主侧是同一条命令，分不开 | 浏览器半侧在命令行尾部带 `--entry=button`（宿主把命令名之后的每个字节都当 rawInput，所以标记能穿透到 handler）；插件收下即**剥掉**，模型看到的提示词里没有它 |
+| 「按 skill 说明调用」与「模型自发调用」在工具层是同一次调用 | 不造 `skill` 桶。「模型有没有照 skill 的说明做」是提示词质量问题，用编出来的计数回答它就是自欺 |
+| 自动评审那条路不走工具调用门槛，容易记成 0 | 开跑记 `noteEntryStart("auto")`，每次结算（成功 / 轮次上限 / 异常）都配一笔结果，保证 `started === ok + failed` |
+| 改动动了工具返回值 schema（`RELEASING.md` 划的外部接口） | 本版单独一个 tag，不与仓库整理（v0.8.2）混在一起 |
+
+断言数：`test/smoke.mjs` 236 → **243**（没装 `ocr` 时 229 → **236**）；`test/client-smoke.mjs` 208 项里那条「点击走宿主命令」改成断言带标记的整行。
 
 ### 加固（v0.8.1：v0.8.0 的第一次真机自审 —— 六条「承诺了却没做到」，外加 delegate 一直无视 paths）
 
@@ -717,7 +733,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 236 项 / 没装 229 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host）、v0.8.0 默认引擎与成本/心跳（默认 delegate 且不读机器上的真实配置、pickEngine 三例、每个失败码都有可执行的 nextStep、costHint 对 delegate 静默、心跳区分「还没输出」与「刚有输出」、nextStep 进 schema、心跳接线源码级断言））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 243 项 / 没装 236 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host）、v0.8.0 默认引擎与成本/心跳（默认 delegate 且不读机器上的真实配置、pickEngine 三例、每个失败码都有可执行的 nextStep、costHint 对 delegate 静默、心跳区分「还没输出」与「刚有输出」、nextStep 进 schema、心跳接线源码级断言））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs

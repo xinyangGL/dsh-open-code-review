@@ -3227,6 +3227,107 @@ const preExecute = (listeners) => {
   );
 }
 
+/* v0.9.0：按入口记账（D2）。CPO 评估的 P1-1 判定（按钮 0 点击 ⇒ 默认入口的价值假设不成立）
+   需要一个可核对的数，而不是体感。这里用「必然失败的参数」驱动便宜路径
+   （commit 不给 hash ⇒ OCR_INVALID_ARGS），所以断言与这台机器装没装 ocr 无关。 */
+{
+  mod.resetReviewEntryStats();
+  const entryCtx = makeCtx({ listeners: new Map() });
+  mod.apply(entryCtx, mkConfig({}));
+
+  const noHash = { scope: "commit" };
+  const toolOut = await tools.get("ocr_review").execute(noHash, {});
+  const afterTool = mod.reviewEntryStats();
+  check(
+    "v0.9.0：模型工具那条路记在 tool 桶（started/ok/failed 与失败码都留痕）",
+    toolOut.ok === false &&
+      toolOut.code === "OCR_INVALID_ARGS" &&
+      afterTool.byEntry.tool.started === 1 &&
+      afterTool.byEntry.tool.failed === 1 &&
+      afterTool.byEntry.tool.ok === 0 &&
+      afterTool.byEntry.tool.lastCode === "OCR_INVALID_ARGS" &&
+      afterTool.byEntry.command.started === 0 &&
+      afterTool.byEntry.button.started === 0,
+    JSON.stringify(afterTool.byEntry),
+  );
+
+  /* 命令与按钮本身不执行评审（它们只是往会话里注入一条指令），所以入口只能在**工具调用**上认领：
+     命令处理器留一个待认领的入口，模型随后那次 ocr_review 把它领走。 */
+  const entryAgent = {
+    sent: [],
+    followup(message) {
+      this.sent.push(String(message?.content?.[0]?.text ?? ""));
+    },
+  };
+  const commandDef = commands.get("ocr-review");
+  commandDef.handler({ agent: entryAgent, rawInput: "" });
+  await tools.get("ocr_review").execute(noHash, { agent: entryAgent });
+  const afterCommand = mod.reviewEntryStats();
+  check(
+    "v0.9.0：手输 /ocr-review 后紧跟的那次 ocr_review 记在 command 桶（不糊进 tool）",
+    afterCommand.byEntry.command.started === 1 &&
+      afterCommand.byEntry.command.failed === 1 &&
+      afterCommand.byEntry.command.lastCode === "OCR_INVALID_ARGS" &&
+      afterCommand.byEntry.tool.started === 1,
+    JSON.stringify(afterCommand.byEntry),
+  );
+
+  commandDef.handler({ agent: entryAgent, rawInput: "  重点看并发 --entry=button " });
+  await tools.get("ocr_review").execute(noHash, { agent: entryAgent });
+  const afterButton = mod.reviewEntryStats();
+  const buttonText = String(entryAgent.sent.at(-1) ?? "");
+  check(
+    "v0.9.0：回合尾部按钮（--entry=button 标记）记在 button 桶，且标记不进模型提示词",
+    afterButton.byEntry.button.started === 1 &&
+      !buttonText.includes("--entry=button") &&
+      buttonText.includes("重点看并发"),
+    JSON.stringify({ byEntry: afterButton.byEntry, markerLeaked: buttonText.includes("--entry=button") }),
+  );
+
+  const entryStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+  const entryStatusText = String(
+    tools.get("ocr_status")?.output?.render?.({ checkLlm: false }, entryStatus)?.[0]?.text ?? "",
+  );
+  const entrySchema = tools.get("ocr_status")?.output?.schema ?? {};
+  const byEntrySchema = entrySchema.properties?.stats?.properties?.byEntry ?? {};
+  check(
+    "v0.9.0：ocr_status 报出按入口记账，状态文本里按钮 0 次会被点名（P1-1 要看的就是它）",
+    entryStatus.stats?.byEntry?.button?.started === 1 &&
+      entryStatus.stats.byEntry.tool.started === 1 &&
+      Number.isFinite(entryStatus.stats.since) &&
+      entryStatusText.includes("按入口记账（v0.9.0") &&
+      entryStatusText.includes("button 1 次"),
+    JSON.stringify({ stats: entryStatus.stats, line: entryStatusText.split("\n").find((l) => l.includes("按入口记账")) }),
+  );
+  check(
+    "v0.9.0：stats 进 ocr_status 的 schema（since + 四个入口，各自五个计数）",
+    (entrySchema.properties?.stats?.required ?? []).join(",") === "since,byEntry" &&
+      (byEntrySchema.required ?? []).join(",") === "tool,command,button,auto" &&
+      (entrySchema.required ?? []).includes("stats") &&
+      (byEntrySchema.properties?.tool?.required ?? []).join(",") === "started,ok,failed,lastAt,lastCode",
+    JSON.stringify({ byEntryRequired: byEntrySchema.required, rootHasStats: (entrySchema.required ?? []).includes("stats") }),
+  );
+
+  /* auto 桶不方便在这里真跑（要驱动器整个 turn-stopping 流程），但「记过账」这件事要能被钉住：
+     字段存在 + 源码里确实在中途结算处记了账（不然桶永远是 0 也看不出来）。 */
+  const entryIndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+  check(
+    "v0.9.0：auto 桶存在，且自动评审的开跑/结算两处都真的记了账（源码级）",
+    typeof entryStatus.stats?.byEntry?.auto?.started === "number" &&
+      /noteEntryStart\("auto"\)/.test(entryIndexSource) &&
+      (entryIndexSource.match(/noteEntryResult\("auto"/g) ?? []).length >= 3,
+    JSON.stringify({ auto: entryStatus.stats?.byEntry?.auto, resultCalls: (entryIndexSource.match(/noteEntryResult\("auto"/g) ?? []).length }),
+  );
+
+  /* 没有 skill 桶是**有意的**：模型自发调用与按 skill 说明调用在工具层是同一次调用。
+     这条断言防的是「以后有人为了报表好看造一个猜出来的桶」。 */
+  check(
+    "v0.9.0：只有四个可核对的口径（没有猜出来的 skill 桶）",
+    Object.keys(entryStatus.stats.byEntry).join(",") === "tool,command,button,auto",
+    Object.keys(entryStatus.stats.byEntry).join(","),
+  );
+}
+
 /* v0.5.4：命令注册失败这条路以前是静默的（register() 抛错 → 命令没了，但 ocr_status 与回合尾部按钮
    都以为它在）。放在最后跑：会重新 apply 一个「commands 服务坏掉」的实例并覆盖全局 tools 注册表。 */
 {
