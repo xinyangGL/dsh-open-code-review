@@ -1906,6 +1906,69 @@ check(
   `timeoutMinutes=${hrCapPlan.timeoutMinutes} fallback=${cfgMod.DEFAULTS.maxTimeoutMinutes}`,
 );
 
+/* v0.5.9：把「schema 默认值必须引用 DEFAULTS」从 6 个键扩到全部 —— schemaOverrides() 靠
+   「值等于出厂默认 ⇒ 不算覆盖项」来让 config.json 生效，字面量一旦漂移就会整层遮住文件层。 */
+if (HAS_SCHEMA) {
+  const pairs = [
+    ["enabled", cfgMod.DEFAULTS.enabled],
+    ["engine", cfgMod.DEFAULTS.engine],
+    ["audience", cfgMod.DEFAULTS.audience],
+    ["autoReview", cfgMod.DEFAULTS.auto],
+    ["onDemand", cfgMod.DEFAULTS.onDemand],
+    ["autoScope", cfgMod.DEFAULTS.autoScope],
+    ["autoMaxPerSession", cfgMod.DEFAULTS.autoMaxPerSession],
+    ["autoMinReviewableFiles", cfgMod.DEFAULTS.autoMinReviewableFiles],
+    ["autoMinIntervalMs", cfgMod.DEFAULTS.autoMinIntervalMs],
+    ["autoSkipSubagents", cfgMod.DEFAULTS.autoSkipSubagents],
+    ["autoIncludeDiff", cfgMod.DEFAULTS.autoIncludeDiff],
+    ["preTest", cfgMod.DEFAULTS.preTest],
+    ["timeoutMinutes", cfgMod.DEFAULTS.timeoutMinutes],
+    ["progress", cfgMod.DEFAULTS.progress],
+    ["verbose", cfgMod.DEFAULTS.verbose],
+  ];
+  const drifted = pairs.filter(([name, want]) => schemaDefault(name) !== want).map(([name]) => `${name}=${schemaDefault(name)}≠${cfgMod.DEFAULTS[name] ?? "?"}`);
+  check(
+    "配置（v0.5.9）：设置页里所有带默认值的字段都引用 DEFAULTS（漂移会让 config.json 整层失效）",
+    drifted.length === 0,
+    drifted.length === 0 ? `${pairs.length} 个字段一致` : drifted.join(", "),
+  );
+} else {
+  check(
+    "配置（v0.5.9）：没有 schema 时默认值仍由 DEFAULTS 单点决定（CI 路径）",
+    cfgMod.loadConfig({}).enabled === cfgMod.DEFAULTS.enabled &&
+      cfgMod.loadConfig({}).engine === cfgMod.DEFAULTS.engine &&
+      cfgMod.loadConfig({}).progress === cfgMod.DEFAULTS.progress &&
+      cfgMod.loadConfig({}).verbose === cfgMod.DEFAULTS.verbose,
+    JSON.stringify({ engine: cfgMod.loadConfig({}).engine, progress: cfgMod.loadConfig({}).progress }),
+  );
+}
+
+const autoEngineCases = {
+  empty: cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, autoEngine: "" }).autoEngine,
+  padded: cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, autoEngine: " Delegate " }).autoEngine,
+  bogus: cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, autoEngine: "nope" }).autoEngine,
+};
+check(
+  "配置（v0.5.9）：autoEngine 与 engine 同样收敛（去空白小写；非法值回落空串 = 跟随 engine，不悄悄改成别的引擎）",
+  autoEngineCases.empty === "" && autoEngineCases.padded === "delegate" && autoEngineCases.bogus === "",
+  JSON.stringify(autoEngineCases),
+);
+
+const bigCfg = cfgMod.loadConfig({ includeDiffMaxBytes: 120000000000, maxIssuesInText: 999999 });
+const negCfg = cfgMod.loadConfig({ includeDiffMaxBytes: -1, maxIssuesInText: -5 });
+check(
+  "配置（v0.5.9）：includeDiffMaxBytes / maxIssuesInText 有上界（防手误按「几乎不限制」拼 diff）；负数回落默认，显式 0 仍合法",
+  bigCfg.includeDiffMaxBytes === 10 * 1024 * 1024 &&
+    bigCfg.maxIssuesInText === 2000 &&
+    negCfg.includeDiffMaxBytes === cfgMod.DEFAULTS.includeDiffMaxBytes &&
+    negCfg.maxIssuesInText === cfgMod.DEFAULTS.maxIssuesInText &&
+    hrZeroCfg.includeDiffMaxBytes === 0,
+  JSON.stringify({
+    big: [bigCfg.includeDiffMaxBytes, bigCfg.maxIssuesInText],
+    neg: [negCfg.includeDiffMaxBytes, negCfg.maxIssuesInText],
+  }),
+);
+
 /* v0.3.6：真机 `ocr scan` 复审报出的 5 条。high 那条 = 「ocr 的 --timeout 被夹到 60，
    插件侧硬超时却按 999 分钟算」：同一个分钟数必须只有一个来源，且处处被上限夹住。 */
 const hrMaxCfg = cfgMod.loadConfig({ timeoutMinutes: 999, maxTimeoutMinutes: 120 });

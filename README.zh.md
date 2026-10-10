@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.5.8）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.5.9）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -363,6 +363,17 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 改了 `config.json` 里的 `auto` / `onDemand` / `preTest`，行为没变 | v0.5.8 已修，**两个**原因：① 设置页（schema 实例）带着默认值把这些键整层遮住了（取值等于出厂默认现在不算覆盖项）；② 这三个是「装/卸监听器」的决定，以前只在启动与设置页写入时重算，文件层改动只改了值没重算决定。现在闸门只要插件没被关掉就挂着（`off` 只放行），且三个开关会在下一次工具调用/回合收尾时按文件指纹重新 sync；`ocr_status.preTest.mode` 也是现算的，不会再与文件矛盾 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `guard`（老宿主没有 `tools.guard()` 时回落 `tools/pre-execute`）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
 
+### 加固（v0.5.9：把 v0.5.8 的分层修复钉死，并补上第七轮自审的 9 条）
+
+| 问题 | 现在 |
+| --- | --- |
+| 设置页 schema 里还剩 6 个**字面量**默认值（`enabled` / `engine` / `audience` / `autoScope` / `progress` / `verbose`）：`schemaOverrides()` 靠「值等于出厂默认 ⇒ 不算覆盖」让 `config.json` 生效，字面量一漂移就会把 v0.5.8 修好的分层**再次**弄坏（文件层整层被遮） | 全部改成引用 `DEFAULTS`，并加断言逐个比对 15 个字段（"设置页里所有带默认值的字段都引用 DEFAULTS"） |
+| `runDelegate` 的四条内部诊断（规则 JSON 解析失败 / 没有可审文件 / git diff 不可用 / diff 为空）推进了「调用方传进来、又被调用方自己合并」的数组 ⇒ 直连 `engine: "delegate"` 那条链路没人合并，**用户看不到规格为什么不完整** | 改成推进 `out.notes`：手动、自动、评审 agent 三条链路都能看到 |
+| `catch` 里回滚签名时 `prevSignature` 初值是空串 ⇒ 失败发生在算出新签名**之前**（路由/定位/preview）就会把上一批已评审的签名清空，同一批改动下次写入被重评一次（白花一次 LLM） | 初值改成当前签名；早失败时回滚是空操作 |
+| `autoEngine` 完全没有归一（`engine` 走白名单小写化）⇒ `"Delegate "` 静默退化，外部看不出配置被忽略 | 同样收敛（去空白小写；非法值回落空串 = 跟随 `engine`，不悄悄换成别的引擎） |
+| `includeDiffMaxBytes` / `maxIssuesInText` 只有「非负」没有上界 ⇒ 手误 `120000000000` 会按「几乎不限制」的字节数拼 diff / 渲染问题列表 | 各夹到 10 MiB / 2000 条；显式 `0` 仍合法（= 不带 diff / 不列问题） |
+| `externalConfigPath()` 成了死代码；`preTestCountedCalls` 超上限整体 `clear()` 会重复计数；`runOcrOnce` 的局部 `num` 遮蔽了导入的 `num`；结果前缀 5 层嵌套三元 | 备注真的用 `externalConfigPath()`（「该往哪儿写」的语义）；超上限按插入顺序丢最旧一条；局部函数改名 `toFinite`；嵌套三元改成查表（断言 197 → 200；没装 `ocr` 时 193） |
+
 ### 加固（v0.5.8：配置文件其实一直没生效 + 改了「启停类开关」什么都不发生）
 
 | 问题 | 现在 |
@@ -512,7 +523,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 197 项 / 没装 190 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / guard 与 pre-execute 两种机制 / 覆盖状态随评审与写文件变化 / 文件层指纹与启停同步））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 200 项 / 没装 193 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / guard 与 pre-execute 两种机制 / 覆盖状态随评审与写文件变化 / 文件层指纹与启停同步））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs

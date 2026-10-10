@@ -3,6 +3,38 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.9] — 2026-10-10
+
+第七轮自审（`ocr scan lib/config.js,lib/index.js` → 9 条）逐条处置；其中三条是「会让 v0.5.8 修好的
+分层再次失效」或「用户看不到关键信息」的真实缺陷。
+
+Fixed
+- **设置页 schema 里还剩 6 个字面量默认值**（`enabled` / `engine` / `audience` / `autoScope` /
+  `progress` / `verbose`）：`schemaOverrides()` 的规则是「取值等于出厂默认 ⇒ 不算覆盖项」，
+  这些字面量一旦与 `DEFAULTS` 漂移，Host 实例化出来的默认值就不再等于 `DEFAULTS`，
+  没动过的字段会重新被当成覆盖项、把 `config.json` 整层遮住（正是 0.5.8 修掉的 bug）。
+  现在全部引用 `DEFAULTS`，并有断言逐个比对 15 个字段。
+- **`runDelegate` 的内部诊断备注被静默丢弃**：规则 JSON 解析失败、「没有可审文件」、「git diff
+  不可用/为空」这四条以前推进调用方传进来的数组，而 `runReview` 直连 `engine: "delegate"` 那条
+  链路没人合并 —— 用户看不到规格为什么不完整。现在它们进 `out.notes`（手动、自动、评审 agent
+  三条链路都能看到）。
+- **`catch` 里回滚签名会把有效签名清空**：`prevSignature` 初值是空串、只在算出新签名后才赋值，
+  失败发生在更早（`resolveLlmRoute` / `resolveOcr` / preview）时，回滚等于清空上一批已评审的签名
+   —— 同一批改动下次写入又被重评一次，白花一次 LLM。初值改成当前签名，早失败时回滚是空操作。
+- **`autoEngine` 没有归一**：`engine` 走白名单小写化，`autoEngine` 原样透传 ⇒ `"Delegate "` 会
+  静默退化。现在同样收敛（非法值回落空串 = 跟随 `engine`）。
+- **`includeDiffMaxBytes` / `maxIssuesInText` 没有上界**：手误写成 `120000000000` 会让插件按
+  「几乎不限制」的字节数拼 diff / 渲染问题列表。现在各夹到 10 MiB / 2000 条；显式 `0` 仍然合法。
+- **`externalConfigPath()` 成了死代码**（`ocr_status` 的备注改用 `homeConfigPath()` 之后没人调）：
+  它正是「告诉用户该把覆盖项写到哪儿」的语义（env 优先，否则 `DSH_HOME`），现在备注真的用它。
+- `preTestCountedCalls` 超过 200 条时整体 `clear()` 会连「仍在处理中的调用」一起去重，同一次调用
+  再被问一次就重复计数 → 改成按插入顺序丢最旧一条。
+- `runOcrOnce` 里局部 `const num = ...` 遮蔽了从 `./review.js` 导入的 `num(value, fallback)` → 改名 `toFinite`。
+- 结果前缀的 5 层嵌套三元 → 查表。
+
+测试：smoke 197 → **200**（没装 ocr 193）、bridge-smoke 95、job-smoke 51、reviewer-smoke 45、
+client-smoke 208、cordis-inject 26 全过。
+
 ## [0.5.8] — 2026-10-10
 
 ### Fixed
