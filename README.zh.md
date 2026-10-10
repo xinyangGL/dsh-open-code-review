@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.5.7）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.5.8）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -92,6 +92,8 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 > **页面从哪来**：DSH 的插件页**不会**由宿主 schema 自动生成页面 —— 插件管理页的配置账本只从三个席位读取注册：`plugins.item`（官方插件）、`plugins.bundle.config`（bundle 自带配置）和 `plugins.row.config`（某一行自带页面）。本插件的浏览器半侧 `lib\client.js` 往 `plugins.bundle.config`（key = npm 包名 `dsh-open-code-review`）注册的是 **summary 席位的只读摘要**，往 `settings.section`（一个打开的 list 席位）注册的是独立设置页：id `open-code-review`、order 17、label「代码评审」，完整表单渲染在那里。**首次加上客户端半侧后必须重启一次 DSH 再刷新页面**（见上表）。
 
 配置分三层，实际优先级 **设置页 > 配置文件 > 出厂默认值**（`lib\config.js` 的 `mergeLayers`：`{...DEFAULTS, ...file, ...patch}`）：
+
+> **v0.5.8 起的一条细化**：只有「**取值不等于出厂默认值**」的设置页字段才算覆盖项。原因是 Host 会把插件 schema 实例化 —— 你没动过的字段照样带着 schema 默认值，而 `true` / `3` / `"off"` / `15` 这种默认值本身就"有意义"，无法与"用户显式设成默认值"区分。在此之前这些默认值会把整个配置文件层遮住（约 20 个键的 `config.json` 因此完全无效，真机表现为 `"timeoutMinutes": 7` 却仍按 15 跑）。**已知代价**：若你在设置页把某项显式改回出厂默认、而配置文件里写着别的值，则以配置文件为准。
 
 | 层 | 位置 | 适合放什么 | 生效方式 |
 | --- | --- | --- | --- |
@@ -323,7 +325,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 181 项 / 没装 174 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 197 项 / 没装 190 项）。
 
 ---
 
@@ -358,7 +360,17 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 回合尾部没有「启动代码审核」按钮 | 先看 `ocr_status` 的 `onDemand`（应为 `true`）、`skill.registered` 与 `command.registered`（v0.5.4 起，`false` 说明宿主拒绝了 `/ocr-review` 注册，按钮点了也不会动）；按钮由宿主槽位 `conversation.chat.turnTail` + `remote.commands` 提供，宿主没暴露远端命令服务时按钮不出现（这是设计好的降级，不影响其它入口）。改过 `lib\client.js` 后要刷新页面 |
 | 刚装好/刚重启就问 `ocr_status`，报「桥还没就绪」并回落静态端点 | v0.5.2 已修：本机桥是异步 `listen` 的，`resolveLlmRoute()` 现在会等这次启动完成（最多 2 秒）再算路由，所以**第一次**查询就走桥。慢机器上尤其明显（本机有 `ocr` 时只是因为 `ocr --version` 子进程恰好拖了几十毫秒才侥幸躲过） |
 | 机器上**没装** `ocr` 时 `ocr_status` 自相矛盾（路由行写着本机桥地址，`bridge` 却是 `null`、`llmEnv` 为空）；`ocr_review` 只丢一句「设置 `ocrPath`」，可用户其实还没装 | v0.5.3 已修：与装没装 ocr 无关的字段（`bridge`/`llmEnv`/`onDemand` 备注）改到定位之前算，`ocr_status` 末尾再按最新桥统计刷新一次；定位失败时把安装指引（`installHint`）同时写进 `ocr_review` 的 notes、自动评审的投递文本和 `ocr_status.notes` |
+| 改了 `config.json` 里的 `auto` / `onDemand` / `preTest`，行为没变 | v0.5.8 已修，**两个**原因：① 设置页（schema 实例）带着默认值把这些键整层遮住了（取值等于出厂默认现在不算覆盖项）；② 这三个是「装/卸监听器」的决定，以前只在启动与设置页写入时重算，文件层改动只改了值没重算决定。现在闸门只要插件没被关掉就挂着（`off` 只放行），且三个开关会在下一次工具调用/回合收尾时按文件指纹重新 sync；`ocr_status.preTest.mode` 也是现算的，不会再与文件矛盾 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `guard`（老宿主没有 `tools.guard()` 时回落 `tools/pre-execute`）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+
+### 加固（v0.5.8：配置文件其实一直没生效 + 改了「启停类开关」什么都不发生）
+
+| 问题 | 现在 |
+| --- | --- |
+| **`config.json` 对「设置页里的键」几乎完全没有作用**（真机决定性实验发现，也是上一版症状的真根因）：Host 会把插件 schema 实例化，用户没动过的字段照样带着 schema 默认值（`true` / `3` / `"off"` / `15` …），而 `schemaOverrides()` 只跳过**空值** ⇒ 布尔、数字、枚举的默认值恒被当成「设置页改过」的覆盖项，把第二层（`config.json`）整层遮住。真机证据：`config.json` 里写 `"timeoutMinutes": 7`，桥打印的命令行仍是 `--timeout 15` | 规则改成「**取值恰好等于出厂默认的字段不算覆盖项**」，没动过的字段就此回落到 `config.json`（约 20 个键受益：`enabled`、`engine`、`audience`、`auto`、`onDemand`、`auto*`、`preTest`、`timeoutMinutes`、`progress`、`verbose`、`llm.mode/baseUrl/protocol/apiKeyRef`、`reviewer.agent/provider/rounds`）。已知代价（写进下文「配置」一节）：若你在设置页把某项**显式改回出厂默认**、而 `config.json` 里写着别的值，则以 `config.json` 为准 —— 这两件事在 schema 实例上无法区分 |
+| **在 `config.json` 里写 `"preTest": "gate"` 完全不生效**（v0.5.7 真机复验发现）：闸门没挂上，测试命令照跑；更糟的是 `ocr_status` 仍报「preTest：off」——状态行与配置文件自相矛盾。第二个独立根因：`auto`/`onDemand`/`preTest` 三个决定是「装/卸监听器」级别的，只在 `syncAutoReviewer()` 里重新评估，而它只在启动与设置页写入（`loader/volatile-update`）时被调用；文件层改动只让**每次重读的值**变新（`cfgNow()` 是热的），没有任何东西通知插件「决定要重算」 | ① 闸门只要插件没被整个关掉就挂着（`off` 只是放行，因为 `preTestVerdict()` 每次都读当时的配置），于是 `off → gate` 立刻按新档位办事；② 新增文件层指纹 `__configStamp`（`loadConfig()` 带出），在**本来每回合就会流**的 `tools/result` 与 `agent/turn-stopping` 上比对，指纹变了才重新 sync —— 不用定时器，文件没动时几乎零开销（`configFileStamp()` 只做一次 stat）；③ `ocr_status.preTest.mode` 改成**现算**（取当次配置），不再报告上一次 sync 的结果，机制还没挂上时会明说「改动会在下一次工具调用/回合收尾时生效」 |
+| 用记事本 / PowerShell 另存的 `config.json` 带 UTF-8 BOM，`JSON.parse` 直接报错 ⇒ 整份配置被当成坏文件、静默回落到出厂默认（用户以为配置生效了） | 解析前先剥掉开头的 `\uFEFF` |
+| 离线测试会被自己 checkout 里的 `config.json` 弄红 | `test/smoke.mjs` 那条「preTest 出厂默认 + 三档归一」不再读插件目录的真实配置文件（改用 `DEFAULTS` + `normalizeConfig()`），所以在自己的 checkout 里 pin `preTest` 不会再让冒烟变红（断言 185 → 197；没装 `ocr` 时 190） |
 
 ### 加固（v0.5.7：评审先于测试 —— 用宿主的 guard 契约接进「跑测试之前」，并按自审逐条修掉 6 处）
 
@@ -412,7 +424,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 | 现象（升级前的旧行为） | 现在 |
 | --- | --- |
-| CI（裸 clone + node，没有 npm 全局包）上 24 条断言失败：真链路用例直接 FAIL，job/进度渲染、`render`、自动档注入跟着级联红 | 离线用例按环境换期望值：装了 `ocr` 验真链路，没装就验「定位失败」的诊断路径（`OCR_NOT_FOUND` + 安装指引 + 不误报成功），断言数恒定（现在 181 / 没装 174；v0.5.3 当时是 161 / 155）。CI 现在只用 `node` 就能跑到结尾 |
+| CI（裸 clone + node，没有 npm 全局包）上 24 条断言失败：真链路用例直接 FAIL，job/进度渲染、`render`、自动档注入跟着级联红 | 离线用例按环境换期望值：装了 `ocr` 验真链路，没装就验「定位失败」的诊断路径（`OCR_NOT_FOUND` + 安装指引 + 不误报成功），断言数恒定（现在 197 / 没装 190；v0.5.3 当时是 161 / 155）。CI 现在只用 `node` 就能跑到结尾 |
 | 没装 ocr 时真实调用「在定位那一步就返回」，于是面板/进度行一条 job 都没有 —— 以前这被当成「进度功能坏了」 | 这是有意的 **fail-closed**：绝不显示一条假装在评审的进度行。用例改成守住不变量（登记的 job 都不停在 `running`、id/kind/label 统一、输出环有带时间戳的日志行） |
 
 ### 加固（v0.5.2：桥就绪等待）
@@ -420,7 +432,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 现象（升级前的旧行为） | 现在 |
 | --- | --- |
 | 插件刚加载完就调 `ocr_status` / `ocr_review`：桥还在 `listen`，于是判成「桥没就绪」→ 静默回落 `llm.baseUrl` 静态端点（凭据要按 `llmApiKeyRef` 解析，dsh 模式下通常是没配的） | `resolveLlmRoute()` 开头 `await waitForBridge()`：桥启动是异步的，等它（最多 `BRIDGE_READY_WAIT_MS = 2000`）再决定路由；`ocr_status` 的 `llmRoute`/`llmEndpoint`/`bridge` 三个字段因此始终自洽 |
-| 离线测试用 `setTimeout(150)` 赌桥的 `listen` 完成 | 改成**立刻**查一次就断言桥可用（钉住等待逻辑），两处裸 `bridge.url` 的 `fetch` 加了守卫，桥真的起不来时是 FAIL 而不是把整个套件崩掉（CI 之前就崩在 `test/smoke.mjs:675`）。`test/smoke.mjs` 装了 `ocr` 时 181 项、没装时 174 项（少掉的 7 条是真端到端 `ocr llm test`，其余用例两种环境都跑、只是期望值不同） |
+| 离线测试用 `setTimeout(150)` 赌桥的 `listen` 完成 | 改成**立刻**查一次就断言桥可用（钉住等待逻辑），两处裸 `bridge.url` 的 `fetch` 加了守卫，桥真的起不来时是 FAIL 而不是把整个套件崩掉（CI 之前就崩在 `test/smoke.mjs:675`）。`test/smoke.mjs` 装了 `ocr` 时 197 项、没装时 190 项（v0.5.2 当时是 161 / 155；少掉的 7 条是真端到端 `ocr llm test`，其余用例两种环境都跑、只是期望值不同） |
 
 ### 加固（v0.5.0：按需评审 + 逐条列问题 + 配置收敛）
 
@@ -500,7 +512,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 181 项 / 没装 174 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / guard 与 pre-execute 两种机制 / 覆盖状态随评审与写文件变化））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 197 项 / 没装 190 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / guard 与 pre-execute 两种机制 / 覆盖状态随评审与写文件变化 / 文件层指纹与启停同步））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs

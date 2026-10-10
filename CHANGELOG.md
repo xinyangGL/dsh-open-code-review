@@ -3,6 +3,44 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.8] — 2026-10-10
+
+### Fixed
+
+- **`config.json` was effectively dead for every settings-page field** (the real root cause behind
+  the symptom below). The Host instantiates the plugin's schema, so fields the user never touched
+  still carry the schema default (`true`, `3`, `"off"`, `15`, …), and `schemaOverrides()` only
+  skipped *empty* values — so booleans, numbers and enums were always treated as "set on the
+  settings page" and shadowed the whole file layer. Real-host proof: with `"timeoutMinutes": 7` in
+  `config.json`, the bridge still printed `ocr review … --timeout 15`. The rule is now: **a value
+  that equals the factory default is not an override**, so untouched fields fall through to
+  `config.json` (≈20 keys were affected: `enabled`, `engine`, `audience`, `auto`, `onDemand`,
+  `auto*`, `preTest`, `timeoutMinutes`, `progress`, `verbose`, `llm.mode/baseUrl/protocol/apiKeyRef`,
+  `reviewer.agent/provider/rounds`). Known trade-off, now documented: if you explicitly set a field
+  back to its factory default in the settings page while `config.json` holds a different value, the
+  file wins — the two cases are indistinguishable on a schema instance.
+- **A `config.json` (file-layer) edit did not start or stop anything** — found on a real host right
+  after 0.5.7: writing `"preTest": "gate"` left the gate unarmed (a test command ran straight
+  through) while `ocr_status` still reported `preTest: off`. Independent second bug: the three
+  "install/uninstall a listener" decisions (`auto`, `onDemand`, `preTest`) were only re-evaluated in
+  `syncAutoReviewer()`, which ran on `apply` and on the settings-page hot channel
+  (`loader/volatile-update`) — value-level reads were hot, but nothing told the plugin the *file* had
+  changed. Two changes:
+  - the preTest gate is installed whenever the plugin is enabled (`off` simply allows everything,
+    because `preTestVerdict()` re-reads the current config on every call), so `off` → `gate` in
+    `config.json` takes effect immediately without re-arming;
+  - `auto` / `onDemand` / `preTest` are re-synced from a file-layer fingerprint (`__configStamp`),
+    compared on the events that already flow every turn (`tools/result`, `agent/turn-stopping`) — no
+    timers, and a no-op when the file is unchanged (`configFileStamp()` only stats).
+- `ocr_status.preTest.mode` is now computed from the current config rather than from the last sync,
+  so the status line can no longer disagree with `config.json`; when the gate is not armed yet the
+  state line says so instead of quietly showing `none`.
+- A `config.json` saved with a **UTF-8 BOM** (Notepad, PowerShell `Set-Content`) used to fail
+  `JSON.parse` and be silently replaced by factory defaults; the BOM is now stripped.
+- `test/smoke.mjs`'s preTest "factory default + normalisation" assertion no longer reads the plugin
+  directory's real `config.json`, so pinning `preTest` in your own checkout no longer turns the
+  offline suite red (assertions 185 → 197; 190 without a local `ocr`).
+
 ## [0.5.7] — 2026-10-10
 
 ### Added

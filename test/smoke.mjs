@@ -5,7 +5,7 @@
  * 用法：node test/smoke.mjs [被测仓库路径]
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -415,24 +415,30 @@ const settingsPatch = schemaRefs ?? mkConfig({ llmModel: "deepseek/deepseek-v4.1
 const ref = (value) => Object.freeze({ get: () => value });
 const overrides = cfgMod.schemaOverrides({
   engine: ref("ocr"),
-  autoReview: ref("off"),
+  autoReview: ref("adaptive"),
   timeoutMinutes: ref(20),
   llmModel: ref("deepseek/deepseek-v4.1-flash"),
   llmApiKeyRef: ref("SMOKE_OCR_KEY"),
   ocrPath: ref(""),
-  verbose: ref(false),
+  verbose: ref(true),
 });
 check(
   "schemaOverrides：扁平字段名 → 生效配置路径（llm.* / autoReview→auto / 空串回落）",
   overrides?.llm?.model === "deepseek/deepseek-v4.1-flash" &&
     overrides?.llm?.apiKeyRef === "SMOKE_OCR_KEY" &&
     overrides?.engine === "ocr" &&
-    overrides?.auto === "off" &&
+    overrides?.auto === "adaptive" &&
     overrides?.timeoutMinutes === 20 &&
     overrides?.ocrPath === undefined &&
-    overrides?.verbose === false &&
+    overrides?.verbose === true &&
     cfgMod.schemaOverrides(null) === null,
   JSON.stringify(overrides),
+);
+check(
+  "schemaOverrides（v0.5.8）：取值恰好等于出厂默认的字段不算覆盖项（否则 schema 默认值会把 config.json 整层遮住）",
+  cfgMod.schemaOverrides({ preTest: ref("off"), timeoutMinutes: ref(15), enabled: ref(true), onDemand: ref(true) }) === null &&
+    cfgMod.schemaOverrides({ preTest: ref("gate") })?.preTest === "gate",
+  `${JSON.stringify(cfgMod.schemaOverrides({ preTest: ref("off"), timeoutMinutes: ref(15), enabled: ref(true), onDemand: ref(true) }))} / ${JSON.stringify(cfgMod.schemaOverrides({ preTest: ref("gate") }))}`,
 );
 
 const synthetic = {
@@ -2255,13 +2261,15 @@ check(
    remind 档放行但回来提醒；覆盖状态由成功的 ocr_review 置位、成功的写工具清位。 */
 {
   check(
-    "preTest：出厂默认 off，且三档归一（GATE → gate，不认识的写法回落默认）",
+    "preTest：出厂默认 off，且三档归一（GATE → gate，不认识的写法回落默认）——只看出厂默认与归一，这样本机 config.json 写什么都不影响这条",
     cfgMod.DEFAULTS.preTest === "off" &&
-      cfgMod.loadConfig({}).preTest === "off" &&
-      cfgMod.loadConfig({ preTest: " GATE " }).preTest === "gate" &&
-      cfgMod.loadConfig({ preTest: "nope" }).preTest === "off" &&
-      cfgMod.loadConfig({ preTest: "Remind" }).preTest === "remind",
-    `${cfgMod.DEFAULTS.preTest} / ${cfgMod.loadConfig({ preTest: " GATE " }).preTest} / ${cfgMod.loadConfig({ preTest: "nope" }).preTest}`,
+      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: undefined }).preTest === "off" &&
+      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: " GATE " }).preTest === "gate" &&
+      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: "nope" }).preTest === "off" &&
+      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: "Remind" }).preTest === "remind",
+    `${cfgMod.DEFAULTS.preTest} / ${cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: " GATE " }).preTest} / ${
+      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: "nope" }).preTest
+    }`,
   );
   const exec = (command, name = "pwsh") => ({ name, arguments: { command }, agent: makeAgent() });
   check(
@@ -2381,6 +2389,233 @@ check(
     `handlers=${fbHandlers.length} deny=${JSON.stringify(fbDeny)?.slice(0, 60)} pass=${JSON.stringify(fbPass)}`,
   );
 }
+
+/* v0.5.8：文件层（config.json）没有事件通知，而 auto / onDemand / preTest 的启停是
+   「装/卸监听器」级别的决定 —— 真机上把 preTest 写成 gate，闸门一直没挂上、ocr_status
+   也跟着报 off。修法：闸门只要插件没被关掉就挂着（off 只是放行）+ 借本来就会流的事件
+   对配置指纹、需要时才重新 sync。 */
+{
+  const offListeners = new Map();
+  const offCase = makeCtx({ listeners: offListeners });
+  const offGuards = [];
+  offCase.tools.guard = (fn) => {
+    offGuards.push(fn);
+    return () => {};
+  };
+  mod.apply(offCase, mkConfig({ preTest: "off" }));
+  const offAgent = Object.assign(makeAgent(), { id: "session-pretest-off" });
+  const offExec = { name: "pwsh", arguments: { command: "npm test" }, agent: offAgent };
+  const offVerdict = offGuards.length === 1 ? offGuards[0](offExec) : "（没挂闸门）";
+  check(
+    "v0.5.8：preTest=off 时闸门也挂着（只是放行）—— 这样 config.json 改成 gate 立刻按新档位办事，不用重挂",
+    offGuards.length === 1 &&
+      offVerdict === "" &&
+      mod.preTestStats().mode === "off" &&
+      mod.preTestStats().mechanism === "guard",
+    `guards=${offGuards.length} verdict=${JSON.stringify(offVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
+  );
+
+  const disabledListeners = new Map();
+  const disabledCase = makeCtx({ listeners: disabledListeners });
+  const disabledGuards = [];
+  disabledCase.tools.guard = (fn) => {
+    disabledGuards.push(fn);
+    return () => {};
+  };
+  mod.apply(disabledCase, mkConfig({ enabled: false }));
+  check(
+    "v0.5.8：enabled=false 才真的卸掉闸门（mechanism=none，一个 guard 都不注册）",
+    disabledGuards.length === 0 && mod.preTestStats().mode === "off" && mod.preTestStats().mechanism === "none",
+    `guards=${disabledGuards.length} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
+  );
+
+  const syncListeners = new Map();
+  const syncCase = makeCtx({ listeners: syncListeners });
+  /* autoReview 是设置页 schema 的字段名（schemaOverrides 才把它映射成 auto）：
+     有 schema 时只写 auto 会被丢掉，两个都写上，两种环境下的前提才是真的（OCR 自审指出）。 */
+  mod.apply(syncCase, mkConfig({ auto: "off", autoReview: "off", preTest: "off" }));
+  const resultHooks = (syncListeners.get("tools/result") ?? []).length;
+  const stoppingHooks = (syncListeners.get("agent/turn-stopping") ?? []).length;
+  check(
+    "v0.5.8：auto=off 时也挂了配置指纹钩子（tools/result 与 agent/turn-stopping）——文件层改动靠它们被发现",
+    resultHooks >= 2 && stoppingHooks >= 1,
+    `tools/result=${resultHooks} agent/turn-stopping=${stoppingHooks}`,
+  );
+
+  const stampA = cfgMod.loadConfig({}).__configStamp;
+  const stampB = cfgMod.loadConfig({ preTest: "gate" }).__configStamp;
+  check(
+    "v0.5.8：loadConfig 带文件层指纹 __configStamp（含生效路径；设置页 patch 不影响它，只有文件层变了才变）",
+    typeof stampA === "string" && stampA.length > 0 && stampA.includes(String(cfgMod.loadConfig({}).__configPath)) && stampA === stampB,
+    `${String(stampA).slice(0, 90)} / 相等=${stampA === stampB}`,
+  );
+  /* 轻量指纹（只 stat）必须与完整读取的指纹逐字相等，否则 syncAutoReviewer 的去重会永远失效 ——
+     这条断言就是防两处实现漂移的（OCR 自审要求「别只断钩子挂上了，要断真的会重新同步」）。 */
+  const cheapStamp = cfgMod.configFileStamp();
+  check(
+    "v0.5.8：configFileStamp()（只 stat 的轻量指纹）与 loadConfig().__configStamp 完全一致",
+    typeof cheapStamp === "string" && cheapStamp !== "" && cheapStamp === stampA,
+    `cheap=${String(cheapStamp).slice(0, 60)} full=${String(stampA).slice(0, 60)} 相等=${cheapStamp === stampA}`,
+  );
+}
+
+/* v0.5.8 端到端：把文件层真的从 off 改成 gate，只靠「本来就会流的事件」+ 指纹去重，
+   闸门就必须按新档位拦下测试命令（这是那条真机缺陷的回归测试，不是「钩子挂上了」级别的检查）。 */
+{
+  const tmpConfig = join(tmpdir(), `ocr-smoke-pretest-${process.pid}.json`);
+  const prevEnv = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+  const flipListeners = new Map();
+  const flipCase = makeCtx({ listeners: flipListeners });
+  const flipGuards = [];
+  flipCase.tools.guard = (fn) => {
+    flipGuards.push(fn);
+    return () => {};
+  };
+  try {
+    writeFileSync(tmpConfig, JSON.stringify({ preTest: "off" }));
+    process.env.DSH_OPEN_CODE_REVIEW_CONFIG = tmpConfig;
+    mod.apply(flipCase, mkConfig({ auto: "off", autoReview: "off" }));
+    const modeBefore = mod.preTestStats().mode;
+    const keep = flipGuards.length === 1 ? flipGuards[0]({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-keep" }) }) : "（没挂闸门）";
+
+    /* 文件层改成 gate：不改任何设置页字段、不重挂监听器 */
+    writeFileSync(tmpConfig, JSON.stringify({ preTest: "gate" }));
+    for (const hook of flipListeners.get("tools/result") ?? []) {
+      hook({ name: "read", arguments: { path: "x" }, isError: false, value: {} });
+    }
+    /* syncIfConfigChanged 把重活放在微任务里，等两轮宏任务确保跑完 */
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const modeAfter = mod.preTestStats().mode;
+    /* `tools.guard()` 的契约是「返回拒绝理由字符串；放行返回空串」（pre-execute 那条路才是
+       {kind:deny,reason}），所以这里按字符串断。 */
+    const verdict = flipGuards.length === 1 ? flipGuards[0]({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-deny" }) }) : "（没挂闸门）";
+    check(
+      "v0.5.8：文件层 off → gate 之后，下一次 tools/result 就按新档位拦下测试命令（端到端，不用重启也不用设置页）",
+      modeBefore === "off" &&
+        keep === "" &&
+        modeAfter === "gate" &&
+        typeof verdict === "string" &&
+        verdict.includes("评审先于测试"),
+      `before=${modeBefore} keep=${JSON.stringify(keep)} after=${modeAfter} verdict=${JSON.stringify(verdict)}`,
+    );
+  } finally {
+    if (prevEnv === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+    else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = prevEnv;
+    try {
+      rmSync(tmpConfig, { force: true });
+    } catch {
+      /* 清理失败不影响断言 */
+    }
+    cfgMod.loadConfig({});
+  }
+}
+
+/* v0.5.8 三层优先级修（真机决定性实验的回归）：Host 把 schema 实例化后，用户没动过的字段
+   也带着 schema 默认值（true / 3 / "off" / 15 …），旧实现只跳过「空值」⇒ 布尔/数字/枚举
+   的默认值恒被当成设置页覆盖项，把 config.json（第二层）整个遮住。真机上表现为
+   config.json 写 timeoutMinutes:7 → 运行时仍按 15、写 preTest:"gate" → 闸门不生效。
+   规则：取值恰好等于出厂默认的字段不算覆盖（与设置页「没标已改」一致）。 */
+{
+  const tmpConfig = join(tmpdir(), `ocr-smoke-layer-${process.pid}.json`);
+  const prevEnv = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+  try {
+    check(
+      "v0.5.8：设置页没动过任何字段时不产生覆盖项（schema 实例带着默认值，但文件层因此仍拿得到话事权）",
+      cfgMod.schemaOverrides(mkConfig({})) === null,
+      `overrides=${JSON.stringify(cfgMod.schemaOverrides(mkConfig({})))}`,
+    );
+    check(
+      "v0.5.8：设置页真改过的字段仍然覆盖文件层（preTest=gate 不是默认值，必须留下）",
+      cfgMod.schemaOverrides(mkConfig({ preTest: "gate" }))?.preTest === "gate",
+      `overrides=${JSON.stringify(cfgMod.schemaOverrides(mkConfig({ preTest: "gate" })))}`,
+    );
+    /* 带 BOM 写：记事本 / PowerShell 另存为 UTF-8 会加 BOM，旧实现直接 parse 失败、
+       整份配置被当坏文件回落到出厂默认（用户以为配置生效了）。 */
+    writeFileSync(tmpConfig, `\uFEFF${JSON.stringify({ preTest: "gate", timeoutMinutes: 7 })}`, "utf8");
+    process.env.DSH_OPEN_CODE_REVIEW_CONFIG = tmpConfig;
+    const merged = cfgMod.loadConfig(cfgMod.schemaOverrides(mkConfig({})));
+    check(
+      "v0.5.8：config.json 的 preTest=gate / timeoutMinutes=7 真的生效（设置页没改过这两项，不再被 schema 默认值遮住）",
+      merged.preTest === "gate" && merged.timeoutMinutes === 7 && !merged.__configError,
+      `preTest=${merged.preTest} timeoutMinutes=${merged.timeoutMinutes} error=${String(merged.__configError)}`,
+    );
+    check(
+      "v0.5.8：配置文件带 UTF-8 BOM（记事本/PowerShell 另存）不再被当成坏文件",
+      cfgMod.loadConfig({}).preTest === "gate" && !cfgMod.loadConfig({}).__configError,
+      `preTest=${cfgMod.loadConfig({}).preTest} error=${String(cfgMod.loadConfig({}).__configError)}`,
+    );
+    const withSetting = cfgMod.loadConfig(cfgMod.schemaOverrides(mkConfig({ timeoutMinutes: 20 })));
+    check(
+      "v0.5.8：设置页真改过的项仍然优先（timeoutMinutes=20 压过文件层的 7），同一份文件的其它键照常生效",
+      withSetting.timeoutMinutes === 20 && withSetting.preTest === "gate",
+      `timeoutMinutes=${withSetting.timeoutMinutes} preTest=${withSetting.preTest}`,
+    );
+  } finally {
+    if (prevEnv === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+    else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = prevEnv;
+    try {
+      rmSync(tmpConfig, { force: true });
+    } catch {
+      /* 清理失败不影响断言 */
+    }
+    cfgMod.loadConfig({});
+  }
+}
+
+/* v0.5.8 二批（OCR 自审 lib/config.js 的发现）：归一过程不能就地改掉调用方传入的嵌套块
+   （`plain()` 返回浅拷贝）；auto 是四档枚举，但 config.json 里写成开关键（true/"on"/1）
+   也得按 boolLike 的宽容度认。注意断言要看**调用方那个对象**有没有被改写 ——
+   只断 DEFAULTS 会不会变是不够的（传进去的是新副本时旧实现也能过，等于没测到）。 */
+{
+  const llmInput = { ...cfgMod.DEFAULTS.llm, protocol: " OpenAI " };
+  const reviewerInput = { ...cfgMod.DEFAULTS.reviewer, rounds: "3" };
+  const norm = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, llm: llmInput, reviewer: reviewerInput });
+  check(
+    "v0.5.8：normalizeConfig 不就地改调用方传入的嵌套块（llmInput/reviewerInput 保持原样），但结果照常收敛",
+    llmInput.protocol === " OpenAI " &&
+      reviewerInput.rounds === "3" &&
+      norm.llm !== llmInput &&
+      norm.reviewer !== reviewerInput &&
+      norm.llm.protocol === "openai" &&
+      norm.reviewer.rounds === 3,
+    `输入 protocol=${JSON.stringify(llmInput.protocol)} rounds=${JSON.stringify(reviewerInput.rounds)} 结果 protocol=${
+      norm.llm.protocol
+    } rounds=${norm.reviewer.rounds} 同一引用=${norm.llm === llmInput}`,
+  );
+
+  const llmBefore = JSON.stringify(cfgMod.DEFAULTS.llm);
+  const reviewerBefore = JSON.stringify(cfgMod.DEFAULTS.reviewer);
+  const shallow = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS }); // 浅拷贝 DEFAULTS：嵌套块与 DEFAULTS 同一个引用
+  check(
+    "v0.5.8：浅拷贝 DEFAULTS 进去也不会把出厂默认的嵌套块就地写掉（normalizeConfig 换了新对象）",
+    JSON.stringify(cfgMod.DEFAULTS.llm) === llmBefore &&
+      JSON.stringify(cfgMod.DEFAULTS.reviewer) === reviewerBefore &&
+      shallow.llm !== cfgMod.DEFAULTS.llm &&
+      shallow.reviewer !== cfgMod.DEFAULTS.reviewer,
+    `llm 未变=${JSON.stringify(cfgMod.DEFAULTS.llm) === llmBefore} reviewer 未变=${
+      JSON.stringify(cfgMod.DEFAULTS.reviewer) === reviewerBefore
+    } 新对象=${shallow.llm !== cfgMod.DEFAULTS.llm}/${shallow.reviewer !== cfgMod.DEFAULTS.reviewer}`,
+  );
+
+  const autoCases = [
+    ["on", "adaptive"],
+    ["true", "adaptive"],
+    [1, "adaptive"],
+    ["off", "off"],
+    ["0", "off"],
+    [false, "off"],
+    ["inject", "inject"],
+    ["nope", cfgMod.DEFAULTS.auto],
+  ];
+  const autoGot = autoCases.map(([input]) => cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, auto: input }).auto);
+  check(
+    "v0.5.8：auto 写成开关键也认（true/\"on\"/1 → adaptive，false/\"0\" → off），枚举值与非法值照旧",
+    autoCases.every(([, want], i) => autoGot[i] === want),
+    autoCases.map(([input], i) => `${JSON.stringify(input)}→${autoGot[i]}`).join(" · "),
+  );
+}
 {
   const registered = [];
   const skillCtx = makeCtx();
@@ -2393,6 +2628,15 @@ check(
   mod.apply(skillCtx, mkConfig({ onDemand: true }));
   const onDemandStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
   const def = registered[0];
+  /* SCHEMA_AVAILABLE=false 有两种原因，状态文本要分得清（别把「生成失败」说成「缺包」）—— OCR 自审发现。*/
+  check(
+    "v0.5.8：SCHEMA_ERROR 与 SCHEMA_AVAILABLE 自洽（有 schema 就没错误；否则状态文本分得清「缺包」与「生成失败」）",
+    (cfgMod.SCHEMA_AVAILABLE === true && cfgMod.SCHEMA_ERROR === "") ||
+      (cfgMod.SCHEMA_AVAILABLE === false &&
+        typeof cfgMod.SCHEMA_ERROR === "string" &&
+        String(onDemandStatus.settingsPage).includes(cfgMod.SCHEMA_ERROR ? "生成设置页 schema 失败" : "缺少 @deepseek-ai/schemastery")),
+    `available=${cfgMod.SCHEMA_AVAILABLE} error=${JSON.stringify(cfgMod.SCHEMA_ERROR)} settingsPage=${String(onDemandStatus.settingsPage)}`,
+  );
   check(
     "v0.5.0 步骤 3：有 skills 服务时注册 ocr-on-demand-review（描述/触发条件/汇报格式齐全，ocr_status 报 registered=true）",
     registered.length === 1 &&
