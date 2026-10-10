@@ -8,6 +8,8 @@ import {
   BRIDGE_COMPLETIONS_PATH,
   CLOSE_GRACE_MS,
   MAX_BODY_BYTES,
+  SELF_ABORT_MESSAGES,
+  SELF_ABORT_RE,
   accumulateUsage,
   bearerTokenOf,
   bridgeFailureNote,
@@ -33,9 +35,8 @@ function check(name, ok, detail = "") {
   if (!ok) failures += 1;
 }
 
-function log(message) {
-  console.log("      · " + message);
-}
+/** ocr 会在 OCR_LLM_URL（= bridge.url，已含 /v1）后面拼这一段：从常量派生，避免测试写死路径。 */
+const COMPLETIONS_SUFFIX = BRIDGE_COMPLETIONS_PATH.replace(/^\/v1/, "");
 
 function text(value) {
   return JSON.stringify(value);
@@ -97,10 +98,11 @@ async function waitFor(predicate, timeoutMs = 3000) {
       source?.kind === "model" && source.provider === "commandcode" && source.model === "deepseek/deepseek-v4.1-flash" && source.replayState === undefined,
       text(source),
     );
+    const fallbackSource = toDshMessages([{ role: "assistant", content: "hi" }]).messages[0].source;
     check(
-      "toDshMessages：没给路由时也不缺 source（宁可为空串，也不能 undefined）",
-      typeof toDshMessages([{ role: "assistant", content: "hi" }]).messages[0].source === "object",
-      text(toDshMessages([{ role: "assistant", content: "hi" }]).messages[0]),
+      "toDshMessages：没给路由时也不缺 source（宁可为空串，也不能 undefined —— 宿主把 null 也当缺）",
+      fallbackSource !== null && typeof fallbackSource === "object",
+      text(fallbackSource),
     );
     check(
       "toDshMessages：role=tool 变 DSH 的 tool 消息（带 toolCallId + source.kind=tool）",
@@ -235,7 +237,7 @@ function hostAssistantSourceProblems(calls) {
 
 async function post(base, token, body, headers = {}) {
   // base 已经是 http://127.0.0.1:<port>/v1，ocr 自己会拼 /chat/completions。
-  const response = await fetch(base + "/chat/completions", {
+  const response = await fetch(base + COMPLETIONS_SUFFIX, {
     method: "POST",
     headers: { "content-type": "application/json", ...(token === null ? {} : { authorization: "Bearer " + token }), ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
@@ -265,7 +267,7 @@ const wrongToken = await post(happyBridge.url, "deadbeef", { model: "m", message
 check("桥：token 不对 → 401", wrongToken.status === 401, String(wrongToken.status));
 const wrongPath = await fetch("http://127.0.0.1:" + happyBridge.port + "/v1/models", { headers: { authorization: "Bearer " + happyBridge.token } });
 check("桥：只提供 /v1/chat/completions，其它路径 → 404", wrongPath.status === 404, String(wrongPath.status));
-const getCall = await fetch(happyBridge.url + "/chat/completions", { headers: { authorization: "Bearer " + happyBridge.token } });
+const getCall = await fetch(happyBridge.url + COMPLETIONS_SUFFIX, { headers: { authorization: "Bearer " + happyBridge.token } });
 check("桥：非 POST → 404", getCall.status === 404, String(getCall.status));
 
 const ok = await post(happyBridge.url, happyBridge.token, {
@@ -398,7 +400,7 @@ const hangBridge = await startLlmBridge({
   logger,
 });
 const hangAc = new AbortController();
-const hangPending = fetch(hangBridge.url + "/chat/completions", {
+const hangPending = fetch(hangBridge.url + COMPLETIONS_SUFFIX, {
   method: "POST",
   headers: { "content-type": "application/json", authorization: "Bearer " + hangBridge.token },
   body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "u" }] }),
@@ -416,8 +418,45 @@ await waitFor(() => hangBridge.describe().inflight === 0);
 check("桥：客户端断开后 inflight 归零", hangBridge.describe().inflight === 0, text(hangBridge.describe()));
 await hangPending;
 
+/* v0.5.5（自审发现）：上游可能「不理 signal、照常把流跑完」（复用同一条流、或实现里没看 signal）。
+   这时桥绝不能把结果写回已经销毁的 socket —— res.write 会同步抛 ERR_STREAM_DESTROYED，而
+   res.on("error") 只吞 'error' 事件，盖不住同步异常（未处理异常足以杀掉宿主进程）；也不该把自己
+   掐断的这次调用记成「上游失败」。 */
+const stubbornCalls = [];
+const stubbornBridge = await startLlmBridge({
+  stream: async function* stream(options) {
+    stubbornCalls.push(options);
+    yield { type: "text-delta", text: "late" };
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    yield { type: "finish", reason: { kind: "stop" } };
+  },
+  target: () => ({ provider: "p", model: "m" }),
+  logger,
+});
+const stubbornAc = new AbortController();
+const stubbornPending = fetch(stubbornBridge.url + COMPLETIONS_SUFFIX, {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: "Bearer " + stubbornBridge.token },
+  body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "u" }] }),
+  signal: stubbornAc.signal,
+}).catch(() => null);
+await waitFor(() => stubbornCalls.length > 0);
+stubbornAc.abort();
+await waitFor(() => stubbornCalls[0]?.signal?.aborted === true);
+await waitFor(() => stubbornBridge.describe().inflight === 0, 5000);
+check(
+  "桥（v0.5.5）：上游忽略 abort 照常跑完 → 不写已销毁的 socket（不然是未处理异常）、也不误记成上游失败",
+  stubbornBridge.describe().failed === 0 &&
+    stubbornBridge.describe().retries === 0 &&
+    stubbornBridge.describe().inflight === 0 &&
+    stubbornCalls.length === 1,
+  text(stubbornBridge.describe()),
+);
+await stubbornPending;
+await stubbornBridge.close();
+
 /* 关桥：客户端挂着连接（keep-alive）时也要在宽限期内返回，不能挂死插件卸载。 */
-const keepAlive = fetch(hangBridge.url + "/chat/completions", {
+const keepAlive = fetch(hangBridge.url + COMPLETIONS_SUFFIX, {
   method: "POST",
   headers: { "content-type": "application/json", authorization: "Bearer " + hangBridge.token },
   body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "u" }] }),
@@ -442,7 +481,50 @@ check("桥：上游失败计数进 stats", failBridge.stats.failed === 1 && fail
 const throwing = fakeStream([{ __throw: "适配器炸了" }]);
 const throwBridge = await startLlmBridge({ stream: throwing.stream, target: () => ({ provider: "p", model: "m" }), logger });
 const thrown = await post(throwBridge.url, throwBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
-check("桥：stream 抛异常 → 500 而不是让 http 挂住", thrown.status === 500 && thrown.json.error.message.includes("适配器炸了"), thrown.status + " " + thrown.raw.slice(0, 160));
+check(
+  "桥（v0.5.4）：stream 抛异常 → 归一成上游 failure（502 + OpenAI 错误体），不再让异常穿透到外层 catch",
+  thrown.status === 502 && thrown.json.error.message.includes("适配器炸了") && thrown.json.error.code === "upstream_error",
+  thrown.status + " " + thrown.raw.slice(0, 160),
+);
+check(
+  "桥（v0.5.4）：抛出的异常也走既有判定（不可重试的错误记 retrySkip，不谎报重试）",
+  throwBridge.stats.failed === 1 && throwBridge.stats.retries === 0 && throwBridge.stats.retrySkips === 1 && String(throwBridge.stats.retrySkipReason).length > 0,
+  text(throwBridge.describe()),
+);
+
+/* 抛出的是「明确值得重试」的网络错误时，以前永远不会重试（异常直接穿透整个循环）——这条钉住修复。 */
+const flakyThrow = fakeStream((options, call) =>
+  call === 1
+    ? [{ __throw: "socket hang up" }]
+    : [
+        { type: "text-delta", text: "recovered" },
+        { type: "finish", reason: { kind: "stop" } },
+      ],
+);
+const flakyBridge = await startLlmBridge({ stream: flakyThrow.stream, target: () => ({ provider: "p", model: "m" }), logger });
+const recovered = await post(flakyBridge.url, flakyBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+check(
+  "桥（v0.5.4）：抛出的瞬时网络错误 → 自动重试一次并成功（RETRYABLE_UPSTREAM_RE 终于对抛出的异常也生效）",
+  recovered.status === 200 &&
+    recovered.json.choices[0].message.content === "recovered" &&
+    flakyBridge.stats.retries === 1 &&
+    flakyBridge.stats.failed === 0,
+  recovered.status + " " + JSON.stringify(recovered.json).slice(0, 160) + " " + text(flakyBridge.describe()),
+);
+
+/* 上游「流正常结束但既没有 finish 事件、也没有内容」= 典型的截断；以前会当成空成功交给 ocr。 */
+const truncated = fakeStream([]);
+const truncBridge = await startLlmBridge({ stream: truncated.stream, target: () => ({ provider: "p", model: "m" }), logger });
+const truncRes = await post(truncBridge.url, truncBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+check(
+  "桥（v0.5.4）：没有 finish 事件也没有内容的流 → 判成 upstream_truncated 失败（不再静默当空成功），并重试过一次",
+  truncRes.status === 502 &&
+    truncRes.json.error.code === "upstream_truncated" &&
+    truncRes.json.error.message.includes("stream ended before a terminal") &&
+    truncBridge.stats.failed === 1 &&
+    truncBridge.stats.retries === 1,
+  truncRes.status + " " + truncRes.raw.slice(0, 200) + " " + text(truncBridge.describe()),
+);
 
 const noRoute = await startLlmBridge({ stream: happy.stream, target: () => ({ provider: "", model: "" }), logger });
 const unrouted = await post(noRoute.url, noRoute.token, { model: "m", messages: [{ role: "user", content: "u" }] });
@@ -564,7 +646,7 @@ try {
 }
 check("桥：close() 之后端口关掉、请求失败", closed === true);
 
-for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge, retryBridge, noRetryBridge, retryStreamBridge]) await bridge.close();
+for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge, retryBridge, noRetryBridge, retryStreamBridge, flakyBridge, truncBridge]) await bridge.close();
 
 /* M1（v0.4.0）：重试闸门的三分支 + token 累计 + 「没重试」的原因。
    真机踩过的坑：v0.3.7 把 kind==="aborted" 摆在判定最前面，于是上游标成 aborted 的
@@ -579,6 +661,15 @@ for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge
   });
   const rateLimited = classifyUpstreamFailure({ kind: "error", code: "x", message: "上游 429 rate limit exceeded" });
   const unknown = classifyUpstreamFailure({ kind: "aborted", code: "aborted", message: "莫名其妙地结束了" });
+  /* v0.5.5（自审发现）：三条「我方主动中止」的文案由 SELF_ABORT_MESSAGES 生成正则，不再是两处各写一遍。
+     谁改了 abort 文案却忘了正则，这里立刻红 —— 否则「我方中止」会被误判成可重试的上游故障。 */
+  const selfAbortMessages = Object.values(SELF_ABORT_MESSAGES);
+  check(
+    "桥（v0.5.5）：SELF_ABORT_MESSAGES 三条文案都被 SELF_ABORT_RE 认出来（文案与判定不再各写一份）",
+    selfAbortMessages.length === 3 &&
+      selfAbortMessages.every((message) => SELF_ABORT_RE.test(message) && classifyUpstreamFailure({ kind: "error", code: "x", message }).retryable === false),
+    selfAbortMessages.join(" / "),
+  );
   check(
     "桥（M1）：classifyUpstreamFailure 三分支 —— 我方中止不重试 / 瞬时故障重试 / aborted 但文本不认识也不重试并给原因",
     self.retryable === false &&
@@ -610,7 +701,7 @@ for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge
 }
 /* v0.5.0 步骤 5：token 口径 —— 上游只报 total 的次数单独计数（真机「累计 415736（输入 40882 / 输出 52550）」的缺口来源）。 */
 {
-  const totals = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, partial: 0 };
+  const totals = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, partial: 0 };
   accumulateUsage(totals, { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 });
   accumulateUsage(totals, { total_tokens: 100 });
   accumulateUsage(totals, { prompt_tokens: 2, total_tokens: 5 });

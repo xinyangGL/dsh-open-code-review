@@ -255,7 +255,7 @@ With `progress = true` (default) every review is registered as a background job 
 
 ## Hardening history
 
-The v0.3.0 → v0.5.4 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md).
+The v0.3.0 → v0.5.5 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md). 0.5.5 is what the plugin found by reviewing its own diff with `ocr_review`: thrown upstream errors were never retried, a stream that ended without a terminal event was reported as an empty success, streaming dropped the text when a tool call was also present, the response builder took an unused `model` argument, writes could still hit a dead socket after the client disconnected (an unhandled `ERR_STREAM_DESTROYED` that can kill the host), and the three "we aborted it ourselves" messages were duplicated instead of generated from one constant.
 
 ## Development & tests
 
@@ -266,7 +266,7 @@ Six dependency-free suites (`node test/<name>.mjs`), item counts as actually run
 | `node test/smoke.mjs` | 165 (158 without `ocr` — same environment as CI) | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, config layering/sources, per-line findings, bridge readiness, token/cache accounting, `/ocr-review` registration state. Checks that need the real `ocr` binary swap their expectations for the “not installed” diagnostics path instead of failing, so CI (a bare clone) is green too. |
 | `node test/job-smoke.mjs` | 51 | Review progress: registration, progress line, output stream, stop → cancel, idempotent settlement. |
 | `node test/reviewer-smoke.mjs` | 45 | Reviewer subagent logic: prompt, structured parsing, rounds, failure/timeout (aborts the in-flight child). |
-| `node test/bridge-smoke.mjs` | 84 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams, client disconnects and token accounting (prompt / completion / total / cache read / cache write / partial). |
+| `node test/bridge-smoke.mjs` | 89 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams (silent truncation → `upstream_truncated`, retried once), upstream errors that arrive by throwing (`socket hang up` → retried and recovered), an upstream that ignores the abort and finishes after the client left (no write into a dead socket, no bogus failure), client disconnects and token accounting (prompt / completion / total / cache read / cache write / partial). |
 | `node test/client-smoke.mjs` | 206 | Browser half with a mini React: settings form (basics + collapsible advanced), card summary, in-session progress row, turn-tail review button. |
 | `node test/cordis-inject.mjs` | 26 | Real-cordis regression across three host shapes (all services / remote.session missing / no remote). |
 

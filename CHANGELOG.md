@@ -3,6 +3,56 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.5] — 2026-10-10
+
+### Fixed
+
+Four defects the plugin found in the local bridge **by reviewing its own diff with `ocr_review`**
+(`ocr scan lib/bridge.js`) after 0.5.4:
+
+- **Upstream errors that arrive by throwing were never retried.** The retry loop is
+  `for await (const chunk of await stream(options))`, and that call sat outside any `try`. A thrown
+  network failure (`fetch failed`, `ECONNRESET`, `socket hang up`, `ETIMEDOUT`, `premature close`) —
+  all of them listed in `RETRYABLE_UPSTREAM_RE` — propagated past the whole loop, so the classifier
+  was never consulted; and with the SSE headers already sent the outer catch could only `res.end()`,
+  leaving the client with a `200` and a half-written stream (no error frame, no `[DONE]`). A throw is
+  now normalised into the same `failure` the finish-chunk path produces (`code: "upstream_error"`),
+  so it is classified, counted and retried exactly like any other upstream failure.
+- **A stream that ended without a terminal event was reported as an empty success.** If the upstream
+  closed without a `finish` chunk and without any content, `failure()` returned `null` and the bridge
+  answered `content: ""` with `finish_reason: "stop"` — silently losing the review while ocr counted
+  it as a completed request. The accumulator now exposes `truncated()` and such a stream fails with
+  `code: "upstream_truncated"` (`OpenAI Responses stream ended before a terminal response event…`,
+  which the retry classifier treats as transient, so the retry path finally covers this case too).
+- **Streaming dropped the assistant text whenever the model also called a tool.** `openAiStreamFrames`
+  emitted only the tool frames (the plain-text frame lived in the `else` branch), while
+  `openAiMessage()` puts that text into `message.content` for non-streaming requests. The content
+  frame is now emitted first, in both branches.
+- **`openAiMessage(model)` took an unused `model` parameter**, which made it look like the model was
+  part of the response contract. Dropped.
+- **A response was still written after the client was gone.** `controller.abort()` only *asks* the
+  upstream to stop; an upstream that ignores the signal (or reuses one stream) finishes normally,
+  and the bridge then wrote into a destroyed socket — `res.write` throws `ERR_STREAM_DESTROYED`
+  synchronously, and `res.on("error")` only swallows the `'error'` **event**, so the throw escaped
+  the request callback as an unhandled exception (enough to kill the host). Every write now goes
+  through a `clientGone()` gate plus `try`/`catch` (and `sendJson` is defensive too), and a result
+  that arrives after we already aborted is dropped instead of being counted as an upstream failure.
+- **The three "we aborted it ourselves" messages were duplicated between the abort sites and
+  `SELF_ABORT_RE`.** They only matched by substring luck: editing the abort text (e.g. to
+  「客户端已断开」) would silently reclassify our own cancellation as a retryable upstream glitch —
+  and the retry would burn quota for a client that had already left. The messages now live in
+  `SELF_ABORT_MESSAGES` and the regex is generated from them.
+
+`test/bridge-smoke.mjs` grew from 84 to 89 assertions: the old "a throwing stream → 500" expectation
+became "→ 502 + `upstream_error`" (plus its retry bookkeeping), and new cases cover a thrown
+retryable error that recovers on the second attempt (`socket hang up` → 200, `retries: 1`), a
+silent truncation (`fakeStream([])` → `upstream_truncated`, `failed: 1`, `retries: 1`), an upstream
+that ignores the abort and finishes anyway (no write to a dead socket, no bogus failure count), and
+the abort-message/`SELF_ABORT_RE` drift guard. Test hygiene from the same review: the completions
+path is derived from `BRIDGE_COMPLETIONS_PATH` instead of a literal, the assistant-`source`
+assertion no longer accepts `null`, a dead helper was removed, and two bridges that were never
+closed now are. No behaviour change on the happy path.
+
 ## [0.5.4] — 2026-10-09
 
 ### Fixed

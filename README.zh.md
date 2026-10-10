@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.5.4）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.5.5）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -337,6 +337,20 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 刚装好/刚重启就问 `ocr_status`，报「桥还没就绪」并回落静态端点 | v0.5.2 已修：本机桥是异步 `listen` 的，`resolveLlmRoute()` 现在会等这次启动完成（最多 2 秒）再算路由，所以**第一次**查询就走桥。慢机器上尤其明显（本机有 `ocr` 时只是因为 `ocr --version` 子进程恰好拖了几十毫秒才侥幸躲过） |
 | 机器上**没装** `ocr` 时 `ocr_status` 自相矛盾（路由行写着本机桥地址，`bridge` 却是 `null`、`llmEnv` 为空）；`ocr_review` 只丢一句「设置 `ocrPath`」，可用户其实还没装 | v0.5.3 已修：与装没装 ocr 无关的字段（`bridge`/`llmEnv`/`onDemand` 备注）改到定位之前算，`ocr_status` 末尾再按最新桥统计刷新一次；定位失败时把安装指引（`installHint`）同时写进 `ocr_review` 的 notes、自动评审的投递文本和 `ocr_status.notes` |
 
+### 加固（v0.5.5：拿 `ocr_review` 评审自己的 diff 查出并修掉的四个桥缺陷）
+
+这一版不是真机事故驱动的，而是**用插件自己的 `ocr scan lib/bridge.js` 评审 0.5.4 的改动**时它报出来的四条：
+
+| 现象（升级前的旧行为） | 现在 |
+| --- | --- |
+| 上游以**抛出**的形式失败（`fetch failed` / `ECONNRESET` / `socket hang up` / `ETIMEDOUT` / `premature close`——全都写在 `RETRYABLE_UPSTREAM_RE` 里）时异常直接穿透重试循环：分类器根本没被问过，**永远不重试**；SSE 头已发时外层捕获只能 `res.end()`，客户端拿到「200 + 半截流」（既无 error 帧也无 `[DONE]`） | `for await (const chunk of await stream(options))` 包进 try/catch，抛出的异常归一成与 finish 块同一种 `failure`（`code: "upstream_error"`），于是和别的上游失败一样被分类、计数、重试（`bridge-smoke` 新增「抛出的瞬时错误重试一次并成功」） |
+| 上游没发 finish 事件、也没有任何内容就结束（正是 `OpenAI Responses stream ended before a terminal response event` 那类截断）时 `failure()` 返回 `null` → 桥当成**空成功**（`content: ""` + `finish_reason: "stop"`）交给 ocr，一轮评审静默丢掉 | accumulator 新增 `truncated()`；这种流判成 `code: "upstream_truncated"` 失败（文案命中重试白名单，因此也走重试），不再谎报成功 |
+| 模型同时给正文和工具调用时，流式分支（`openAiStreamFrames`）只发工具帧、把 `state.text` 丢掉，而非流式 `openAiMessage()` 会把它放进 `message.content` —— 同一份 accumulator 两条路径不一致 | 正文帧改成两个分支都先发，流式与非流式一致 |
+| `openAiMessage(model)` 的 `model` 形参从未使用，看起来像「模型是响应契约的一部分」 | 去掉该形参 |
+| 客户端断开后仍然往 `res` 写：`controller.abort()` 只是**请求**上游停下，上游若不理 signal（或复用同一条流）会照常跑完，于是往已销毁的 socket 写 → `res.write` 同步抛 `ERR_STREAM_DESTROYED`，而 `res.on("error")` 只吞 'error' **事件**，异常逃出请求回调就是未处理异常（足以杀掉宿主进程）。另外「我方中止」的三句文案在 abort 处和 `SELF_ABORT_RE` 里各写一份，只靠子串巧合命中 | 所有写入过 `clientGone()`（`signal.aborted` / `writableEnded` / `destroyed`）闸门并包 try/catch（`sendJson` 也防御），中止后到达的结果直接丢弃、**不再误记成上游失败**；三句文案收进 `SELF_ABORT_MESSAGES`，正则由它们生成（`bridge-smoke` 新增漂移守卫：谁改文案忘了正则就红） |
+
+`test/bridge-smoke.mjs` 从 84 增到 89 条：旧的「抛异常 → 500」期望改成「→ 502 + `upstream_error`」并补它的重试记账，另加「抛出的可重试错误第二次成功（200 + `retries: 1`）」「静默截断（`fakeStream([])` → `upstream_truncated`、`failed: 1`、`retries: 1`）」「上游忽略 abort 照常跑完（不写死 socket、不误记失败）」「`SELF_ABORT_MESSAGES` 与正则不漂移」。同一轮自审还顺手做了测试卫生：路径从 `BRIDGE_COMPLETIONS_PATH` 派生、`assistant.source` 断言不再接受 `null`、删掉没人用的 `log()` 辅助、两条从未 `close()` 的桥补上关闭。正常路径行为不变。
+
 ### 加固（v0.5.4：token 口径与命令注册可自查）
 
 | 现象（升级前的旧行为） | 现在 |
@@ -440,7 +454,7 @@ dsh-open-code-review/
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
-   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，84 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游」「上游流被截断要自动重试一次且不重复写内容」这四条真机事故回归，以及 token 只报总数时的 partial 计数）：node test/bridge-smoke.mjs
+   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，89 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数）：node test/bridge-smoke.mjs
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，206 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
