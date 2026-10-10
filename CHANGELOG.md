@@ -3,6 +3,50 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.8.1] — 2026-10-10
+
+这一版是 v0.8.0 的第一次真机自审（`ocr_review` 扫 `lib/review.js`，166.2s、6 条）加上那次运行里
+自己暴露的一条（`delegate` 会静默忽略 `paths`）。**没有行为变更**，修的都是「本来承诺了却没做到」
+的地方，所以按补丁号发。
+
+Fixed
+- **手工配置里的 `extraArgs` 不再能整轮崩掉**：以前直接 `[...config.extraArgs]` spread 进 argv，
+  数字 / `null` / 嵌套数组会一路走到 `ctx.subprocess.spawn` 抛 `TypeError`，整轮评审没有一个字可用。
+  现在统一过 `strList()`（非字符串丢弃）。
+- **JSONL 结果解析不再「取最后一个能解析的行」**：ocr 的 JSONL 里结果在前、尾部可能有进度/摘要对象，
+  旧实现倒着扫并返回第一个可解析对象 = 最后一个 ⇒ 静默取错块、报 0 条问题。现在优先取
+  「像评审结果」的那个对象（含 issues/files 集合），都没有才取键最多的那个。
+- **`rawCount` 不再把重复项算进去**：去重早退发生在自增之前，重复条目会让 `rawCount` 大于
+  `issues.length + dropped`（`rawCount > 0 && issues.length === 0` 这个不变式只是侥幸成立）。
+  现在 `rawCount === issues.length + dropped` 是硬不变量。
+- **委派规格的截断不再切掉收尾栅栏与任务段**：`includeDiffMaxBytes` 以前是对拼好的整段文本做
+  `slice(0, maxBytes)`，而「## 你的任务」排在 diff 之后 ⇒ 大改动时模型收到未闭合的代码围栏、
+  没有任何任务说明（正好在最需要它的时候失效）。现在先算固定部分（头部 + 任务段 + 截断说明）的
+  字节预算，再按**字节**截 diff，收尾围栏与任务段永远在；截断时结果里出现
+  「已按 maxBytes=N 截断…」。（顺带修掉 `maxBytes` 用 `text.length` 判字符、CJK 多字节被低估的问题。）
+- **三份重复的限深 JSON 遍历合并成一份 `walkJson(node, keys, onArray, maxDepth)`**：`extractFiles`、
+  `extractIssuesDetailed`、`hasArrayField` 各写了一遍、细节已经不同（会静默漂移，改一处不影响另两处）。
+- **`delegate` 不再静默忽略 `paths`**：`ocr delegate preview` 根本没有 `--path`（只有
+  `--from/--to/--commit/--exclude/--rule`），所以它给的清单永远是整个工作区的改动 —— 用户点名
+  `paths` 后拿到的却是全量。现在 `runDelegate` 把 `plan.paths` 作为 `only` 传下去，规格里先按路径
+  过滤文件清单，并在头部写明「只看这些路径（paths 参数）」；一个都没命中时明确说明
+  「一个都没匹配上可审文件，下面是 ocr 给的全量清单」，不假装过滤成功。
+- `buildOcrArgv` / `buildDelegateArgvs` 去掉了从未使用的 `config` 形参（调用点同步），顺手删掉一个
+  死的签名面。
+
+Added
+- CI 的 `Offline test suites` 以前只跑五套，`test/killswitch-smoke.mjs` 与 `test/host-contract.mjs`
+  从没在 CI 里跑过（本地 `npm test` 跑八套，两套只在开发机上验证）。现在 CI 依次跑七套；
+  这两套不依赖 `ocr`，在 CI 等价环境里本来就全过（44 / 37）。
+
+Tests
+- smoke 225 → **236**（+11 条 v0.8.1 断言：extraArgs 过滤、JSONL 优先结果形状、键最多兜底、
+  `rawCount` 不变量、`pathMatches` 四例、30000 字符 diff + `maxBytes: 5000` 的字节/围栏/任务段断言、
+  `truncateBytes` 的 CJK 按字节、`only` 过滤与未命中回落、`walkJson` 源码级统一、`only: plan.paths`
+  接线）；没装 `ocr` 的同一环境 218 → **229**。
+- 八套：smoke 236 / killswitch-smoke 44 / host-contract 37 / job-smoke 51 / reviewer-smoke 45 /
+  bridge-smoke 103 / client-smoke 208 / cordis-inject 通过。
+
 ## [0.8.0] — 2026-10-10
 
 这一版把「默认引擎」从最贵的那档挪到不花钱的那档，并把成本、进度与「下一步」都摆到台面上

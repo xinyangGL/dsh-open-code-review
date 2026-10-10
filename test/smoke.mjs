@@ -633,6 +633,142 @@ check(
   );
 }
 
+/* ---------------- v0.8.1：真机自审（第 6 轮）在 lib/review.js 上审出的 6 条 ---------------- */
+{
+  const dirtyArgs = review.normalizeTarget({}, { extraArgs: ["--a", 7, null, ["--b"], "  ", "--c"] }, REPO);
+  check(
+    "v0.8.1：config.extraArgs 里的非字符串被过滤掉（以前原样进 argv，spawn 抛 TypeError 整轮崩）",
+    dirtyArgs.extraArgs.length === 2 && dirtyArgs.extraArgs[0] === "--a" && dirtyArgs.extraArgs[1] === "--c",
+    JSON.stringify(dirtyArgs.extraArgs),
+  );
+
+  const resultFirst = review.parseJsonLoose('{"files":[],"issues":[{"message":"x"}]}\n{"progress":"90%"}\n');
+  const noResultShape = review.parseJsonLoose('{"a":1}\n{"b":2,"c":3,"d":4}\n');
+  check(
+    "v0.8.1：JSONL 优先取「像评审结果」的那块，而不是最后一个能解析的对象（以前倒着扫，尾部进度对象会顶掉真结果）",
+    Array.isArray(resultFirst?.issues) && resultFirst.issues.length === 1 && resultFirst.progress === undefined,
+    JSON.stringify(resultFirst),
+  );
+  check(
+    "v0.8.1：JSONL 里没有任何「结果形状」时退回到字段最多的对象（不再是谁在最后就选谁）",
+    noResultShape?.d === 4 && noResultShape.a === undefined,
+    JSON.stringify(noResultShape),
+  );
+
+  const dupScan = review.extractIssuesDetailed({
+    issues: [
+      { message: "x", file: "a.js", line: 1 },
+      { message: "x", file: "a.js", line: 1 },
+      null,
+      { nope: 1 },
+    ],
+  });
+  check(
+    "v0.8.1：rawCount 不含重复条目，不变量是 rawCount === issues.length + dropped（以前重复项把它顶大）",
+    dupScan.issues.length === 1 && dupScan.dropped === 2 && dupScan.rawCount === 3 && dupScan.rawCount === dupScan.issues.length + dupScan.dropped,
+    JSON.stringify({ issues: dupScan.issues.length, dropped: dupScan.dropped, rawCount: dupScan.rawCount }),
+  );
+
+  check(
+    "v0.8.1：pathMatches 认相对/绝对/正反斜杠",
+    review.pathMatches("lib/review.js", ["review.js"]) === true &&
+      review.pathMatches("C:\\repo\\lib\\a.js", ["lib/a.js"]) === true &&
+      review.pathMatches("./lib/b.js", ["lib/b.js"]) === true &&
+      review.pathMatches("lib/b.js", ["lib/a.js"]) === false &&
+      review.pathMatches("", ["lib/a.js"]) === false,
+    "相对/绝对/反斜杠/失配四例",
+  );
+
+  const bigSpec = review.buildDelegateSpec({
+    plan: { cwd: "/repo", scope: "workspace" },
+    preview: { repository: "/repo", mode: "workspace", reviewable_count: 2 },
+    rules: { groups: [] },
+    diff: "x".repeat(30000),
+    files: [
+      { path: "lib/review.js", status: "modified", insertions: 1, deletions: 1 },
+      { path: "lib/client.js", status: "modified", insertions: 2, deletions: 2 },
+    ],
+    maxBytes: 5000,
+  });
+  check(
+    "v0.8.1：规格按字节截断 diff 后，收尾围栏与「你的任务」仍在（以前整段按字符切，正好切掉任务段）",
+    bigSpec.includes("## 你的任务") &&
+      bigSpec.includes("已按 maxBytes=5000 截断") &&
+      (bigSpec.match(/^```/gm) ?? []).length === 2 &&
+      bigSpec.includes("## 变更内容") &&
+      Buffer.byteLength(bigSpec, "utf8") <= 5000,
+    `bytes=${Buffer.byteLength(bigSpec, "utf8")} 围栏=${(bigSpec.match(/^```/gm) ?? []).length}`,
+  );
+  check(
+    "v0.8.1：按字节（不是字符）算预算，CJK 不会被低估到 1/3",
+    Buffer.byteLength(review.truncateBytes("中文中文中文", 7), "utf8") <= 7 &&
+      review.truncateBytes("中文", 1) === "" &&
+      review.truncateBytes("abc", 2) === "ab",
+    `中文7字节=${JSON.stringify(review.truncateBytes("中文中文中文", 7))}`,
+  );
+  check(
+    "v0.8.1：delegate 模式下 paths 参数由插件过滤（`ocr delegate preview` 没有 --path，ocr 给的永远是整个工作区）",
+    review.buildDelegateSpec({
+      plan: { cwd: "/repo", scope: "workspace" },
+      preview: { repository: "/repo", mode: "workspace" },
+      rules: { groups: [] },
+      diff: "",
+      files: [{ path: "lib/review.js", status: "modified", insertions: 1, deletions: 1 }],
+      only: ["lib/review.js"],
+      maxBytes: 100000,
+    }).includes("只看这些路径"),
+    "只看这些路径",
+  );
+  {
+    const filtered = review.buildDelegateSpec({
+      plan: { cwd: "/repo", scope: "workspace" },
+      preview: { repository: "/repo", mode: "workspace" },
+      rules: { groups: [] },
+      diff: "",
+      files: [
+        { path: "lib/review.js", status: "modified", insertions: 1, deletions: 1 },
+        { path: "lib/client.js", status: "modified", insertions: 2, deletions: 2 },
+      ],
+      only: ["lib/review.js"],
+      maxBytes: 100000,
+    });
+    const unmatched = review.buildDelegateSpec({
+      plan: { cwd: "/repo", scope: "workspace" },
+      preview: { repository: "/repo", mode: "workspace" },
+      rules: { groups: [] },
+      diff: "",
+      files: [{ path: "lib/client.js", status: "modified", insertions: 2, deletions: 2 }],
+      only: ["lib/nothing.js"],
+      maxBytes: 100000,
+    });
+    check(
+      "v0.8.1：只列出 paths 命中的文件；一个都没命中时回落到 ocr 的全量清单并说明",
+      filtered.includes("lib/review.js") &&
+        !filtered.includes("lib/client.js") &&
+        unmatched.includes("一个都没匹配上可审文件") &&
+        unmatched.includes("lib/client.js"),
+      `命中=${filtered.includes("lib/client.js")} 未命中回落=${unmatched.includes("lib/client.js")}`,
+    );
+  }
+  {
+    const reviewSource = readFileSync(new URL("../lib/review.js", import.meta.url), "utf8");
+    const indexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+    check(
+      "v0.8.1：三份「限深递归遍历 JSON」合并成一个 walkJson（不再各写一份、改一处漂另一处）",
+      /function walkJson\(node, keys, onArray, maxDepth = 6\)/.test(reviewSource) &&
+        (reviewSource.match(/walkJson\(/g) ?? []).length >= 4 &&
+        !/const visit = \(node, depth\) =>/.test(reviewSource),
+      `walkJson=${(reviewSource.match(/walkJson\(/g) ?? []).length} 旧 visit=${(reviewSource.match(/const visit = \(node, depth\) =>/g) ?? []).length}`,
+    );
+    check(
+      "v0.8.1：delegate 的路径过滤真的接上了（runDelegate 把 plan.paths 传给 buildDelegateSpec）",
+      /only: plan\.paths/.test(indexSource) && !/buildDelegateArgvs\(plan, cfg\)/.test(indexSource),
+      `only: plan.paths=${/only: plan\.paths/.test(indexSource)}`,
+    );
+  }
+}
+
+
 /* 用全新空目录当"非 git 仓库"样本：插件自己现在是个 git 仓库（用户要求建 GitHub 仓库时 git init 过），
    不能再拿它当反例。 */
 const nonRepoDir = mkdtempSync(join(tmpdir(), "ocr-nongit-"));

@@ -33,6 +33,8 @@ jobs:
         shell: bash
         run: |
           node test/smoke.mjs
+          node test/killswitch-smoke.mjs
+          node test/host-contract.mjs
           node test/job-smoke.mjs
           node test/reviewer-smoke.mjs
           node test/bridge-smoke.mjs
