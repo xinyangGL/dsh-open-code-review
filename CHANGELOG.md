@@ -3,6 +3,59 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.6] — 2026-10-10
+
+### Fixed
+
+- **The real-credential end-to-end test could not run at all.** `test/e2e-llm.mjs` builds its own
+  minimal host context, and that stub had fallen behind `apply()`: it never provided `ctx.effect`,
+  so the plugin threw `TypeError: ctx.effect is not a function` before registering a single tool
+  (which is why the "real credentials" regression was only ever assumed, never executed). The stub
+  now provides `effect`/`inject`/`get`, and `inject` deliberately never calls back — this harness
+  has no host services, so cordis' rule ("a missing dependency means the callback never runs") gives
+  the intended static-endpoint path.
+- **The harness could not reach the LLM at all.** With no `agentDefaultModel` service, `OCR_LLM_MODEL`
+  was empty and ocr refused with `no valid LLM endpoint configured …`. The script now injects an
+  explicit model (`E2E_LLM_MODEL`, default `deepseek/deepseek-v4.1-flash-fast`) and logs it.
+- **`status-only` could report success while the self-test failed.** The exit code used
+  `/可用/.test(status.llmTest)`, and the failure text `不可用（exit=1）…` contains `可用` as a
+  substring — so the free connectivity check exited 0 on a broken LLM configuration. It now checks
+  `ok === true` and the *absence* of `不可用`.
+- **No way to review real files on a clean tree.** `E2E_SCOPE` / `E2E_PATHS` were added, so
+  `E2E_SCOPE=scan E2E_PATHS=lib/bridge.js node test/e2e-llm.mjs` exercises the full
+  "files in, findings out" path (the default `scope=workspace` finds nothing when the working tree
+  is clean).
+- **A truncated stream that had already sent half an answer was reported as a success.**
+  `truncated()` required *both* a missing `finish` event *and* zero content, so
+  `stream ended before a terminal response event` was only caught when nothing had arrived —
+  ocr happily took half a review as a completed one. The adapter contract (`dsh-llm-pi-ai`'s
+  `toStreamChunks`) always emits `usage` → `finish` on a normal end, emits `finish` for in-band
+  errors too, and throws `STREAM_CLOSED` when the stream dies mid-flight; so a missing terminal
+  event *is* the truncation, content or not. `truncated()` is now simply `!state.finish`, and the
+  error message says whether half the content had already arrived.
+- **A bridge timeout looked exactly like "the client is gone".** One `clientGone()` predicate mixed
+  three different situations (client really left / the bridge's own upstream timeout / the bridge
+  being closed), so when the bridge timed out while ocr was still waiting, the handler wrote no
+  response *and* counted no failure — ocr could only sit until its own `--timeout`, and the stats
+  showed nothing had happened. The predicates are now separate (`abortedBy()` /
+  `socketDead()` / `clientReallyGone()`), writes only check the socket, and our own aborts surface
+  as `upstream_timeout` / `bridge_closed` with `stats.failed` incremented and a precise
+  `retrySkipReason` ("we cut it ourselves, so there is nothing to retry").
+- **A structurally invalid JSON body could crash the bridge.** `JSON.parse` accepts `null`, `123`
+  and `[]`; the old code went straight to `body.messages` and threw
+  `TypeError: Cannot read properties of null` on `null`. The bridge now rejects a non-object body
+  with `400 invalid_body` (a missing `messages` still yields the existing `empty_messages`).
+
+### Added
+
+- **Job ownership is now asserted, not assumed.** `jobs.start` refuses work whose `owner` has no
+  attached job controller, and `list`/`get`/`wait`/`kill` are fenced by that session id — an
+  owner-less job is visible to every caller. `test/smoke.mjs` previously only asserted the
+  "no `agent.id` → no owner" direction; it now also asserts that a real `agent.id` reaches both
+  `jobs.start` and `jobs.wait` (166 checks with `ocr`, 159 without). `test/bridge-smoke.mjs` grew
+  from 89 to 95 checks (half-answer truncation, timeout semantics, malformed bodies), and the
+  never-read `stats.lastUsage` field was dropped from the bridge's `describe()` surface.
+
 ## [0.5.5] — 2026-10-10
 
 ### Fixed

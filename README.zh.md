@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.5.5）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.5.6）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -301,7 +301,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 165 项 / 没装 158 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 166 项 / 没装 159 项）。
 
 ---
 
@@ -337,6 +337,21 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 刚装好/刚重启就问 `ocr_status`，报「桥还没就绪」并回落静态端点 | v0.5.2 已修：本机桥是异步 `listen` 的，`resolveLlmRoute()` 现在会等这次启动完成（最多 2 秒）再算路由，所以**第一次**查询就走桥。慢机器上尤其明显（本机有 `ocr` 时只是因为 `ocr --version` 子进程恰好拖了几十毫秒才侥幸躲过） |
 | 机器上**没装** `ocr` 时 `ocr_status` 自相矛盾（路由行写着本机桥地址，`bridge` 却是 `null`、`llmEnv` 为空）；`ocr_review` 只丢一句「设置 `ocrPath`」，可用户其实还没装 | v0.5.3 已修：与装没装 ocr 无关的字段（`bridge`/`llmEnv`/`onDemand` 备注）改到定位之前算，`ocr_status` 末尾再按最新桥统计刷新一次；定位失败时把安装指引（`installHint`）同时写进 `ocr_review` 的 notes、自动评审的投递文本和 `ocr_status.notes` |
 
+### 加固（v0.5.6：真凭据端到端能跑了 + job 归属有断言 + 第三轮自审查出的三个桥缺陷）
+
+| 问题 | 现在 |
+| --- | --- |
+| `test/e2e-llm.mjs` 根本起不来：它自建的宿主替身缺 `ctx.effect`，`apply()` 直接抛 `TypeError: ctx.effect is not a function`（所以「真凭据回归」一直只是假设、没人跑过） | 替身补 `effect`/`inject`/`get`；`inject` 故意永不回调（这个 harness 不带宿主服务，按 cordis「依赖缺失就不激活」的语义落到静态端点，正是它想要的路径） |
+| 即使起来了也连不上 LLM：没有 `agentDefaultModel` 服务 ⇒ `OCR_LLM_MODEL` 为空，ocr 报 `no valid LLM endpoint configured` | 显式注入模型（`E2E_LLM_MODEL`，默认 `deepseek/deepseek-v4.1-flash-fast`）并打印出来 |
+| `status-only` 会假绿：退出码用 `/可用/.test(...)` 判，而失败文案「不可用（exit=1）」里也含「可用」 | 改成 `ok === true` 且**不含**「不可用」 |
+| 工作区干净时默认 `scope=workspace` 审不到任何文件，端到端只验了个空跑 | 新增 `E2E_SCOPE` / `E2E_PATHS`：`E2E_SCOPE=scan E2E_PATHS=lib/bridge.js` 走完「有文件、有问题」的完整链路 |
+| job 归属只断言了「没有 `agent.id` 就不传 owner」这一个方向 | 补断言：真 `agent.id` 必须一路透传到 `jobs.start` 与 `jobs.wait`（宿主按 owner 做归属栅栏，无主 job 对所有人可见） |
+| 「先吐出半截正文、再断流」（`stream ended before a terminal response event` 的另一半情形）以前被当成成功——`truncated()` 要求「没有 finish **且** 没有任何内容」，于是 ocr 拿半截评审当跑完 | 判定只看终态：`truncated() { return !state.finish; }`。依据是适配器契约（`dsh-llm-pi-ai` 的 `toStreamChunks`：正常结束必发 `usage`→`finish`，in-band error 也发 `finish`，中途断流它自己抛 `STREAM_CLOSED`），错误文案还会说明「已经收到的半截内容不算完成」 |
+| 桥自己的超时与「客户端断开」混成一个 `clientGone()` 判定 ⇒ 桥超时而 ocr 还在等时既**不写响应**也**不计失败**（ocr 只能干等到自己的 `--timeout`，统计上看不出发生过什么） | 拆成 `abortedBy()` / `socketDead()` / `clientReallyGone()`：写入只看 socket，我们掐断的中止变成失败（`upstream_timeout` / `bridge_closed`），计 `stats.failed` 并记下精确的 `retrySkipReason`（「我们自己掐的，不重试」） |
+| 合法 JSON 但形状不对的请求体（`null` / `123` / `[]`）能过 `JSON.parse`，随后 `body.messages` 直接把桥打崩（`TypeError: Cannot read properties of null`） | 非对象请求体一律 `400 invalid_body`（缺 `messages` 仍走原来的 `empty_messages`） |
+
+`test/bridge-smoke.mjs` 从 89 增到 95 条（半截截断、桥超时的语义与记账、畸形请求体三组），桥的 `describe()` 里那个从没人读的 `stats.lastUsage` 一并删掉。
+
 ### 加固（v0.5.5：拿 `ocr_review` 评审自己的 diff 查出并修掉的四个桥缺陷）
 
 这一版不是真机事故驱动的，而是**用插件自己的 `ocr scan lib/bridge.js` 评审 0.5.4 的改动**时它报出来的四条：
@@ -362,7 +377,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 | 现象（升级前的旧行为） | 现在 |
 | --- | --- |
-| CI（裸 clone + node，没有 npm 全局包）上 24 条断言失败：真链路用例直接 FAIL，job/进度渲染、`render`、自动档注入跟着级联红 | 离线用例按环境换期望值：装了 `ocr` 验真链路，没装就验「定位失败」的诊断路径（`OCR_NOT_FOUND` + 安装指引 + 不误报成功），断言数恒定（现在 165 / 没装 158；v0.5.3 当时是 161 / 155）。CI 现在只用 `node` 就能跑到结尾 |
+| CI（裸 clone + node，没有 npm 全局包）上 24 条断言失败：真链路用例直接 FAIL，job/进度渲染、`render`、自动档注入跟着级联红 | 离线用例按环境换期望值：装了 `ocr` 验真链路，没装就验「定位失败」的诊断路径（`OCR_NOT_FOUND` + 安装指引 + 不误报成功），断言数恒定（现在 166 / 没装 159；v0.5.3 当时是 161 / 155）。CI 现在只用 `node` 就能跑到结尾 |
 | 没装 ocr 时真实调用「在定位那一步就返回」，于是面板/进度行一条 job 都没有 —— 以前这被当成「进度功能坏了」 | 这是有意的 **fail-closed**：绝不显示一条假装在评审的进度行。用例改成守住不变量（登记的 job 都不停在 `running`、id/kind/label 统一、输出环有带时间戳的日志行） |
 
 ### 加固（v0.5.2：桥就绪等待）
@@ -370,7 +385,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 现象（升级前的旧行为） | 现在 |
 | --- | --- |
 | 插件刚加载完就调 `ocr_status` / `ocr_review`：桥还在 `listen`，于是判成「桥没就绪」→ 静默回落 `llm.baseUrl` 静态端点（凭据要按 `llmApiKeyRef` 解析，dsh 模式下通常是没配的） | `resolveLlmRoute()` 开头 `await waitForBridge()`：桥启动是异步的，等它（最多 `BRIDGE_READY_WAIT_MS = 2000`）再决定路由；`ocr_status` 的 `llmRoute`/`llmEndpoint`/`bridge` 三个字段因此始终自洽 |
-| 离线测试用 `setTimeout(150)` 赌桥的 `listen` 完成 | 改成**立刻**查一次就断言桥可用（钉住等待逻辑），两处裸 `bridge.url` 的 `fetch` 加了守卫，桥真的起不来时是 FAIL 而不是把整个套件崩掉（CI 之前就崩在 `test/smoke.mjs:675`）。`test/smoke.mjs` 装了 `ocr` 时 165 项、没装时 158 项（少掉的 6 条是真端到端 `ocr llm test`，其余用例两种环境都跑、只是期望值不同） |
+| 离线测试用 `setTimeout(150)` 赌桥的 `listen` 完成 | 改成**立刻**查一次就断言桥可用（钉住等待逻辑），两处裸 `bridge.url` 的 `fetch` 加了守卫，桥真的起不来时是 FAIL 而不是把整个套件崩掉（CI 之前就崩在 `test/smoke.mjs:675`）。`test/smoke.mjs` 装了 `ocr` 时 166 项、没装时 159 项（少掉的 6 条是真端到端 `ocr llm test`，其余用例两种环境都跑、只是期望值不同） |
 
 ### 加固（v0.5.0：按需评审 + 逐条列问题 + 配置收敛）
 
@@ -450,16 +465,18 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 165 项 / 没装 158 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 166 项 / 没装 159 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
-   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，89 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数）：node test/bridge-smoke.mjs
+   ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，95 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「半截正文也算截断」「桥自己的超时会给客户端交代并计入统计」「畸形请求体 → 400 invalid_body」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数）：node test/bridge-smoke.mjs
    ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，206 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
    ├─ zprobe3.mjs        # schema 预检：25 个字段是否都带 volatile/description/default
-   └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs
+   └─ e2e-llm.mjs        # 端到端（真凭据 + 真 LLM，会花钱/耗时）：node test/e2e-llm.mjs [仓库路径] [status-only]
+                          #   status-only 只做连通性自检（免费）；E2E_LLM_MODEL 换模型；
+                          #   E2E_SCOPE=scan E2E_PATHS=lib/bridge.js 可在工作区干净时也真审出问题
 ```
 
 ## 已知限制

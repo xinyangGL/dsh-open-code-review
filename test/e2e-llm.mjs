@@ -4,6 +4,8 @@
  *
  * 用法：node test/e2e-llm.mjs [被测仓库路径] [status-only]
  *   status-only = 只跑 ocr_status（免费），跳过会花钱的真实评审
+ * 可用 E2E_LLM_MODEL 覆盖默认模型（默认 deepseek/deepseek-v4.1-flash-fast：
+ * 长请求不容易被上游截断；ark-coding-plan/glm-5.3-flash 实测会被截断）。
  */
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -86,6 +88,19 @@ const ctx = {
     },
   },
   logger: { info: (m) => console.log(`  · ${m}`), warn: (m) => console.log(`  warn: ${m}`), debug: () => {} },
+  /* 下面三个是 apply 会用到的宿主面：这个测试不带任何宿主服务，
+     所以 inject 永远不回调（与 cordis「依赖缺失就不激活」一致）、get 一律返回 undefined，
+     于是 llm 路由按预期落到静态端点、凭据由本脚本注入。 */
+  effect(callback) {
+    const dispose = callback();
+    return typeof dispose === "function" ? dispose : () => {};
+  },
+  inject() {
+    return undefined;
+  },
+  get() {
+    return undefined;
+  },
   on(name, handler) {
     if (!listeners.has(name)) listeners.set(name, []);
     listeners.get(name).push(handler);
@@ -101,7 +116,11 @@ const ctx = {
 };
 
 const mod = await import(new URL("../lib/index.js", import.meta.url));
-const refs = mod.Config({ llmApiKeyRef: "COMMANDCODE_API_KEY" });
+/* 这个测试不带宿主服务，插件拿不到 DSH 的默认模型 ⇒ 必须显式给一个模型名，
+   否则 ocr 会以「no valid LLM endpoint configured」（缺 OCR_LLM_MODEL）拒绝。 */
+const MODEL = process.env.E2E_LLM_MODEL ?? "deepseek/deepseek-v4.1-flash-fast";
+console.log(`模型：${MODEL}（E2E_LLM_MODEL 可覆盖）`);
+const refs = mod.Config({ llmApiKeyRef: "COMMANDCODE_API_KEY", llmModel: MODEL });
 mod.apply(ctx, refs);
 
 const agent = { status: "idle", session: { header: { cwd: REPO } } };
@@ -117,12 +136,21 @@ console.log(`llm test：${status.llmTest}`);
 
 if (STATUS_ONLY) {
   console.log("\n(status-only：跳过真实评审)");
-  process.exit(status.ok && /可用/.test(String(status.llmTest)) ? 0 : 1);
+  /* 注意别用 /可用/ 判成败：「不可用（exit=1）」里也含「可用」两个子串。 */
+  const ok = status.ok === true && !String(status.llmTest).includes("不可用");
+  process.exit(ok ? 0 : 1);
 }
 
-console.log("\n--- ocr_review（真实 LLM 评审，engine=ocr）---");
+/* 默认审工作区改动；E2E_SCOPE=scan + E2E_PATHS=lib/bridge.js 可以改成整文件扫描，
+   这样即使工作区是干净的也能走完「有文件、有问题」的完整链路。 */
+const SCOPE = process.env.E2E_SCOPE ?? "workspace";
+const PATHS = (process.env.E2E_PATHS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+const reviewArgs = { engine: "ocr", scope: SCOPE };
+if (PATHS.length > 0) reviewArgs.paths = PATHS;
+
+console.log(`\n--- ocr_review（真实 LLM 评审，engine=ocr · scope=${SCOPE}${PATHS.length ? ` · paths=${PATHS.join(",")}` : ""}）---`);
 const t0 = Date.now();
-const review = await tools.get("ocr_review").execute({ engine: "ocr" }, exec);
+const review = await tools.get("ocr_review").execute(reviewArgs, exec);
 console.log(`ok=${review.ok} engine=${review.engine} exit=${review.exitCode} 耗时=${review.durationMs}ms（脚本计时 ${Date.now() - t0}ms）`);
 console.log(`summary=${review.summary}`);
 console.log(`issues=${review.issues.length}${review.issues.map((i) => `\n  - [${i.severity}] ${i.file}:${i.line} ${String(i.message).slice(0, 160)}`).join("")}`);

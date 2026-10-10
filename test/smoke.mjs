@@ -1322,6 +1322,30 @@ check(
   progressRegistry.starts.every((job) => job.owner === undefined),
   JSON.stringify([...new Set(progressRegistry.starts.map((job) => job.owner))]),
 );
+/* owner 语义（宿主 jobs 契约）：owner 就是「按会话 id 栅栏」的归属键 ——
+   jobs.start 会拒绝没有对应 job controller 的 owner，list/get/kill/wait 都按它过滤，
+   「有主」的记录一直留到 owner dispose。所以插件必须把调用方 agent 的 id 原样传下去。 */
+const ownerRegistry = makeJobsRegistry();
+const ownerCase = cannedHarness(
+  [{ exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 0 }], issues: [] }) }],
+  {},
+  { jobs: ownerRegistry },
+);
+const ownerAgent = Object.assign(makeAgent(), { id: "session-owner-1" });
+const ownerRun = await tools.get("ocr_review").execute(
+  { engine: "ocr" },
+  { name: "ocr_review", callId: "owner", arguments: {}, agent: ownerAgent, signal: undefined },
+);
+await settleJobs();
+check(
+  "进度：agent 有 id 时 owner 一路透传到 start 与 wait（归属栅栏；缺 owner 会变成所有人可见的无主 job）",
+  ownerRun.ok === true &&
+    ownerRegistry.starts.length === 1 &&
+    ownerRegistry.starts[0].owner === "session-owner-1" &&
+    ownerRegistry.waits.length === 1 &&
+    ownerRegistry.waits[0].owner === "session-owner-1",
+  `starts=${JSON.stringify(ownerRegistry.starts.map((job) => job.owner))} waits=${JSON.stringify(ownerRegistry.waits.map((waiter) => waiter.owner))}`,
+);
 const autoJobs = allJobs().filter((job) => String(job.label).startsWith("自动评审 · "));
 checkEither(
   "进度：自动评审那条也登记了 job 且已结算（label 用「自动评审」区分）",

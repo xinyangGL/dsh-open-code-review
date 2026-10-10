@@ -526,6 +526,76 @@ check(
   truncRes.status + " " + truncRes.raw.slice(0, 200) + " " + text(truncBridge.describe()),
 );
 
+/* v0.5.6（第三轮自审发现）：`truncated()` 以前要求「既没有 finish、也没有任何正文」才算截断，
+   于是「先吐出半截正文、再断流」（`stream ended before a terminal response event` 的另一半情形）
+   会被当成成功 —— ocr 拿到半截内容还以为评审跑完了。半截正文同样是截断。 */
+const half = fakeStream([{ type: "text-delta", text: "半句 " }]);
+const halfBridge = await startLlmBridge({ stream: half.stream, target: () => ({ provider: "p", model: "m" }), logger });
+const halfRes = await post(halfBridge.url, halfBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+check(
+  "桥（v0.5.6）：先吐出半截正文再断流也算截断（不再当成功），并说明半截内容不算完成",
+  halfRes.status === 502 &&
+    halfRes.json.error.code === "upstream_truncated" &&
+    halfRes.json.error.message.includes("已经收到的半截内容不算完成") &&
+    halfBridge.stats.failed === 1 &&
+    halfBridge.stats.retries === 1,
+  halfRes.status + " " + halfRes.raw.slice(0, 200) + " " + text(halfBridge.describe()),
+);
+await halfBridge.close();
+
+/* v0.5.6（第三轮自审发现）：桥自己的超时以前与「客户端断开」混成一个判定 → 客户端还在等却什么都不写、
+   stats.failed 也不计（统计上看不出发生过什么）。现在超时必须给客户端一个交代，并且如实记进统计。 */
+const slowCalls = [];
+const slowBridge = await startLlmBridge({
+  timeoutMs: 150,
+  stream: async function* stream(options) {
+    slowCalls.push(options);
+    yield { type: "text-delta", text: "开始" };
+    await new Promise((resolve) => {
+      if (options.signal?.aborted) return resolve();
+      options.signal?.addEventListener("abort", resolve, { once: true });
+      return undefined;
+    });
+  },
+  target: () => ({ provider: "p", model: "m" }),
+  logger,
+});
+const slowRes = await post(slowBridge.url, slowBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+check(
+  "桥（v0.5.6）：桥自己的上游超时（客户端还连着）→ 502 upstream_timeout，不再静默不回应",
+  slowRes.status === 502 && slowRes.json.error.code === "upstream_timeout" && slowRes.json.error.message === SELF_ABORT_MESSAGES.timeout,
+  slowRes.status + " " + slowRes.raw.slice(0, 200),
+);
+check(
+  "桥（v0.5.6）：我们自己掐断的中止也计失败、并记下不重试的原因（桥超时不再「统计上看不出发生过什么」）",
+  slowBridge.stats.failed === 1 &&
+    slowBridge.stats.retries === 0 &&
+    slowBridge.stats.retrySkips === 1 &&
+    slowBridge.stats.retrySkipReason.includes("超时"),
+  text(slowBridge.describe()),
+);
+check(
+  "桥（v0.5.6）：桥超时会真的 abort 上游（不继续烧配额）",
+  slowCalls.length === 1 && slowCalls[0].signal.aborted === true,
+  "calls=" + slowCalls.length + " aborted=" + String(slowCalls[0]?.signal?.aborted),
+);
+await slowBridge.close();
+
+/* v0.5.6（第三轮自审发现）：合法 JSON 但形状不对的请求体（null / 数组 / 数字）以前能过 JSON.parse，
+   然后 `body.messages` 直接把桥打崩（`JSON.parse("null")` → TypeError: Cannot read properties of null）。 */
+const nullBody = await post(happyBridge.url, happyBridge.token, null);
+check(
+  "桥（v0.5.6）：请求体是 null → 400 invalid_body（以前必崩 TypeError）",
+  nullBody.status === 400 && nullBody.json.error.code === "invalid_body",
+  nullBody.status + " " + nullBody.raw.slice(0, 160),
+);
+const arrayBody = await post(happyBridge.url, happyBridge.token, []);
+check(
+  "桥（v0.5.6）：请求体是数组 → 400 invalid_body",
+  arrayBody.status === 400 && arrayBody.json.error.code === "invalid_body",
+  arrayBody.status + " " + arrayBody.raw.slice(0, 160),
+);
+
 const noRoute = await startLlmBridge({ stream: happy.stream, target: () => ({ provider: "", model: "" }), logger });
 const unrouted = await post(noRoute.url, noRoute.token, { model: "m", messages: [{ role: "user", content: "u" }] });
 check("桥：DSH 侧没配 provider/model → 500 且提示去设置里选", unrouted.status === 500 && unrouted.json.error.code === "missing_route" && unrouted.json.error.message.includes("provider"), unrouted.raw.slice(0, 200));
