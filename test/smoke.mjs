@@ -604,6 +604,16 @@ check(
     status.notes.some((n) => n.includes("按需评审")),
   `onDemand=${status.onDemand} skill=${JSON.stringify(status.skill)}`,
 );
+check(
+  "ocr_status（v0.5.7）：报出 preTest 的 mode / mechanism / 累计次数（自查到底拦没拦、用的哪种机制）",
+  status.preTest !== null &&
+    typeof status.preTest === "object" &&
+    ["off", "remind", "gate"].includes(status.preTest.mode) &&
+    typeof status.preTest.mechanism === "string" &&
+    Number.isFinite(status.preTest.denials) &&
+    Number.isFinite(status.preTest.reminders),
+  JSON.stringify(status.preTest),
+);
 
 /* ------------------------------------------------------------- 端到端：按需 / 自动 */
 
@@ -2231,10 +2241,146 @@ check(
       (statusSchema?.required ?? []).includes("skill"),
     `${JSON.stringify(statusSchema?.properties?.skill).slice(0, 160)} | required=${(statusSchema?.required ?? []).join(",")}`,
   );
+  check(
+    "v0.5.7：ocr_status 的 schema 声明了 preTest（mode/mechanism/denials/reminders）并进 required",
+    statusSchema?.properties?.preTest?.type === "object" &&
+      (statusSchema?.properties?.preTest?.properties?.mode?.enum ?? []).join(",") === "off,remind,gate" &&
+      (statusSchema?.properties?.preTest?.required ?? []).join(",") === "mode,mechanism,denials,reminders" &&
+      (statusSchema?.required ?? []).includes("preTest"),
+    `${JSON.stringify(statusSchema?.properties?.preTest ?? null).slice(0, 200)}`,
+  );
 }
 
-/* v0.5.0 步骤 3：按需评审 skill —— 宿主有 skills 服务时注册，关掉 onDemand 时不注册。
-   它是「模型自己判断该验证」那条路径：注册了，模型才知道用户说「验证一下」时该跑 ocr_review。 */
+/* v0.5.7：评审先于测试（preTest）—— gate 档用 ctx.tools.guard() 挡住没评审就开跑的测试命令，
+   remind 档放行但回来提醒；覆盖状态由成功的 ocr_review 置位、成功的写工具清位。 */
+{
+  check(
+    "preTest：出厂默认 off，且三档归一（GATE → gate，不认识的写法回落默认）",
+    cfgMod.DEFAULTS.preTest === "off" &&
+      cfgMod.loadConfig({}).preTest === "off" &&
+      cfgMod.loadConfig({ preTest: " GATE " }).preTest === "gate" &&
+      cfgMod.loadConfig({ preTest: "nope" }).preTest === "off" &&
+      cfgMod.loadConfig({ preTest: "Remind" }).preTest === "remind",
+    `${cfgMod.DEFAULTS.preTest} / ${cfgMod.loadConfig({ preTest: " GATE " }).preTest} / ${cfgMod.loadConfig({ preTest: "nope" }).preTest}`,
+  );
+  const exec = (command, name = "pwsh") => ({ name, arguments: { command }, agent: makeAgent() });
+  check(
+    "preTest：只认 shell 类工具里**命令开头**的测试入口（read/write 里出现 test 字样不算，只是提了一嘴的普通命令也不算）",
+    mod.isTestCommand(exec("pnpm test")) === true &&
+      mod.isTestCommand(exec("node --test test/smoke.mjs")) === true &&
+      mod.isTestCommand(exec("npx vitest run")) === true &&
+      mod.isTestCommand(exec("python -m pytest -q")) === true &&
+      mod.isTestCommand(exec("cargo test")) === true &&
+      mod.isTestCommand(exec("cd lib && npm test")) === true &&
+      mod.isTestCommand(exec("ls -la")) === false &&
+      mod.isTestCommand(exec('git commit -m "fix jest tests"')) === false &&
+      mod.isTestCommand(exec("grep -r pytest src/")) === false &&
+      mod.isTestCommand(exec("cat vitest.config.js")) === false &&
+      mod.isTestCommand(exec("pnpm test", "read")) === false &&
+      mod.isTestCommand({ name: "pwsh", arguments: {} }) === false,
+    [exec("pnpm test"), exec("ls -la")].map((e) => mod.isTestCommand(e)).join(","),
+  );
+  const ptAgent = Object.assign(makeAgent(), { id: "session-pretest" });
+  const ptExec = (command) => ({ name: "pwsh", arguments: { command }, agent: ptAgent });
+  const onResult = (map, name, result) => {
+    for (const handler of map.get("tools/result") ?? []) handler({ name, arguments: {}, agent: ptAgent }, result);
+  };
+
+  /* gate：宿主有 tools.guard 时优先用它（官方约定的「与顺序无关的拒绝」）。 */
+  const gateListeners = new Map();
+  const gateCase = makeCtx({ listeners: gateListeners });
+  const guards = [];
+  gateCase.tools.guard = (fn) => {
+    guards.push(fn);
+    return () => {
+      const index = guards.indexOf(fn);
+      if (index >= 0) guards.splice(index, 1);
+    };
+  };
+  mod.apply(gateCase, mkConfig({ preTest: "gate" }));
+  check("preTest：gate 档挂到 ctx.tools.guard() 上（宿主认可的同步闸门）", guards.length === 1, `guards=${guards.length}`);
+  const denied = String(guards[0](ptExec("npm test")));
+  check(
+    "preTest：没有评审覆盖 → 闸门给拒绝理由（理由点明先跑 ocr_review，非测试命令放行）",
+    denied.includes("ocr_review") && denied.includes("评审先于测试") && guards[0](ptExec("ls -la")) === "",
+    denied.slice(0, 120),
+  );
+  onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true } });
+  check("preTest：一次成功的 ocr_review 覆盖这批改动后放行", guards[0](ptExec("npm test")) === "");
+  onResult(gateListeners, "write", { isError: false, value: { ok: true } });
+  check(
+    "preTest：写文件成功后覆盖立刻作废（改完必须重新评审）",
+    String(guards[0](ptExec("npm test"))).includes("ocr_review"),
+  );
+  onResult(gateListeners, "ocr_review", { isError: true, value: { ok: false, code: "OCR_RUN_FAILED" } });
+  check(
+    "preTest：失败的 ocr_review 不算「评过了」（fail-closed）",
+    String(guards[0](ptExec("npm test"))).includes("ocr_review"),
+  );
+  onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true, preview: true } });
+  check(
+    "preTest：preview 的 ocr_review 也不算「评过了」（只列文件、没调 LLM，否则一条 preview 就能绕过闸门）",
+    String(guards[0](ptExec("npm test"))).includes("ocr_review"),
+  );
+  const denialsBefore = mod.preTestStats().denials;
+  const sameCall = (callId) => ({ name: "pwsh", arguments: { command: "npm test" }, agent: ptAgent, callId });
+  guards[0](sameCall("call-1"));
+  guards[0](sameCall("call-1"));
+  check(
+    "preTest：同一次工具调用被询问多次只记一次拦截（按 callId 去重）",
+    mod.preTestStats().denials - denialsBefore === 1,
+    `Δ=${mod.preTestStats().denials - denialsBefore}`,
+  );
+  onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true, preview: false } });
+  check("preTest：真正调过 LLM 的评审（preview=false）才放行", guards[0](ptExec("npm test")) === "");
+
+  /* remind：闸门照样挂上（只记账、不拦），否则测试结果回来时没有任何 pending 可提醒。 */
+  const remindListeners = new Map();
+  const remindCase = makeCtx({ listeners: remindListeners });
+  const remindGuards = [];
+  remindCase.tools.guard = (fn) => {
+    remindGuards.push(fn);
+    return () => {};
+  };
+  mod.apply(remindCase, mkConfig({ preTest: "remind" }));
+  const remindAgent = Object.assign(makeAgent(), { id: "session-remind" });
+  const followed = [];
+  remindAgent.followup = (message) => followed.push(message);
+  const remindExec = { name: "pwsh", arguments: { command: "npm test" }, agent: remindAgent };
+  const remindVerdict = remindGuards.length === 1 ? remindGuards[0](remindExec) : "（没挂闸门）";
+  check(
+    "preTest：remind 档也挂闸门但一律放行（只记账；不挂的话测试结果回来时根本没有 pending）",
+    remindGuards.length === 1 && remindVerdict === "" && mod.preTestStats().mode === "remind" && mod.preTestStats().mechanism === "guard",
+    `guards=${remindGuards.length} verdict=${JSON.stringify(remindVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
+  );
+  for (const handler of remindListeners.get("tools/result") ?? []) {
+    handler(remindExec, { isError: false, value: { ok: true } });
+  }
+  check(
+    "preTest：remind 档在测试结果回来后给模型一条「这批改动还没评审」的提醒",
+    followed.length === 1 && textOf(followed[0]).includes("ocr_review"),
+    followed.map(textOf).join(" | ").slice(0, 120),
+  );
+
+  /* 老宿主没有 tools.guard 时回落到 tools/pre-execute waterfall。 */
+  const fbListeners = new Map();
+  const fbCase = makeCtx({ listeners: fbListeners });
+  mod.apply(fbCase, mkConfig({ preTest: "gate" }));
+  const fbHandlers = fbListeners.get("tools/pre-execute") ?? [];
+  const fbAgent = Object.assign(makeAgent(), { id: "session-pretest-fb" });
+  const fbExec = (command) => ({ name: "pwsh", arguments: { command }, agent: fbAgent });
+  const fbDeny = fbHandlers.length === 1 ? fbHandlers[0](fbExec("npm test"), () => ({ kind: "allow" })) : null;
+  const fbPass = fbHandlers.length === 1 ? fbHandlers[0](fbExec("ls -la"), () => ({ kind: "allow" })) : null;
+  check(
+    "preTest：没有 tools.guard 的老宿主回落到 tools/pre-execute（测试命令 → {kind:deny,reason}，其它命令 → next()）",
+    fbHandlers.length === 1 &&
+      fbDeny?.kind === "deny" &&
+      String(fbDeny?.reason ?? "").includes("ocr_review") &&
+      fbPass?.kind === "allow" &&
+      mod.preTestStats().mechanism === "pre-execute",
+    `handlers=${fbHandlers.length} deny=${JSON.stringify(fbDeny)?.slice(0, 60)} pass=${JSON.stringify(fbPass)}`,
+  );
+}
 {
   const registered = [];
   const skillCtx = makeCtx();

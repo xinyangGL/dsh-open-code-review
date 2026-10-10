@@ -358,18 +358,18 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-/* 主页只放「要做的决定」这 7 行；12 个参数项收进「高级设置」，默认不渲染。 */
+/* 主页只放「要做的决定」这 7 行；13 个参数项收进「高级设置」，默认不渲染。 */
 const BASIC_LABELS = ["总开关", "默认引擎", "自动评审", "按需评审", "独立评审 agent", "LLM 路由", "模型名"];
-/* 调优 6 + 运行与诊断 6；provider 行只在 dsh 模式下渲染，所以它在 12 项里。 */
-const ADVANCED_LABELS = ["自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "结果详细程度", "ocr 可执行文件", "提供方（provider）", "单次超时（分钟）", "评审进度", "调试日志"];
-const ADVANCED_KEYS = ["autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "audience", "ocrPath", "llmProvider", "timeoutMinutes", "progress", "verbose"];
+/* 调优 7（含 v0.5.7 的「评审先于测试」）+ 运行与诊断 6；provider 行只在 dsh 模式下渲染，所以它在 13 项里。 */
+const ADVANCED_LABELS = ["自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "评审先于测试", "结果详细程度", "ocr 可执行文件", "提供方（provider）", "单次超时（分钟）", "评审进度", "调试日志"];
+const ADVANCED_KEYS = ["autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "preTest", "audience", "ocrPath", "llmProvider", "timeoutMinutes", "progress", "verbose"];
 for (const label of BASIC_LABELS) {
   check(`基础组渲染字段「${label}」`, html.includes(label));
 }
 for (const label of ADVANCED_LABELS) {
   check(`高级项「${label}」默认收起`, !html.includes(label));
 }
-check("高级设置标题显示项数（收起时也显示）", html.includes("高级设置（12 项）"), html.slice(0, 180));
+check("高级设置标题显示项数（收起时也显示）", html.includes("高级设置（13 项）"), html.slice(0, 180));
 check("高级设置默认收起（aria-expanded=false）", hosts(tree).some((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1" && n.props["aria-expanded"] === "false"));
 check("收起时说明怎么展开", html.includes("已收起"), html.slice(0, 180));
 check("主页说明字段来源徽标", html.includes("设置页已改"));
@@ -429,7 +429,7 @@ check("高级设置有可点的标题", Boolean(advToggle(tree)));
 setAdvanced(true);
 const advTree = render();
 const advRows = controlRows(advTree);
-check("展开后高级项 12 行（调优 6 + 运行与诊断 6）", advancedRows(advTree).length === 12, `n=${advancedRows(advTree).length}`);
+check("展开后高级项 13 行（调优 7 + 运行与诊断 6）", advancedRows(advTree).length === 13, `n=${advancedRows(advTree).length}`);
 check("展开后 aria-expanded=true", advToggle(advTree).props["aria-expanded"] === "true");
 check("展开后不再显示收起提示", !textOf(advTree).includes("已收起"));
 check(
@@ -439,6 +439,13 @@ check(
 );
 check("展开后高级数字字段带出当前值", hosts(advTree).some((n) => n.tag === "input" && n.props.type === "number" && n.props.value === "3"));
 check("高级项也有「恢复默认」", advRows.every((r) => r.buttons.some((b) => textOf(b) === "恢复默认")));
+const preTestRow = advRows.find((r) => r.key === "preTest");
+check(
+  "「评审先于测试」行是下拉，三档 off/remind/gate（v0.5.7）",
+  Boolean(preTestRow) && preTestRow.field.tag === "select" &&
+    hosts(preTestRow.row).filter((n) => n.tag === "option").map((n) => n.props.value).join(",") === "off,remind,gate",
+  preTestRow ? hosts(preTestRow.row).filter((n) => n.tag === "option").map((n) => n.props.value).join(",") : "行不存在",
+);
 setAdvanced(false);
 check("再点一次收起、DOM 里没有高级行", advancedRows(render()).length === 0 && controlRows(render()).length === 7, `n=${controlRows(render()).length}`);
 
@@ -460,7 +467,7 @@ const endpointRows = controlRows(endpointTree);
 check("endpoint 模式下基础组 10 行（多出静态端点三行）", endpointRows.length === 10, `n=${endpointRows.length}`);
 check("endpoint 模式下收起时不渲染 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
 setAdvanced(true);
-check("endpoint 模式下高级区 11 行（provider 项只在 dsh 模式渲染）", advancedRows(render()).length === 11, `n=${advancedRows(render()).length}`);
+check("endpoint 模式下高级区 12 行（provider 项只在 dsh 模式渲染）", advancedRows(render()).length === 12, `n=${advancedRows(render()).length}`);
 setAdvanced(false);
 check("endpoint 模式状态行说明直连", textOf(endpointTree).includes("LLM 直连静态端点"));
 

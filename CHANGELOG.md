@@ -3,6 +3,53 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.5.7] — 2026-10-10
+
+### Added
+
+- **Review before tests (`preTest`).** Answering the request "can the review be wired into the
+  standard flow — e.g. start it before the agent runs unit tests?" there are now three modes:
+  `off` (factory default: don't touch test commands), `remind` (let the test run, then remind the
+  model that this batch has not been reviewed), and `gate` (a test command is refused until one
+  **successful** `ocr_review` covers the current changes). The gate is installed with the host's
+  supported `ctx.tools.guard()` — the documented "a denial that must hold regardless of order is a
+  guard; a guard is synchronous" API — and falls back to the `tools/pre-execute` waterfall on hosts
+  that do not expose `guard`. Coverage is tracked per agent (a `WeakMap` keyed by the agent object):
+  a successful `ocr_review` sets it, a successful write tool clears it, and a *failed* review never
+  counts as reviewed (fail-closed). Detection only inspects shell-ish tools
+  (`pwsh`/`powershell`/`bash`/`sh`/`zsh`/`shell`/`cmd`/`run_command`/`terminal`) and matches common
+  test entry points (npm/pnpm/yarn/bun test, node --test, vitest/jest/pytest/phpunit/ctest/rspec/tox,
+  python -m pytest|unittest, go/cargo/dotnet/gradle/mvn/make test|verify); nothing is executed by the
+  plugin itself, and `preTest` is also selectable in the settings page (Advanced → Tuning).
+- `ocr_status` reports `preTest: { mode, mechanism, denials, reminders }`, so you can tell whether
+  the gate is actually armed (`mechanism` is `guard` / `pre-execute` / `none`) and how many times it
+  fired; the on-demand skill text now tells the model to review before running tests.
+
+### Fixed
+
+- **`remind` never actually did anything** (found by reviewing this very patch with `ocr_review`).
+  The pending flag is set by the same verdict function the gate calls, but the hook was only armed
+  when the mode was exactly `gate` — so in `remind` mode nothing was ever registered, `pending` stayed
+  false and the reminder (and the `reminders` counter) were unreachable. Both `gate` and `remind` now
+  arm the hook; `remind` just never returns a denial. The smoke test asserts this through the hook the
+  plugin really registers, so an un-armed `remind` fails the suite.
+- **A `preview: true` review could satisfy the gate.** `preview` only lists the files to review and
+  never calls the LLM, yet its result has `ok === true`, so one preview run was enough to pass the
+  gate. Coverage now requires `value.ok === true && value.preview !== true`; `ocr_review`'s result and
+  schema declare the new `preview` field (an undeclared field would be rejected by the host's
+  `additionalProperties: false` check at call time).
+- **The test-command pattern matched anywhere in the line.** `git commit -m "fix jest tests"`,
+  `grep -r pytest src/` or `cat vitest.config.js` were all treated as test runs — noisy denials and
+  inflated counters in `gate` mode. Detection now splits the command on `&&` / `||` / `;` / `|` /
+  newlines and anchors each segment at its start (so `cd lib && npm test` counts), and denials are
+  counted once per tool call (`callId`) instead of once per question. `test/smoke.mjs` carries the
+  false-positive cases as assertions.
+- Denial and reminder texts pointed at "设置 → 代码审核" instead of the real name 「代码评审」; the
+  unused per-agent `denials` counter and the never-read `preTestStats()` export were cleaned up
+  (`runStatus` now reads the shared totals).
+- Docblock and schema descriptions said the gate lives in `tools/pre-execute` and that `remind` would
+  "run one review for you" — it prefers `ctx.tools.guard()`, and it only reminds the model to review.
+
 ## [0.5.6] — 2026-10-10
 
 ### Fixed

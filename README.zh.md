@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.5.6）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本（v0.3.0 → v0.5.7）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -70,15 +70,15 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 - **设置 → 代码评审**：浏览器半侧往 `settings.section` 注册的独立设置页，左侧设置导航里直接可见 —— **改动都在这里做**；
 - **设置 → 插件 → `dsh-open-code-review`**：这个 bundle 的卡片现在只渲染**只读摘要**（键/值两列 + 一行「完整设置：设置 → 代码评审」），不再承载可编辑表单。
 
-设置页的结构（`lib\client.js` 的 `FIELDS`，共 **24 行**）：
+设置页的结构（`lib\client.js` 的 `FIELDS`，共 **25 行**）：
 
 | 位置 | 行数 | 字段 |
 | --- | --- | --- |
 | **基础**（默认展开） | 6 | 总开关 `enabled`、默认引擎 `engine`、自动评审 `autoReview`、独立评审 agent `reviewerAgent`、LLM 路由 `llmMode`、模型名 `llmModel` |
 | **从属行**（随父开关出现） | 6 | `reviewerProvider` / `reviewerModel` / `reviewerRounds`（`reviewerAgent=spawn` 时）；`llmBaseUrl` / `llmProtocol` / `llmApiKeyRef`（`llmMode=endpoint` 时）。另外高级项 `llmProvider` 只在 `dsh` 路由下出现 |
-| **「高级设置（12 项）」**（默认折叠，点标题展开） | 12 | 调优：`autoScope`、`autoMaxPerSession`、`autoMinReviewableFiles`、`autoMinIntervalMs`、`autoSkipSubagents`、`autoIncludeDiff`；运行与诊断：`audience`、`ocrPath`、`timeoutMinutes`、`progress`、`llmProvider`、`verbose` |
+| **「高级设置（13 项）」**（默认折叠，点标题展开） | 13 | 调优：`autoScope`、`autoMaxPerSession`、`autoMinReviewableFiles`、`autoMinIntervalMs`、`autoSkipSubagents`、`autoIncludeDiff`、`preTest`；运行与诊断：`audience`、`ocrPath`、`timeoutMinutes`、`progress`、`llmProvider`、`verbose` |
 
-- 折叠区标题形如 **「高级设置（12 项）」**；折叠着的时候，如果高级项里有改了但还没保存的行，标题后面会再显示 **「N 项待保存」**。
+- 折叠区标题形如 **「高级设置（13 项）」**；折叠着的时候，如果高级项里有改了但还没保存的行，标题后面会再显示 **「N 项待保存」**。
 - 被设置页改过的行带 **「设置页已改」** 标记；文件层到底提供了哪些键，要看 `ocr_status` 的 `configSource` / `configPath` / `fileValues`。
 - `autoMinIntervalMs` 在表单里是档位下拉（30 秒 / 1 分钟 / 5 分钟 / 10 分钟 / 自定义…），但**存储仍是毫秒**：选「自定义…」可手填毫秒值（默认 `60000`）。
 - 改完立即生效，不用重启：宿主把新值写进当前 profile 的 patch YAML（`volatile` 引用 + `loader/volatile-update` 广播）。
@@ -87,7 +87,7 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 
 ![设置页：展开「高级设置」](docs/settings-advanced.png)
 
-*真机截图（Windows 上的 DSH，侧边栏已裁掉）：上面是基础组，下面是点开「高级设置（12 项）」后的样子。*
+*真机截图（Windows 上的 DSH，侧边栏已裁掉）：上面是基础组，下面是点开「高级设置」后的样子。*
 
 > **页面从哪来**：DSH 的插件页**不会**由宿主 schema 自动生成页面 —— 插件管理页的配置账本只从三个席位读取注册：`plugins.item`（官方插件）、`plugins.bundle.config`（bundle 自带配置）和 `plugins.row.config`（某一行自带页面）。本插件的浏览器半侧 `lib\client.js` 往 `plugins.bundle.config`（key = npm 包名 `dsh-open-code-review`）注册的是 **summary 席位的只读摘要**，往 `settings.section`（一个打开的 list 席位）注册的是独立设置页：id `open-code-review`、order 17、label「代码评审」，完整表单渲染在那里。**首次加上客户端半侧后必须重启一次 DSH 再刷新页面**（见上表）。
 
@@ -128,6 +128,7 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 | `autoMinReviewableFiles` | `1` | 高级·调优 | 可审文件数低于该值就跳过 |
 | `autoMinIntervalMs` | `60000` | 高级·调优 | 两次自动评审最小间隔（毫秒；表单里是档位下拉 + 「自定义…」） |
 | `autoIncludeDiff` | `true` | 高级·调优 | 自动（delegate）评审时带不带 `git diff` |
+| `preTest` | `"off"` | 高级·调优 | 评审先于测试（v0.5.7 起）：`off`=不干预；`remind`=放行测试、结果回来后提醒模型去评审；`gate`=没被一次成功的 `ocr_review` 覆盖就直接跑测试会被挡回（见「评审先于测试」） |
 | `reviewer.agent` | `"off"` | 基础 | 独立评审 agent：`off`=不启用（评审走 ocr/delegate）；`spawn`=每轮起一个**只读**子 agent 评审（需要宿主提供 `subagents` 服务） |
 | `reviewer.provider` | `"spawn"` | 从属（`spawn`） | 子 agent 用的 provider 名（DSH 内置的是 `spawn`）；名字不存在时报 `OCR_REVIEWER_UNAVAILABLE` 并在 `notes` 里列出可用名 |
 | `reviewer.model` | `""` | 从属（`spawn`） | 评审子 agent 的模型（设置页的「子 agent 模型」下拉同样来自 DSH 模型目录）；留空=跟随 provider 默认 |
@@ -230,6 +231,27 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 把 `onDemand` 设为 `false`（或 `enabled = false`）就只剩模型工具与 `/ocr-review` 命令：不注册 skill、没有按钮。
 
+### 评审先于测试（`preTest`，v0.5.7 起）
+
+「agent 改完代码会自己跑单元测试」这种标准流程里，评审应该排在测试**之前**。`preTest` 就是把这个接进标准流程的三档开关（出厂 `"off"`，什么都不干预）：
+
+| 档 | 行为 |
+| --- | --- |
+| `off`（默认） | 不管测试命令 |
+| `remind` | 测试照跑；这次测试**结果回来后**，给模型发一条提醒，让它补一次 `ocr_review` |
+| `gate` | 这批改动还没被一次**成功**的 `ocr_review` 覆盖时，**直接跑测试会被挡回**（模型收到拒绝理由，测试根本不会执行） |
+
+实现方式（`lib/index.js` 的 `createPreTest`）用的是宿主认可的两种机制，按优先级自动选：
+
+1. `ctx.tools.guard(fn)` —— 官方约定的「与顺序无关的同步拒绝」入口，返回非空字符串即拒绝，返回的就是摘除句柄。`ocr_status.preTest.mechanism === "guard"` 表示走的是这条路。
+2. 老宿主没有 `tools.guard` 时回落到 `ctx.on("tools/pre-execute", …)`，返回 `{ kind: "deny", reason }`（waterfall 里不拥有决定权时必须 `next()`）。mechanism 显示 `"pre-execute"`。
+
+判定与覆盖规则：
+
+- 只认 shell 类工具（`pwsh`/`bash`/`sh`/`cmd`/`run_command` 等）里**命令开头**的常见测试入口（`npm/pnpm/yarn/bun test`、`node --test`、`npx vitest`、`vitest`/`jest`/`pytest`/`cargo test`/`go test`/`make test`…）：先按 `&&`/`||`/`;`/`|`/换行切段再逐段判定，所以 `cd lib && npm test` 算、而 `git commit -m "fix jest tests"` 这种只是提了一嘴的普通命令不算。**插件自己不执行任何命令**，只放行或拒绝。
+- 覆盖状态按 agent 记（`WeakMap`）：一次 `ocr_review` 成功（`value.ok === true`）算「评过了」；**成功写文件**立刻作废；失败的评审与 `preview: true`（只列文件、没调 LLM）**都不算**评过（fail-closed）。`remind` 档挂的是同一个钩子（只记账、从不返回拒绝），否则测试结果回来时根本没有待提醒状态。`remind` 只在测试结果回来时提醒一次 —— 提醒的是模型自己去评，插件不替你跑评审。
+- 累计次数会出现在 `ocr_status.preTest`（`denials` / `reminders`）与状态行里，可用来确认这档真的在起作用；同一次工具调用被询问多次只记一次。
+
 ### 自动评审（opt-in，出厂默认已关闭）
 
 > v0.5.0 起 `auto`（设置页「自动评审」）的出厂默认是 **`off`** —— 老用户升级后不会再被自动评审打扰；想要旧行为把它改回 `adaptive`。`lib/index.js` 的两处触发点（`tools/result`、`agent/turn-stopping`）第一行就是 `if (String(cfg.auto) === "off") return;`。
@@ -301,7 +323,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 插件卸载/重载是**等**在飞的评审收尾的：`dispose` 先 abort（子进程被 `terminate()`，结果标 `OCR_ABORTED`），再等这些评审真的 settle 才 resolve（`apply` 里的 effect `"在飞 ocr 评审的收尾（abort + 等待）"`），不会把半截结果当成功投递给模型。
 
-结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 166 项 / 没装 159 项）。
+结果码与「取消」都按**真机契约**做了硬校验（v0.3.4 一轮审计加固，见下表「加固」几条）：`signal` 已经 abort 时连子进程都不开（宿主自己会在 `spawn` 抛 `aborted before spawn`）；跑到一半才取消时子进程必须被 `terminate()`；`ocr_status.bridge` 的键集合与工具 schema 一致（多一个键宿主会在**调用期**拒收整个返回值）。这些都有断言（`test/smoke.mjs`：装了 `ocr` 181 项 / 没装 174 项）。
 
 ---
 
@@ -336,6 +358,19 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 回合尾部没有「启动代码审核」按钮 | 先看 `ocr_status` 的 `onDemand`（应为 `true`）、`skill.registered` 与 `command.registered`（v0.5.4 起，`false` 说明宿主拒绝了 `/ocr-review` 注册，按钮点了也不会动）；按钮由宿主槽位 `conversation.chat.turnTail` + `remote.commands` 提供，宿主没暴露远端命令服务时按钮不出现（这是设计好的降级，不影响其它入口）。改过 `lib\client.js` 后要刷新页面 |
 | 刚装好/刚重启就问 `ocr_status`，报「桥还没就绪」并回落静态端点 | v0.5.2 已修：本机桥是异步 `listen` 的，`resolveLlmRoute()` 现在会等这次启动完成（最多 2 秒）再算路由，所以**第一次**查询就走桥。慢机器上尤其明显（本机有 `ocr` 时只是因为 `ocr --version` 子进程恰好拖了几十毫秒才侥幸躲过） |
 | 机器上**没装** `ocr` 时 `ocr_status` 自相矛盾（路由行写着本机桥地址，`bridge` 却是 `null`、`llmEnv` 为空）；`ocr_review` 只丢一句「设置 `ocrPath`」，可用户其实还没装 | v0.5.3 已修：与装没装 ocr 无关的字段（`bridge`/`llmEnv`/`onDemand` 备注）改到定位之前算，`ocr_status` 末尾再按最新桥统计刷新一次；定位失败时把安装指引（`installHint`）同时写进 `ocr_review` 的 notes、自动评审的投递文本和 `ocr_status.notes` |
+| `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `guard`（老宿主没有 `tools.guard()` 时回落 `tools/pre-execute`）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+
+### 加固（v0.5.7：评审先于测试 —— 用宿主的 guard 契约接进「跑测试之前」，并按自审逐条修掉 6 处）
+
+| 问题 | 现在 |
+| --- | --- |
+| 「改完代码就该先评审再跑测试」只能靠模型自觉：插件没有任何手段在测试命令执行**之前**介入 | 新增 `preTest` 三档（出厂的 `off` 不干预；`remind` 测试照跑、结果回来提醒；`gate` 未覆盖就直接挡回，测试根本不执行）。介入点是宿主官方的 `ctx.tools.guard()` —— 契约明写「必须与顺序无关的拒绝就用它、且它是同步的」，缺这个 API 的老宿主回落到 `tools/pre-execute` waterfall（`{kind:"deny",reason}`，不拥有决定权时 `next()`）。`ocr_status.preTest.mechanism` 会显示实际走的是哪条路 |
+| 「覆盖」如果只按时间或按会话记，很容易出现「评完又改了文件还放行」 | 覆盖状态按 agent 用 `WeakMap` 记：一次**成功**的 `ocr_review`（`value.ok === true`）置位，**成功写文件**立刻作废，失败的评审**不算**评过（fail-closed）；`remind` 档只在测试结果回来时提醒一次（`agent.followup`，会唤醒 agent）。插件自己**不执行任何命令**，只拦不跑 |
+| 这类「拦工具」的功能一旦拦错范围，正常开发会被打断 | 判定收得很窄：先按 `&&`/`\|\|`/`;`/`\|`/换行切段，只认 shell 类工具（`SHELL_TOOLS`）里**命令开头**命中测试入口（`npm/pnpm/yarn/bun test`、`node --test`、`npx vitest`、`vitest`/`jest`/`pytest`/`cargo test`/`go test`/`make test`…）的那一种；`ocr_review` 自身与其它工具一律不受影响 |
+| **`remind` 档是死代码**（自审发现，critical）：`state.pending` 只在 `preTestVerdict()` 里置位，而它只有 `gate` 档挂上钩子才会被调用 ⇒ remind 档从不挂钩子、pending 永远是 false，「放行测试 + 回来提醒」根本不会发生（旧测试靠手动调 `preTestVerdict()` 才假绿） | `sync()` 改成 `gate` 与 `remind` 都 `arm()`（remind 的判定一律返回 ""，只记账），off 才 `unarm()`；测试改成**通过真实注册的钩子**驱动 pending，钩子没挂就会红 |
+| **`preview: true` 的评审能直接绕过闸门**（自审发现）：`out.ok` 对 preview 也为 true，于是模型先跑一次「只列文件、不调 LLM」的 preview 就能把覆盖状态置位 | 覆盖判定要求 `value.ok === true && value.preview !== true`；`ocr_review` 的返回值与 schema 都新增 `preview` 字段（不然宿主按 `additionalProperties:false` 会在调用期拒收） |
+| 测试命令正则没锚定（自审发现）：`\b(jest\|pytest\|…)\b` 会命中命令行里任意位置的同名单词 ⇒ `git commit -m "fix jest tests"`、`grep -r pytest src/` 都会被当成测试，gate 档下误拦并刷高计数 | 改成按分隔符切段 + 逐段锚定开头（`TEST_SEGMENT_RES` + `looksLikeTestCommand()`），并加反例断言；同一次工具调用按 `callId` 去重，不再被多次询问重复计数 |
+| 顺带修掉的文案/死代码：拒绝与提醒文案把入口写成「设置 → 代码审核」（真名是「代码评审」）；`preTestStats()` 导出了却没人用（`state.denials` 也从没人读） | 文案统一成「设置 → 代码评审」；`runStatus` 改走 `preTestStats()`，删掉没人读的每 agent 计数器；`lib/config.js` 的 docblock 与 schema 描述改成如实说明「优先 guard、回落 pre-execute」与「remind 只提醒模型自己去评，插件不替你跑」 |
 
 ### 加固（v0.5.6：真凭据端到端能跑了 + job 归属有断言 + 第三轮自审查出的三个桥缺陷）
 
@@ -377,7 +412,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 | 现象（升级前的旧行为） | 现在 |
 | --- | --- |
-| CI（裸 clone + node，没有 npm 全局包）上 24 条断言失败：真链路用例直接 FAIL，job/进度渲染、`render`、自动档注入跟着级联红 | 离线用例按环境换期望值：装了 `ocr` 验真链路，没装就验「定位失败」的诊断路径（`OCR_NOT_FOUND` + 安装指引 + 不误报成功），断言数恒定（现在 166 / 没装 159；v0.5.3 当时是 161 / 155）。CI 现在只用 `node` 就能跑到结尾 |
+| CI（裸 clone + node，没有 npm 全局包）上 24 条断言失败：真链路用例直接 FAIL，job/进度渲染、`render`、自动档注入跟着级联红 | 离线用例按环境换期望值：装了 `ocr` 验真链路，没装就验「定位失败」的诊断路径（`OCR_NOT_FOUND` + 安装指引 + 不误报成功），断言数恒定（现在 181 / 没装 174；v0.5.3 当时是 161 / 155）。CI 现在只用 `node` 就能跑到结尾 |
 | 没装 ocr 时真实调用「在定位那一步就返回」，于是面板/进度行一条 job 都没有 —— 以前这被当成「进度功能坏了」 | 这是有意的 **fail-closed**：绝不显示一条假装在评审的进度行。用例改成守住不变量（登记的 job 都不停在 `running`、id/kind/label 统一、输出环有带时间戳的日志行） |
 
 ### 加固（v0.5.2：桥就绪等待）
@@ -385,7 +420,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | 现象（升级前的旧行为） | 现在 |
 | --- | --- |
 | 插件刚加载完就调 `ocr_status` / `ocr_review`：桥还在 `listen`，于是判成「桥没就绪」→ 静默回落 `llm.baseUrl` 静态端点（凭据要按 `llmApiKeyRef` 解析，dsh 模式下通常是没配的） | `resolveLlmRoute()` 开头 `await waitForBridge()`：桥启动是异步的，等它（最多 `BRIDGE_READY_WAIT_MS = 2000`）再决定路由；`ocr_status` 的 `llmRoute`/`llmEndpoint`/`bridge` 三个字段因此始终自洽 |
-| 离线测试用 `setTimeout(150)` 赌桥的 `listen` 完成 | 改成**立刻**查一次就断言桥可用（钉住等待逻辑），两处裸 `bridge.url` 的 `fetch` 加了守卫，桥真的起不来时是 FAIL 而不是把整个套件崩掉（CI 之前就崩在 `test/smoke.mjs:675`）。`test/smoke.mjs` 装了 `ocr` 时 166 项、没装时 159 项（少掉的 6 条是真端到端 `ocr llm test`，其余用例两种环境都跑、只是期望值不同） |
+| 离线测试用 `setTimeout(150)` 赌桥的 `listen` 完成 | 改成**立刻**查一次就断言桥可用（钉住等待逻辑），两处裸 `bridge.url` 的 `fetch` 加了守卫，桥真的起不来时是 FAIL 而不是把整个套件崩掉（CI 之前就崩在 `test/smoke.mjs:675`）。`test/smoke.mjs` 装了 `ocr` 时 181 项、没装时 174 项（少掉的 7 条是真端到端 `ocr llm test`，其余用例两种环境都跑、只是期望值不同） |
 
 ### 加固（v0.5.0：按需评审 + 逐条列问题 + 配置收敛）
 
@@ -459,18 +494,18 @@ dsh-open-code-review/
 │  ├─ index.js           # 插件入口：schemastery Config + 工具/命令注册 + 自动评审钩子 + 本机桥接线 + 独立评审 agent 编排（runReviewerReview / 轮次往返 / subagents 子注入）+ 评审进度接线（openReviewJob / finishReviewJob / chunkSink）
 │  ├─ reviewer.js        # 评审 agent：规格提示词、findings schema 与解析、线程与轮次（纯逻辑；subagents 运行时由调用方注入）
 │  ├─ bridge.js          # 本机 LLM 桥：OpenAI 兼容 /v1/chat/completions ⇄ ctx.llm.stream（含宿主硬契约：assistant 消息补 source{kind:"model",provider,model}、tool 消息补 source{kind:"tool",callId}）
-│  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section + 会话内进度行（conversation.input.dock），渲染设置表单（`FIELDS` 24 行 = 基础 6 + 随父开关出现的从属 6 行 + 「高级设置」折叠 12 项；bundle 卡片只渲染只读摘要），文案走 Client locale
+│  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section + 会话内进度行（conversation.input.dock），渲染设置表单（`FIELDS` 25 行 = 基础 6 + 随父开关出现的从属 6 行 + 「高级设置」折叠 13 项；bundle 卡片只渲染只读摘要），文案走 Client locale
 │  ├─ config.js          # 三层配置合并、schemaOverrides（读 volatile 引用）
 │  ├─ job.js             # 评审进度：把每次评审登记成 background job（进度行/输出流/停止/结算），宿主没有 jobs 服务时整条链路降级成空操作
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 166 项 / 没装 159 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验）：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 181 项 / 没装 174 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / guard 与 pre-execute 两种机制 / 覆盖状态随评审与写文件变化））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
    ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，95 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「半截正文也算截断」「桥自己的超时会给客户端交代并计入统计」「畸形请求体 → 400 invalid_body」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数）：node test/bridge-smoke.mjs
-   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，206 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设）：node test/client-smoke.mjs
+   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 DSH 自带的 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
    ├─ zprobe3.mjs        # schema 预检：25 个字段是否都带 volatile/description/default

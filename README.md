@@ -64,7 +64,7 @@ Layout of the page:
 
 - **Basics — 6 rows**, expanded: `enabled` (master switch), `engine`, `autoReview`, `reviewerAgent`, `llmMode`, `llmModel`.
 - **Dependent rows** appear with their parent: `reviewerProvider` / `reviewerModel` / `reviewerRounds` when `reviewerAgent = spawn`; `llmBaseUrl` / `llmProtocol` / `llmApiKeyRef` when `llmMode = endpoint`; `llmProvider` (an advanced row) only in `dsh` mode.
-- **「Advanced settings」— 12 items, folded by default.** *Tuning*: `autoScope`, `autoMaxPerSession`, `autoMinReviewableFiles`, `autoMinIntervalMs`, `autoSkipSubagents`, `autoIncludeDiff`. *Runtime & diagnostics*: `audience`, `ocrPath`, `timeoutMinutes`, `progress`, `llmProvider`, `verbose`. The fold title reads 「高级设置（12 项）」; if it holds edited-but-unsaved rows it also shows 「N 项待保存」.
+- **「Advanced settings」— 13 items, folded by default.** *Tuning*: `autoScope`, `autoMaxPerSession`, `autoMinReviewableFiles`, `autoMinIntervalMs`, `autoSkipSubagents`, `autoIncludeDiff`, `preTest`. *Runtime & diagnostics*: `audience`, `ocrPath`, `timeoutMinutes`, `progress`, `llmProvider`, `verbose`. The fold title reads 「高级设置（13 项）」; if it holds edited-but-unsaved rows it also shows 「N 项待保存」.
 - `autoMinIntervalMs` is a preset dropdown (30 seconds / 1 minute / 5 minutes / 10 minutes / Custom…) but is stored in **milliseconds** — pick 「自定义…」 to type a millisecond value (default `60000`).
 - Rows the settings page has touched carry a 「设置页已改」 badge.
 - Values are stored per profile (they do not follow you to another profile or machine). `ocr_status` shows where each key actually came from.
@@ -112,6 +112,7 @@ That file layer holds the keys the settings page does not have (`ocrCandidates`,
 | `autoMinIntervalMs` | `60000` | Advanced · tuning | Cooldown between two automatic reviews, in ms. |
 | `autoSkipSubagents` | `true` | Advanced · tuning | Turns of subagents (`delegationDepth > 0`) do not trigger automatic review. |
 | `autoIncludeDiff` | `true` | Advanced · tuning | Include the unified diff when an automatic review falls back to `delegate`. |
+| `preTest` | `"off"` | Advanced · tuning | Review before tests: `off` / `remind` / `gate` — see [Review before tests](#review-before-tests-pretest-since-057). |
 | `audience` | `"agent"` | Advanced · runtime | → `ocr --audience`; `agent` = summary only, `human` = the fuller report. |
 | `ocrPath` | `""` | Advanced · runtime | Absolute path to the real `ocr` executable; empty = auto-discovery. |
 | `timeoutMinutes` | `15` | Advanced · runtime | → `ocr --timeout` and the plugin-side hard timeout. The settings page caps it at the factory 60. |
@@ -196,6 +197,37 @@ The button and a typed `/ocr-review` both execute the same slash command on the 
 
 Turn both off (`onDemand = false`, or `enabled = false`) and the plugin is reduced to the tools plus the `/ocr-review` command — nothing is ever injected or auto-started. `onDemand = false` also removes the skill registration; the tail button disappears with it.
 
+### Review before tests (`preTest`, since 0.5.7)
+
+“Can the review be wired into the standard flow — start it before the agent runs unit tests?”
+Yes, and it is off by default. Three modes (`preTest`, settings page → **Advanced → Tuning →
+Review before tests**, or `preTest` in the config file):
+
+| Mode | What happens when a shell tool looks like a test command |
+| --- | --- |
+| `off` (default) | Nothing. Test commands are untouched. |
+| `remind` | The test runs; when its result comes back the model gets one reminder that this batch has not been reviewed yet. |
+| `gate` | The command is **refused** until one **successful** `ocr_review` covers the current changes. The model receives the refusal as that tool's result, so it can review first and then re-run the test. |
+
+How it is implemented (worth knowing if you write plugins yourself): DSH has no
+`tools/before-call` event, but a tool call passes through the `tools/pre-execute` waterfall, and the
+host offers `ctx.tools.guard()` — the officially documented "a denial that must hold regardless of
+order is a guard; a guard is synchronous". The plugin prefers `guard` and falls back to a
+`tools/pre-execute` listener returning `{ kind: "deny", reason }` when `guard` is unavailable.
+`ocr_status.preTest.mechanism` tells you which one is armed (`guard` / `pre-execute` / `none`).
+
+Coverage is tracked per agent in memory: a successful `ocr_review` marks the batch reviewed, **any**
+successful write tool clears that mark, and neither a *failed* review nor a `preview: true` call (which
+only lists files and never calls the LLM) counts (fail-closed). `remind` arms the same hook so it can set
+the pending flag — it just never returns a denial. Detection only inspects shell tools (`pwsh` /
+`powershell` / `bash` / `sh` / `zsh` / `shell` / `cmd` / `run_command` / `terminal`) and matches common
+entry points **at the start of a command** (`npm|pnpm|yarn|bun test`, `node --test`, `npx vitest`,
+`vitest|jest|pytest|phpunit|ctest|rspec|tox`, `python -m pytest|unittest`,
+`go|cargo|dotnet|gradle|mvn|make test|verify`), splitting on `&&` / `||` / `;` / `|` / newline first so
+`cd lib && npm test` counts while `git commit -m "fix jest tests"` does not. The plugin never runs
+anything itself, only allows or refuses. `gate` can be noisy while you are iterating — `remind` is the
+gentler middle ground.
+
 ### Automatic review (opt-in, off by default)
 
 Trigger: **the end of a turn** *and* that turn wrote at least one file — *and* you turned it back on (`autoReview` set to `adaptive` / `inject` / `followup`; the factory default is `off` since 0.5.0). Before running, the plugin checks, in order:
@@ -255,7 +287,7 @@ With `progress = true` (default) every review is registered as a background job 
 
 ## Hardening history
 
-The v0.3.0 → v0.5.6 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md). 0.5.5 is what the plugin found by reviewing its own diff with `ocr_review`: thrown upstream errors were never retried, a stream that ended without a terminal event was reported as an empty success, streaming dropped the text when a tool call was also present, the response builder took an unused `model` argument, writes could still hit a dead socket after the client disconnected (an unhandled `ERR_STREAM_DESTROYED` that can kill the host), and the three "we aborted it ourselves" messages were duplicated instead of generated from one constant. 0.5.6 came from a second self-review plus the first *executed* real-credential end-to-end run (`node test/e2e-llm.mjs`): a half-answer truncation still counted as success, the bridge's own upstream timeout was indistinguishable from a client disconnect (so it answered nothing and counted nothing), and a `null` JSON body could crash the bridge.
+The v0.3.0 → v0.5.7 hardening work — per-version fixes, the reliability contract and the failure codes above — is recorded version by version in [CHANGELOG.md](CHANGELOG.md). 0.5.5 is what the plugin found by reviewing its own diff with `ocr_review`: thrown upstream errors were never retried, a stream that ended without a terminal event was reported as an empty success, streaming dropped the text when a tool call was also present, the response builder took an unused `model` argument, writes could still hit a dead socket after the client disconnected (an unhandled `ERR_STREAM_DESTROYED` that can kill the host), and the three "we aborted it ourselves" messages were duplicated instead of generated from one constant. 0.5.6 came from a second self-review plus the first *executed* real-credential end-to-end run (`node test/e2e-llm.mjs`): a half-answer truncation still counted as success, the bridge's own upstream timeout was indistinguishable from a client disconnect (so it answered nothing and counted nothing), and a `null` JSON body could crash the bridge. 0.5.7 adds the `preTest` gate/remind path on top of the host's `ctx.tools.guard()` contract, with coverage tracked per agent and a failed review never counting as reviewed; reviewing that very patch found that `remind` never actually armed anything (so its reminder was unreachable), a `preview: true` review could satisfy the gate without calling the LLM, the test-command pattern matched words anywhere in the line, and denial counts were counted once per question instead of once per call.
 
 ## Development & tests
 
@@ -263,11 +295,11 @@ Six dependency-free suites (`node test/<name>.mjs`), item counts as actually run
 
 | Suite | Items | Covers |
 | --- | --- | --- |
-| `node test/smoke.mjs` | 166 (159 without `ocr` — same environment as CI) | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, job ownership (`owner` passed through to `jobs.start`/`wait`), config layering/sources, per-line findings, bridge readiness, token/cache accounting, `/ocr-review` registration state. Checks that need the real `ocr` binary swap their expectations for the “not installed” diagnostics path instead of failing, so CI (a bare clone) is green too. |
+| `node test/smoke.mjs` | 181 (174 without `ocr` — same environment as CI) | Offline smoke: tool schemas, result codes, fail-closed shapes, cancellation, lifecycle, reviewer path, progress, job ownership (`owner` passed through to `jobs.start`/`wait`), config layering/sources, per-line findings, bridge readiness, token/cache accounting, `/ocr-review` registration state, `preTest` (test-command detection incl. false-positive cases, all three modes, both host mechanisms, coverage set/cleared by review and writes). Checks that need the real `ocr` binary swap their expectations for the “not installed” diagnostics path instead of failing, so CI (a bare clone) is green too. |
 | `node test/job-smoke.mjs` | 51 | Review progress: registration, progress line, output stream, stop → cancel, idempotent settlement. |
 | `node test/reviewer-smoke.mjs` | 45 | Reviewer subagent logic: prompt, structured parsing, rounds, failure/timeout (aborts the in-flight child). |
 | `node test/bridge-smoke.mjs` | 95 | The local bridge against a real ocr subprocess, including regressions for truncated upstream streams (a stream that ends without a terminal event → `upstream_truncated`, retried once, *including* the half-answer case), upstream errors that arrive by throwing (`socket hang up` → retried and recovered), the bridge's own upstream timeout now answering the client and counting a failure instead of going silent, malformed JSON bodies (`null` / `[]` → `400 invalid_body`), an upstream that ignores the abort and finishes after the client left (no write into a dead socket, no bogus failure), client disconnects and token accounting (prompt / completion / total / cache read / cache write / partial). |
-| `node test/client-smoke.mjs` | 206 | Browser half with a mini React: settings form (basics + collapsible advanced), card summary, in-session progress row, turn-tail review button. |
+| `node test/client-smoke.mjs` | 208 | Browser half with a mini React: settings form (basics + collapsible advanced), card summary, in-session progress row, turn-tail review button. |
 | `node test/cordis-inject.mjs` | 26 | Real-cordis regression across three host shapes (all services / remote.session missing / no remote). |
 
 `node test/cordis-inject.mjs` exits **2 (skipped)** when `OCR_TEST_CORDIS` points at no cordis checkout — a skip is not a pass. There are no runtime dependencies, and the tests need no install either.
