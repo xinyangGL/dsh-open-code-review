@@ -175,6 +175,8 @@ async function waitFor(predicate, timeoutMs = 3000) {
 
   check("toOpenAiUsage：认 DSH 与 OpenAI 两套字段名", toOpenAiUsage({ inputTokens: 2, outputTokens: 4 }).prompt_tokens === 2 && toOpenAiUsage({ inputTokens: 2, outputTokens: 4 }).total_tokens === 6, text(toOpenAiUsage({ inputTokens: 2, outputTokens: 4 })));
   check("toOpenAiUsage：没有可用字段时返回 undefined", toOpenAiUsage({}) === undefined && toOpenAiUsage(null) === undefined);
+  /* v0.6.1（OCR 自审发现）：`state.chunks` 只自增、没有任何读取方，删掉以免让人以为有「chunk 数」这层统计。 */
+  check("累积器（v0.6.1）：不再保留没有读取方的 state.chunks 死字段", !("chunks" in acc.state) && !("chunks" in toolAcc.state), Object.keys(acc.state).join(","));
   check("bearerTokenOf：大小写与多余空格都认", bearerTokenOf("Bearer  abc ") === "abc" && bearerTokenOf("bearer xyz") === "xyz" && bearerTokenOf("Basic zzz") === "");
   check("toOpenAiError：OpenAI 错误体骨架", toOpenAiError("boom", "code_x", "authentication_error").error.code === "code_x" && toOpenAiError("boom").error.type === "invalid_request_error");
 }
@@ -291,6 +293,21 @@ const badJson = await post(happyBridge.url, happyBridge.token, "{不是 JSON");
 check("桥：请求体不是 JSON → 400", badJson.status === 400 && badJson.json.error.code === "invalid_json", String(badJson.status));
 const emptyMessages = await post(happyBridge.url, happyBridge.token, { model: "m", messages: [{ role: "system", content: "只有系统提示" }] });
 check("桥：messages 里没有可翻译内容 → 400", emptyMessages.status === 400 && emptyMessages.json.error.code === "empty_messages", emptyMessages.raw.slice(0, 120));
+/* v0.6.1（OCR 自审发现）：以前这些「没转发出去」的请求也记进 failed，于是诊断里出现
+   「已转发 0 次 · 失败 1 次」，而且一次 401 会盖掉真正的上游失败。现在分开计数。 */
+check(
+  "桥（v0.6.1）：「到达桥但没转发出去」的请求记进 rejected，不污染 failed（不出现「已转发 0 次 · 失败 1 次」）",
+  happyBridge.stats.rejected === 4 && happyBridge.stats.failed === 0 && happyBridge.describe().rejected === 4 && String(happyBridge.stats.lastReject).includes("empty_messages"),
+  text({ rejected: happyBridge.stats.rejected, failed: happyBridge.stats.failed, lastReject: happyBridge.stats.lastReject }),
+);
+check(
+  "桥（v0.6.1）：bridgeFailureNote 会点出「未转发即被拒」与其最近原因（否则用户只看到 ocr 的通用提示）",
+  (() => {
+    const note = bridgeFailureNote(happyBridge.describe());
+    return typeof note === "string" && note.includes("未转发即被拒 4 次") && note.includes("最近被拒");
+  })(),
+  String(bridgeFailureNote(happyBridge.describe())),
+);
 
 const toolScript = fakeStream([
   { type: "tool-call-delta", index: 0, id: "call_probe", name: "ocr_selftest", argumentsDelta: "{\"note\":" },
@@ -490,6 +507,25 @@ check(
   "桥（v0.5.4）：抛出的异常也走既有判定（不可重试的错误记 retrySkip，不谎报重试）",
   throwBridge.stats.failed === 1 && throwBridge.stats.retries === 0 && throwBridge.stats.retrySkips === 1 && String(throwBridge.stats.retrySkipReason).length > 0,
   text(throwBridge.describe()),
+);
+
+/* v0.6.1（OCR 自审发现）：retrySkipReason 只写不重置 —— 下一次请求若是「重试过仍失败」
+   （不写这条原因），同一次诊断里会打印上一条的原因。现在每次转发前清掉。 */
+const clearScript = fakeStream((options, call) =>
+  call === 1
+    ? [{ type: "finish", reason: { kind: "error", failure: { code: "MODEL_NOT_FOUND", message: "Model not supported" } } }]
+    : [{ type: "text-delta", index: 0, text: "recovered" }, { type: "finish", reason: { kind: "stop" } }],
+);
+const clearBridge = await startLlmBridge({ stream: clearScript.stream, target: () => ({ provider: "p", model: "m" }), logger });
+const clearFirst = await post(clearBridge.url, clearBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+const skippedReason = String(clearBridge.stats.retrySkipReason);
+const clearSecond = await post(clearBridge.url, clearBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+check(
+  "桥（v0.6.1）：上一次请求留下的 retrySkipReason 不会带到下一次（否则诊断里出现错配的原因）",
+  clearFirst.status === 502 && skippedReason.length > 0 && clearSecond.status === 200 &&
+    clearBridge.stats.retrySkips === 1 && clearBridge.stats.retrySkipReason === "" &&
+    !String(bridgeFailureNote(clearBridge.describe())).includes("未重试原因"),
+  text({ skippedReason, after: clearBridge.stats.retrySkipReason, note: bridgeFailureNote(clearBridge.describe()) }),
 );
 
 /* 抛出的是「明确值得重试」的网络错误时，以前永远不会重试（异常直接穿透整个循环）——这条钉住修复。 */
@@ -716,7 +752,7 @@ try {
 }
 check("桥：close() 之后端口关掉、请求失败", closed === true);
 
-for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge, retryBridge, noRetryBridge, retryStreamBridge, flakyBridge, truncBridge]) await bridge.close();
+for (const bridge of [toolBridge, failBridge, throwBridge, noRoute, streamBridge, retryBridge, noRetryBridge, retryStreamBridge, flakyBridge, truncBridge, clearBridge]) await bridge.close();
 
 /* M1（v0.4.0）：重试闸门的三分支 + token 累计 + 「没重试」的原因。
    真机踩过的坑：v0.3.7 把 kind==="aborted" 摆在判定最前面，于是上游标成 aborted 的

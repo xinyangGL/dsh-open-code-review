@@ -734,11 +734,12 @@ check(
 );
 /* ocr_status.bridge 在 schema 里声明的键（且 additionalProperties:false）：多一个键
    宿主会在调用期拒收整个返回值——这一支以前零覆盖。M1（v0.4.0）给 describe() 加了
-   retrySkips/retrySkipReason/tokens 三个键，所以这里从 10 个键变成 13 个。 */
+   retrySkips/retrySkipReason/tokens 三个键（10 → 13），v0.6.1 又把「没转发就被拒」拆出
+   rejected/lastReject（13 → 15）。 */
 const bridgeKeys = Object.keys(bridgeStatus.bridge ?? {}).sort().join(",");
 check(
-  "ocr_status：bridge 对象恰好是 schema 声明的 13 个键（否则宿主调用期拒收）",
-  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,requests,retries,retrySkipReason,retrySkips,tokenMasked,tokens,uptimeMs,url",
+  "ocr_status：bridge 对象恰好是 schema 声明的 15 个键（否则宿主调用期拒收）",
+  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,lastReject,rejected,requests,retries,retrySkipReason,retrySkips,tokenMasked,tokens,uptimeMs,url",
   bridgeKeys,
 );
 check(
@@ -814,8 +815,12 @@ if (HAS_OCR) {
     JSON.stringify((llmStub.calls[1]?.messages ?? []).map((message) => message.role)),
   );
   check(
-    "dsh 路由：桥的 stats 计入 ocr_status 的探测请求（并记下那次故意打错的 token）",
-    Number(live.bridge?.requests ?? 0) >= 2 && Number(live.bridge?.failed ?? 0) === 1 && String(live.bridge?.lastModel).length > 0,
+    "dsh 路由：桥的 stats 计入 ocr_status 的探测请求（那一次故意打错的 token 记进 rejected，不再污染 failed）",
+    Number(live.bridge?.requests ?? 0) >= 2 &&
+      Number(live.bridge?.failed ?? 0) === 0 &&
+      Number(live.bridge?.rejected ?? 0) === 1 &&
+      String(live.bridge?.lastReject ?? "").includes("鉴权失败") &&
+      String(live.bridge?.lastModel).length > 0,
     JSON.stringify(live.bridge),
   );
   check(
@@ -2292,6 +2297,14 @@ check(
     "M1：ocr_status 的 bridge schema 声明了 tokens / retrySkips / retrySkipReason（返回值多键会被宿主拒收）",
     bridgeDecl.includes("\"tokens\"") && bridgeDecl.includes("\"retrySkips\"") && bridgeDecl.includes("\"retrySkipReason\""),
     bridgeDecl.slice(0, 120),
+  );
+  check(
+    "v0.6.1：bridge schema 声明了 rejected / lastReject 并进 required（「没转发就被拒」与 failed 分开计数）",
+    bridgeDecl.includes("\"rejected\"") &&
+      bridgeDecl.includes("\"lastReject\"") &&
+      (statusSchema?.properties?.bridge?.oneOf?.[0]?.required ?? []).includes("rejected") &&
+      (statusSchema?.properties?.bridge?.oneOf?.[0]?.required ?? []).includes("lastReject"),
+    JSON.stringify(statusSchema?.properties?.bridge?.oneOf?.[0]?.required ?? null),
   );
   check(
     "v0.5.4：bridge.tokens 的 schema 也声明了 partial 与两个缓存字段（additionalProperties:false，漏声明 = 真机拒收）",

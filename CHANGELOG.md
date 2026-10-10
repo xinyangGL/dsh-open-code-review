@@ -3,6 +3,33 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.6.1] — 2026-10-10
+
+第一次用真机 `ocr` 审自己的 0.6.0 改动（`ocr_review{scope:"scan",paths:["lib/bridge.js"]}`，393.5s，
+走 DSH 本机桥），审出四条桥缺陷，逐条修掉。没有行为变更，只有记账与文案更诚实。
+
+Fixed
+- **删掉累积器里没人读的 `state.chunks`**（只有 `+= 1`，生产代码与测试都不消费）——留着会让人
+  以为有「chunk 数」这层统计；新增断言禁止它回来。
+- **请求体超过上限时先释放已收缓冲再 reject**：以前只 `req.pause()`，已 push 进 `chunks` 的部分
+  仍被那个 pending Promise 持有，直到外层写完 413、`req.destroy()` 才释放（注释里担心过
+  「悬着的请求钉住缓冲」，这正是同一类小窗口）。413 的行为不变（仍有「客户端收到 413 而不是
+  ECONNRESET」的断言）。
+- **「到达桥但没转发出去」的请求不再算 `failed`**：鉴权失败 / 请求体不合法 / 空 `messages` /
+  路由缺失以前都 `stats.failed += 1` 而 `requests` 不加，于是诊断里出现「已转发 0 次 · 失败 1 次」
+  这种自相矛盾的数字，而且一次 401 会把真正的上游失败盖掉。现在拆出 `rejected` + `lastReject`
+  （进 `ocr_status.bridge` 与 schema 的 `required`），`failed` 只表示「转发出去但失败」；
+  `bridgeFailureNote()` 与状态行都会写「未转发即被拒 N 次 · 最近被拒：…」。
+- **`retrySkipReason` 每次转发前清空**：以前只写不重置，上一次请求的原因会挂到下一次；若后一次是
+  「重试过仍失败」（不写这条原因），同一行诊断里就会出现「最近错误：A · 未重试原因：B」的错配。
+  `retrySkips` 仍是累计值。
+
+Tests
+- `test/bridge-smoke.mjs` 95 → **99**（死字段、rejected/lastReject 记账、`bridgeFailureNote` 的新片段、
+  retrySkipReason 逐请求重置）。
+- `test/smoke.mjs` 204 → **205**（没装 ocr 197 → **198**）：`bridge` 键集合 13 → 15、schema 里
+  `rejected`/`lastReject` 进 `required`、以及那条「探测请求打错 token」的断言改成记进 `rejected`。
+
 ## [0.6.0] — 2026-10-10
 
 `preTest` 按 `docs/pretest-gate-safety-design.md` 的方案 B 重构：**不再注册全局单调 guard**，
