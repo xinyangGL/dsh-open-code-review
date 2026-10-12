@@ -178,3 +178,19 @@ git 时间线核验：`preTest` 由 `c4a78b8 v0.5.7` 在 10-10 10:29 引入，`2
 
 **核验边界**：已核验——实跑 smoke(205)/job-smoke(51)/reviewer-smoke(45)/bridge-smoke(99)/client-smoke(208)/cordis-inject(26) 全部通过；git 33 commit、13 tag 与逐条时间戳；`lib/` 8 文件 6916 行 / `test/` 6365 行；`package.json`、`cordis.patch.yml`、`config.json`、`.github/workflows/ci.yml`、`README.zh.md`（584 行；排障表 338–371、已知限制 571–584）、`docs/pretest-gate-safety-design.md`（12133 字节）；`lib/index.js` 中 `tools/pre-execute` 注册与 `resolveOcr` 调用点；本机 DSH 插件安装状态（仅 `profiles/desktop` 注册）与市场条目样本。
 **未核验**——GitHub Actions 14 轮全绿的历史运行记录、三轮真机复验的原始记录、`glm-5.3-flash` 截断的四次实测数据，以及"按钮真人点击"。最后一项是本次评估中最重要的未验证项，也是 P0-1 的全部理由。
+
+---
+
+## 七、后续实施状态（v0.10.0 收口，2026-10-12 追加）
+
+本评估里的 **P0-1（真人点击链路回归）、P1-1（14 天观测）、P1-2（市场上架）仍未做**，结论不变：现在仍然是"能给熟人和自己人用"。2026-10-12 这一批做的是另一件事——把「结论可信」从散文变成可核对的东西。完整方案、判定线与回看日见 [`review-quality-plan-2026-10-12.md`](review-quality-plan-2026-10-12.md)（§7 有逐项状态）。要点：
+
+- **默认档反转**（v0.10.0）：出厂 `engine` 从 `delegate` 回到 `ocr`；`autoEngine` 出厂留空 = 跟随 `engine`。理由与 0.8.0 相反而非矛盾：`auto` 的问题不是贵，是**没有 LLM 时会静默降级成 delegate**，让「真的评审过」与「拿到半成品」长得一模一样；花钱改用「跑前预估 + 可以拒绝」处理。
+- **第三档恢复可达**：修掉 v0.8.0 的连带回归（两处 `plan.engine !== "delegate"` 写于默认还是 `auto` 的年代，隔天翻默认就成了几乎恒假），`reviewer: true` 在出厂配置下又能按 schema 承诺报 `OCR_REVIEWER_UNAVAILABLE`。
+- **覆盖可核对**：`delegate` 规格按片交付 + 「覆盖回执」硬规则（未覆盖不得写「未发现问题」），`diff` 截断改 hunk 级、采集与规格统一到同一个上限；工具输出新增 `partial` / `partialReasons` / `coverage`；ocr 侧只在它明写部分结果信号时拒绝写「未发现问题」。
+- **成本前置**：`engine = ocr` 的第一条备注给「本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟」，来自一次免费的 `ocr delegate preview`（失败不阻塞、不编数字）。
+- 测试：`test/smoke.mjs` 243 → **261**，八套离线全绿。另做过一次真机验收：`engine=ocr` 审单文件提交
+  `4507de6`（9.9s、1141 tokens、0 条问题、留了 `session_id`），成本预估与实际范围一致；验收当场发现
+  `detectPartial` 只认推定字段、会漏掉真机的 `manifest.coverage` 缺口，已按真机字段修掉（测试 +1）。
+
+以上**不改变**本评估的核心未验证项：那个按钮至今仍是 **0 次真人点击**，也仍然没有一个外人照文档在干净机器上走完 12 条用例。

@@ -12,7 +12,7 @@
 
 - **它做什么** —— 让模型按需跑一次代码评审：评审规格（规则 + 可审文件 + unified diff）来自 `ocr`，结论按文件逐条回来（`路径:行 [严重程度] 说明`）；也可以让它在本回合写文件后自动跑，或把「跑测试」挡在评审之后。
 - **它不做什么** —— 不替你装 `ocr`；不跑你的测试；除了你配的那个 LLM 之外不往任何地方发东西；也不是 CI 的替代品：整文件扫描真机实测**每文件 176~600 秒**、约 **$0.16**。
-- **要花多少钱** —— 默认（`engine = delegate`）**不多花一分钱**：评审在当前会话的上下文里完成。`engine = ocr` / `auto` 会真的调 LLM、按 tokens 计费 —— v0.8.0 起这两档是显式选择。
+- **要花多少钱** —— 默认（`engine = ocr`，v0.10.0 起）走 OCR 的 LLM 流水线、按 tokens 计费，但**开跑前先给一条本次规模的成本预估**（可审几个文件、约几分钟），看到之后再决定要不要跑；不想花钱就显式设 `engine = delegate`：不调 LLM、几秒出规格。
 - **需要什么** —— Node ≥ 20、`ocr` 命令行（Windows 必须是真 `.exe`，`.cmd` 一律报 `EINVAL`）、装了本插件的 DSH、以及一个模型（`llmMode = dsh` 时用 DSH 自带的就够，什么都不用填）。
 
 提供三条入口，全部走本机已安装的 `ocr` 可执行文件：
@@ -25,9 +25,9 @@
 
 引擎三档：
 
-- **`delegate`（v0.8.0 起的出厂默认）**：**不需要 key、不花评审的 token、几秒出规格**。插件用 `ocr delegate preview` + `ocr delegate rule` 拿到「可审文件 + 按内容分组的审查规则」，再附上 `git diff`，拼成一份审查规格交给当前模型自己审（OpenCodeReview 官方为宿主 Agent 设计的 Delegation Mode）。注意它省掉的是 **ocr 内部那次 LLM 调用**，`ocr` 二进制本身仍然要装、仍然要跑。
-- **`ocr`**：跑 OpenCodeReview 自己的「确定性工程 × LLM」流水线。**默认 LLM 路由是 `dsh`**：插件在本机起一个只监听 `127.0.0.1` 的小桥（随机端口 + 随机 token），把 ocr 的 `/chat/completions` 翻译成 DSH 的 `ctx.llm.stream` —— 模型、provider、密钥、账号轮换与配额全由 DSH 决定，插件配置里不用填地址和 key（见下文「LLM 路由」）。真机历史：**每个文件 176~600 秒**、按 tokens 计费（scan 单文件约 $0.16）。
-- **`auto`**：先试 `ocr`，报 `no valid LLM endpoint configured` 就自动降级为 `delegate`。它和 `ocr` 一样会真的调 LLM —— v0.8.0 起这两档都改成**显式选择**：要不要为一次评审花钱，应该是你决定的，不是出厂默认替你决定的。
+- **`delegate`（v0.8.0~v0.9.x 的出厂默认；v0.10.0 起改为显式选择）**：**不需要 key、不花评审的 token、几秒出规格**。插件用 `ocr delegate preview` + `ocr delegate rule` 拿到「可审文件 + 按内容分组的审查规则」，再附上 `git diff`，拼成一份审查规格交给当前模型自己审（OpenCodeReview 官方为宿主 Agent 设计的 Delegation Mode）。注意它省掉的是 **ocr 内部那次 LLM 调用**，`ocr` 二进制本身仍然要装、仍然要跑。
+- **`ocr`**：跑 OpenCodeReview 自己的「确定性工程 × LLM」流水线。**默认 LLM 路由是 `dsh`**：插件在本机起一个只监听 `127.0.0.1` 的小桥（**v0.11.0 起端口固定 `18800`**，被占用则顺延；token 每次启动随机），把 ocr 的 `/chat/completions` 翻译成 DSH 的 `ctx.llm.stream` —— 模型、provider、密钥、账号轮换与配额全由 DSH 决定（模型按「设置页 → 当前会话用的模型 → DSH 默认」取值），插件配置里不用填地址和 key（见下文「LLM 路由」）。真机历史：**每个文件 176~600 秒**、按 tokens 计费（scan 单文件约 $0.16）。
+- **`auto`**：先试 `ocr`，报 `no valid LLM endpoint configured` 就自动降级为 `delegate`。它和 `ocr` 一样会真的调 LLM —— 而这正是它**不是**出厂默认的原因：静默降级会让「真的评审过」和「拿到半成品」长得一模一样，默认档必须是能被信任的那条（v0.10.0 起出厂默认是 `ocr`，`auto` 要显式选）。
 
 ---
 
@@ -47,8 +47,21 @@
 
 - `ocr` 是**外部前置依赖**，插件不能替你装；而且**每一条代码路径都要跑那个二进制** —— `delegate` 省掉的只是 `ocr` 内部那次 LLM 调用，不是 `ocr` 本身。「插件没有运行时依赖」指的是 npm 包，**不包含**这个 CLI。
 - Windows 上 `ocrPath` 必须指向真正的 `opencodereview.exe`；`.cmd` / `.bat` / `.ps1` 这类脚本壳会被宿主以 `EINVAL` 拒绝（宿主 spawn 不经过 shell）。
-- `engine = delegate`（默认）不花评审 token、几秒出规格；`engine = ocr` / `auto` 才会跑 OCR 的 LLM 流水线：真机**每文件 176~600 秒**、按 tokens 计费（单文件约 $0.16）。**不要**这样直接接到 CI 里。
+- `engine = ocr`（默认，v0.10.0 起）会跑 OCR 的 LLM 流水线：真机**每文件 176~600 秒**、按 tokens 计费（单文件约 $0.16）—— 开跑前会先给一条成本预估，**不要**这样直接接到 CI 里。要省钱、要秒级就用 `engine = delegate`：不调 LLM、几秒出规格，代价是没有 LLM 后置过滤、覆盖要靠「回执」自己核对。
 - `ocr_status` 报 `OCR_NOT_FOUND` 时，它会顺带打印当前平台的一键安装指引 —— 照那个做，别猜。
+
+### 可信性承诺（四条，每条都能核对）
+
+这个插件的价值不在「更聪明」，而在**你知道结论覆盖到哪里**。所以只承诺四条：
+
+| 承诺 | 怎么核对 |
+| --- | --- |
+| 三个时机都能审（显式调用、回合尾按钮 / `/ocr-review`、自动评审），三档引擎的结论来源与代价都摆在明处 | `ocr_status` 的 `engine` / `engineSource` / `stats.byEntry` / `llm` 段 |
+| **不谎报「未发现问题」**：只有「退出码 0 **且**确有空的 problem 清单字段」才算干净；解析不出、字段名不认识、被预算截断、没跑完，一律 `ok: false` 或 `partial` | 结果码 `OCR_OUTPUT_UNPARSABLE` / `OCR_OUTPUT_SHAPE_UNKNOWN` / `OCR_LLM_MISSING` / `OCR_TIMEOUT` / `OCR_ABORTED`，以及 `partial` / `partialReasons` / `coverage` 字段 |
+| 覆盖范围可核对：`delegate` 的规格按片交付并附「覆盖回执」硬规则，片数与丢弃数写在规格和 `coverage` 里；`ocr` 侧只认它明写的部分结果信号 | 规格里的 `[片 i/n · 路径 · 本文件 hunk a-b/c · 字节数]` 与 `coverage.{totalFiles,totalHunks,keptHunks,droppedHunks,slices,truncated,partial}` |
+| 花钱之前先看到：`engine = ocr` 的评审在第一条备注里给出本次规模与时间量级，跑不跑你说了算 | 第一条 note 的 `本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟`；拿不到预估时只缺这半句，评审照跑 |
+
+**不承诺**（这些话说出来就是过度承诺）：更准、更强、发现所有 bug、CI 级、安全审计、全仓扫描。三档引擎的差别不是「能力档位」，而是**成本与责任方的切换**：`ocr` 把覆盖与误报收敛交给流水线，`delegate` 把责任交给当前会话的模型，第三档交给一个独立上下文的只读评审 agent。
 
 ## 安装
 
@@ -96,24 +109,26 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 - **设置 → 代码评审**：浏览器半侧往 `settings.section` 注册的独立设置页，左侧设置导航里直接可见 —— **改动都在这里做**；
 - **设置 → 插件 → `dsh-open-code-review`**：这个 bundle 的卡片现在只渲染**只读摘要**（键/值两列 + 一行「完整设置：设置 → 代码评审」），不再承载可编辑表单。
 
-设置页的结构（`lib\client.js` 的 `FIELDS`，共 **25 行**）：
+设置页的结构（`lib\client.js` 的 `FIELDS`，共 **26 个键**；v0.11.0 起分三处渲染）：
 
 | 位置 | 行数 | 字段 |
 | --- | --- | --- |
-| **基础**（默认展开） | 6 | 总开关 `enabled`、默认引擎 `engine`、自动评审 `autoReview`、独立评审 agent `reviewerAgent`、LLM 路由 `llmMode`、模型名 `llmModel` |
-| **从属行**（随父开关出现） | 6 | `reviewerProvider` / `reviewerModel` / `reviewerRounds`（`reviewerAgent=spawn` 时）；`llmBaseUrl` / `llmProtocol` / `llmApiKeyRef`（`llmMode=endpoint` 时）。另外高级项 `llmProvider` 只在 `dsh` 路由下出现 |
-| **「高级设置（13 项）」**（默认折叠，点标题展开） | 13 | 调优：`autoScope`、`autoMaxPerSession`、`autoMinReviewableFiles`、`autoMinIntervalMs`、`autoSkipSubagents`、`autoIncludeDiff`、`preTest`；运行与诊断：`audience`、`ocrPath`、`timeoutMinutes`、`progress`、`llmProvider`、`verbose` |
+| **首屏**（默认展开） | 4 | 总开关 `enabled`、默认引擎 `engine`、按需评审 `onDemand`、自动评审 `autoReview`（只给 `off` 与 `adaptive`，另两档写 `config.json` 的 `auto` 键） |
+| **从属行**（随父开关出现） | 3 | `reviewerProvider` / `reviewerModel` / `reviewerRounds`（`reviewerAgent=spawn` 时） |
+| **「高级设置（4 项）」**（默认折叠，点标题展开） | 4 | 模型路由：模型名 `llmModel`、提供方 `llmProvider`（仅 `dsh` 路由）；独立评审 agent `reviewerAgent`；评审先于测试 `preTest`。`reviewerAgent=spawn` 时是 7 行（含上面三个从属行） |
+| **只读诊断区**（页面末尾，不是配置项） | 15 | 只在文件层生效的键：`llmMode`、`llmBaseUrl`、`llmProtocol`、`llmApiKeyRef`、`autoScope`、`autoMaxPerSession`、`autoMinReviewableFiles`、`autoMinIntervalMs`、`autoSkipSubagents`、`autoIncludeDiff`、`audience`、`ocrPath`、`timeoutMinutes`、`progress`、`verbose` —— 逐行显示「当前值 · 键名」，改它们要写 `config.json` |
 
-- 折叠区标题形如 **「高级设置（13 项）」**；折叠着的时候，如果高级项里有改了但还没保存的行，标题后面会再显示 **「N 项待保存」**。
+- 折叠区标题形如 **「高级设置（4 项）」**（随可见行数变，`spawn` 时 7）；折叠着的时候，如果高级项里有改了但还没保存的行，标题后面会再显示 **「N 项待保存」**。
+- v0.11.0 只改了**渲染**：这 15 个键的 schema 与 `config.json` 约定一个都没动，写进文件层的行为和以前完全一样（运行时实况看 `ocr_status`，比如桥地址、按入口计数、解析出的路由）。
 - 被设置页改过的行带 **「设置页已改」** 标记；文件层到底提供了哪些键，要看 `ocr_status` 的 `configSource` / `configPath` / `fileValues`。
-- `autoMinIntervalMs` 在表单里是档位下拉（30 秒 / 1 分钟 / 5 分钟 / 10 分钟 / 自定义…），但**存储仍是毫秒**：选「自定义…」可手填毫秒值（默认 `60000`）。
+- `autoMinIntervalMs` 的数字档位控件已随这轮瘦身下线（它只在文件层生效）；诊断区会告诉你要写哪个键。
 - 改完立即生效，不用重启：宿主把新值写进当前 profile 的 patch YAML（`volatile` 引用 + `loader/volatile-update` 广播）。
 
 ![设置页：基础](docs/settings-basic.png)
 
 ![设置页：展开「高级设置」](docs/settings-advanced.png)
 
-*真机截图（Windows 上的 DSH，侧边栏已裁掉）：上面是基础组，下面是点开「高级设置」后的样子。*
+*真机截图（Windows 上的 DSH，侧边栏已裁掉）**拍的是 0.10.0 的版式**：上面是当时的基础组，下面是点开「高级设置」后的样子。v0.11.0 起首屏只有 4 行、高级区只有上文那三组。*
 
 > **页面从哪来**：DSH 的插件页**不会**由宿主 schema 自动生成页面 —— 插件管理页的配置账本只从三个席位读取注册：`plugins.item`（官方插件）、`plugins.bundle.config`（bundle 自带配置）和 `plugins.row.config`（某一行自带页面）。本插件的浏览器半侧 `lib\client.js` 往 `plugins.bundle.config`（key = npm 包名 `dsh-open-code-review`）注册的是 **summary 席位的只读摘要**，往 `settings.section`（一个打开的 list 席位）注册的是独立设置页：id `open-code-review`、order 17、label「代码评审」，完整表单渲染在那里。**首次加上客户端半侧后必须重启一次 DSH 再刷新页面**（见上表）。
 
@@ -129,56 +144,59 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 
 字段一览（`位置` 列 = 该键在设置页里的位置；`仅文件层` = 表单里没有这一行，只能写配置文件）：
 
+**v0.11.0 起设置页只渲染三类控件**：首屏 4 项（`enabled` / `engine` / `onDemand` / 自动评审，且自动评审只给 `off` 与 `adaptive` 两档）、折叠的「高级设置」3 组（模型路由 / 独立评审 agent（仅 `reviewer.agent = spawn` 时显示三项）/ 评审先于测试）、末尾一块**只读诊断区**。除这三类之外的键（`llm.mode`、`llm.baseUrl`、`llm.protocol`、`llm.apiKeyRef`、`autoScope`、`autoMaxPerSession`、`autoMinReviewableFiles`、`autoMinIntervalMs`、`autoSkipSubagents`、`autoIncludeDiff`、`audience`、`ocrPath`、`timeoutMinutes`、`progress`、`verbose`，共 15 个）**仍然完整支持**（schema 与 `config.json` 约定一个都没动），只是不再作为输入控件出现；诊断区会逐条列出它们的「当前值 · 键名」，要改就写 `config.json`。运行期实况（桥地址、按入口计数、LLM 路由）用 `ocr_status`。
+
 | 字段 | 默认 | 位置 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | `true` | 基础 | 总开关：关掉后停自动评审，`ocr_review`/`/ocr-review` 拒绝执行（`ocr_status` 仍可用于诊断） |
-| `ocrPath` | `""` | 高级·运行与诊断 | `ocr` 可执行文件绝对路径；留空=自动探测 |
+| `enabled` | `true` | 首屏 | 总开关：关掉后停自动评审，`ocr_review`/`/ocr-review` 拒绝执行（`ocr_status` 仍可用于诊断） |
+| `ocrPath` | `""` | 文件层（诊断区只读） | `ocr` 可执行文件绝对路径；留空=自动探测 |
 | `ocrCandidates` | `[]` | 仅文件层 | 额外候选路径 |
-| `engine` | `"delegate"` | 基础 | `delegate`（**v0.8.0 起的出厂默认**，不调 LLM、不花 token、几秒出规格）\| `ocr` \| `auto`；只有 `ocr` 与 `auto` 会真的调 LLM。工具调用可以逐次覆盖它 |
+| `engine` | `"ocr"` | 首屏 | `ocr`（**v0.10.0 起的出厂默认**：真流水线、按 tokens 计费，跑前给成本预估）\| `delegate`（不调 LLM、不花 token、几秒出规格）\| `auto`（没配 LLM 时会静默降级，所以不作默认）。工具调用可以逐次覆盖它 |
 | `autoEngine` | `""` | 仅文件层 | 自动评审用的引擎；留空=跟随 `engine` |
-| `audience` | `"agent"` | 高级·运行与诊断 | 传给 `ocr --audience`：`agent`（仅摘要）/`human`（进度条） |
-| `timeoutMinutes` | `15` | 高级·运行与诊断 | 单次评审超时，传给 `ocr --timeout`，同时作为插件侧硬超时（表单上限固定为出厂值 60，要更大就写文件层） |
+| `audience` | `"agent"` | 文件层（诊断区只读） | 传给 `ocr --audience`：`agent`（仅摘要）/`human`（进度条） |
+| `timeoutMinutes` | `15` | 文件层（诊断区只读） | 单次评审超时，传给 `ocr --timeout`，同时作为插件侧硬超时（要更大就写文件层的 `maxTimeoutMinutes`） |
 | `maxTimeoutMinutes` | `60` | 仅文件层 | `timeoutMinutes` 的上限保护（本身还有 24 小时硬上界） |
 | `extraArgs` | `[]` | 仅文件层 | 追加给 `ocr` 的原始参数 |
 | `env` | `{}` | 仅文件层 | 追加/覆盖子进程环境变量（空串=删除该变量） |
-| `llm.mode` | `"dsh"` | 基础 | LLM 路由：`dsh`=走 DSH（本机桥 → `ctx.llm.stream`，模型/密钥/配额都由 DSH 决定）；`endpoint`=ocr 直连下面的静态端点（老行为）。选 `endpoint` 时设置页才显示地址/协议/凭据引用三行 |
-| `llm.provider` | `""` | 高级·运行与诊断（`dsh` 路由） | `dsh` 路由转发到哪个 DSH provider（如 `commandcode`）。在「模型名」下拉里选中模型时自动写入；**留空 = 跟随 DSH 默认模型**的 provider |
-| `llm.model` | `""` | 基础 | → `OCR_LLM_MODEL`。**留空 = 跟随 DSH 的默认模型**（`agent-default-model`，即官方读全局默认路由的同一来源）；想固定某个模型就在「模型名」下拉里从 DSH 模型目录选（会连 provider 一起写上）。`endpoint` 路由下留空则不给 ocr 传 `OCR_LLM_MODEL`（用 ocr 自己那份全局配置） |
-| `llm.baseUrl` | `https://api.commandcode.ai/provider/v1` | 从属（`endpoint`） | `endpoint` 路由才用：→ `OCR_LLM_URL`（CommandCode 的 OpenAI 兼容路由，本机实测可用） |
-| `llm.protocol` | `"openai"` | 从属（`endpoint`） | `endpoint` 路由才用：→ `OCR_LLM_PROTOCOL`。CommandCode 的 DeepSeek v4.1 **只能**走 `openai`；Anthropic 协议端点用 `anthropic` |
-| `llm.apiKeyRef` | `COMMANDCODE_API_KEY` | 从属（`endpoint`） | `endpoint` 路由才用：→ `OCR_LLM_TOKEN`。**这里是「凭据引用」不是密钥本身**：运行时用 `ctx.credentials.resolve()` 从 DSH 凭据库/环境变量取值 |
+| `llm.mode` | `"dsh"` | 文件层（诊断区只读） | LLM 路由：`dsh`=走 DSH（本机桥 → `ctx.llm.stream`，模型/密钥/配额都由 DSH 决定）；`endpoint`=ocr 直连下面的静态端点（老行为，v0.11.0 起只保留在配置文件里，作为显式逃生门） |
+| `llm.provider` | `""` | 高级·模型路由（`dsh` 路由） | `dsh` 路由转发到哪个 DSH provider（如 `commandcode`）。在「模型名」下拉里选中模型时自动写入；**留空 = 先跟随当前对话正在用的模型、再跟随 DSH 全局默认模型**的 provider |
+| `llm.model` | `""` | 高级·模型路由 | → `OCR_LLM_MODEL`。**留空 = 先跟随当前对话正在用的模型**（`Session.requestContext()`，v0.11.0 起），拿不到再退回 DSH 全局默认（`agent-default-model`）；想固定某个模型就在「模型名」下拉里从 DSH 模型目录选（会连 provider 一起写上）。`endpoint` 路由下留空则不给 ocr 传 `OCR_LLM_MODEL`（用 ocr 自己那份全局配置） |
+| `llm.baseUrl` | `https://api.commandcode.ai/provider/v1` | 文件层（诊断区只读） | `endpoint` 路由才用：→ `OCR_LLM_URL`（CommandCode 的 OpenAI 兼容路由，本机实测可用） |
+| `llm.protocol` | `"openai"` | 文件层（诊断区只读） | `endpoint` 路由才用：→ `OCR_LLM_PROTOCOL`。CommandCode 的 DeepSeek v4.1 **只能**走 `openai`；Anthropic 协议端点用 `anthropic` |
+| `llm.apiKeyRef` | `COMMANDCODE_API_KEY` | 文件层（诊断区只读） | `endpoint` 路由才用：→ `OCR_LLM_TOKEN`。**这里是「凭据引用」不是密钥本身**：运行时用 `ctx.credentials.resolve()` 从 DSH 凭据库/环境变量取值 |
 | `llm.apiKey` | `""` | 仅文件层 | 字面密钥（优先级高于上面的引用；不想把密钥放进 DSH 凭据库时才用，只建议写在配置文件里） |
-| `auto` | `"off"` | 基础（表单键名 `autoReview`） | 自动评审开关（v0.5.0 起出厂默认 `off`）：`off` 关闭；`adaptive` 模型在跑就 `inject`、空闲就 `followup`；`inject` 只注入上下文；`followup` 直接开新回合 |
-| `onDemand` | `true` | 基础（表单键名 `onDemand`） | 按需评审：每条已完成回合尾部的「启动代码审核」按钮 + runtime skill `ocr-on-demand-review`（用户说「验证/评审」时模型可自己发起） |
-| `autoScope` | `"workspace"` | 高级·调优 | 自动评审的范围 |
-| `autoSkipSubagents` | `true` | 高级·调优 | 子代理会话不触发自动评审 |
-| `autoMaxPerSession` | `3` | 高级·调优 | 每个会话最多自动评审几次（防「改—评—改」死循环） |
-| `autoMinReviewableFiles` | `1` | 高级·调优 | 可审文件数低于该值就跳过 |
-| `autoMinIntervalMs` | `60000` | 高级·调优 | 两次自动评审最小间隔（毫秒；表单里是档位下拉 + 「自定义…」） |
-| `autoIncludeDiff` | `true` | 高级·调优 | 自动（delegate）评审时带不带 `git diff` |
-| `preTest` | `"off"` | 高级·调优 | 评审先于测试（v0.5.7 起）：`off`=不干预；`remind`=放行测试、结果回来后提醒模型去评审；`gate`=没被一次成功的 `ocr_review` 覆盖就直接跑测试会被挡回（见「评审先于测试」） |
-| `reviewer.agent` | `"off"` | 基础 | 独立评审 agent：`off`=不启用（评审走 ocr/delegate）；`spawn`=每轮起一个**只读**子 agent 评审（需要宿主提供 `subagents` 服务） |
+| `auto` | `"off"` | 首屏（表单键名 `autoReview`，只给 `off` / `adaptive`） | 自动评审开关（v0.5.0 起出厂默认 `off`）：`off` 关闭；`adaptive` 模型在跑就 `inject`、空闲就 `followup`；`inject` 只注入上下文；`followup` 直接开新回合。v0.11.0 起后两档只在文件层设 |
+| `onDemand` | `true` | 首屏（表单键名 `onDemand`） | 按需评审：**v0.11.0 起只在检测到本回合有改动时**，回合尾部才出现「启动代码审核」按钮（读宿主的 `api/changes.summary`；取不到结论一律照旧显示，宁可见了没改动，不可有改动却看不见）+ runtime skill `ocr-on-demand-review`（用户说「验证/评审」时模型可自己发起） |
+| `autoScope` | `"workspace"` | 文件层（诊断区只读） | 自动评审的范围 |
+| `autoSkipSubagents` | `true` | 文件层（诊断区只读） | 子代理会话不触发自动评审 |
+| `autoMaxPerSession` | `3` | 文件层（诊断区只读） | 每个会话最多自动评审几次（防「改—评—改」死循环） |
+| `autoMinReviewableFiles` | `1` | 文件层（诊断区只读） | 可审文件数低于该值就跳过 |
+| `autoMinIntervalMs` | `60000` | 文件层（诊断区只读） | 两次自动评审最小间隔（毫秒） |
+| `autoIncludeDiff` | `true` | 文件层（诊断区只读） | 自动（delegate）评审时带不带 `git diff` |
+| `preTest` | `"off"` | 高级·评审时机 | 评审先于测试（v0.5.7 起）：`off`=不干预；`remind`=放行测试、结果回来后提醒模型去评审；`gate`=没被一次成功的 `ocr_review` 覆盖就直接跑测试会被挡回（见「评审先于测试」） |
+| `reviewer.agent` | `"off"` | 高级·独立评审 agent | 独立评审 agent：`off`=不启用（评审走 ocr/delegate）；`spawn`=每轮起一个**只读**子 agent 评审（需要宿主提供 `subagents` 服务） |
 | `reviewer.provider` | `"spawn"` | 从属（`spawn`） | 子 agent 用的 provider 名（DSH 内置的是 `spawn`）；名字不存在时报 `OCR_REVIEWER_UNAVAILABLE` 并在 `notes` 里列出可用名 |
 | `reviewer.model` | `""` | 从属（`spawn`） | 评审子 agent 的模型（设置页的「子 agent 模型」下拉同样来自 DSH 模型目录）；留空=跟随 provider 默认 |
 | `reviewer.rounds` | `3` | 从属（`spawn`） | 一次往返最多几轮（1–10，每轮 = 一个新子会话）；到上限就交付当前结论 |
 | `reviewer.persona` | `""` | 仅文件层 | 评审人格/纪律（留空=插件内置 `DEFAULT_REVIEWER_PERSONA`）；schema 里有、设置页没有这一行 |
 | `includeDiffMaxBytes` | `120000` | 仅文件层 | 单次带出的 diff 上限（字符） |
+| `llm.bridgePort` | `18800` | 仅文件层（**v0.11.0 新增**） | 本机桥的首选监听端口：固定下来后重启地址不变；被占用时自动顺延（最多试 10 个），实际端口见 `ocr_status.bridge.requestedPort` / `portShifted`。**故意不做成设置页控件**（默认不用改） |
 | `maxIssuesInText` | `40` | 仅文件层 | 文本渲染最多列多少条问题（完整数据仍在 `issues`/`rawJson`） |
-| `progress` | `true` | 高级·运行与诊断 | 评审进度：每次评审登记成宿主后台任务（kind `ocr-review`），Jobs 面板与会话内各有一条实时进度；关掉后评审照跑，只是不可见（见「评审进度」） |
-| `verbose` | `false` | 高级·运行与诊断 | 打印调试日志（本机桥的日志也走它） |
+| `progress` | `true` | 文件层（诊断区只读） | 评审进度：每次评审登记成宿主后台任务（kind `ocr-review`），Jobs 面板与会话内各有一条实时进度；关掉后评审照跑，只是不可见（见「评审进度」） |
+| `verbose` | `false` | 文件层（诊断区只读） | 打印调试日志（本机桥的日志也走它） |
 
 ### LLM 路由（`ocr` 引擎）
 
 `ocr` 是独立 CLI 子进程，只认 `OCR_LLM_URL` / `OCR_LLM_PROTOCOL` / `OCR_LLM_MODEL` / `OCR_LLM_TOKEN` 四个环境变量（`lib\ocr-cli.js` 的 `buildEnv`）—— 它进不了 cordis，看不到 DSH 的 provider 目录、凭据库、模型目录与账号轮换。所以默认路由（`llm.mode = "dsh"`）是：
 
 ```
-ocr 子进程 ──POST http://127.0.0.1:<随机端口>/v1/chat/completions──▶ 本机桥（Bearer <随机 token>）
+ocr 子进程 ──POST http://127.0.0.1:18800/v1/chat/completions──▶ 本机桥（Bearer <每次启动随机 token>）
                                                                       └─▶ ctx.llm.stream({ provider, model, … })
 ```
 
-- 桥只监听 `127.0.0.1`（`BIND_HOST`）、端口随机、token 每次启动随机生成且**不落任何配置文件**；请求/响应按 OpenAI 兼容形状翻译（含 `tools` 往返与 `stream: true` 的 SSE），实现在 `lib\bridge.js`（471 行）。
-- 模型与 provider 优先取设置页：`llm.model`（「模型名」下拉可搜索、候选取自 DSH 模型目录）+ `llm.provider`（选中模型时自动写入）。**两者留空就跟随 DSH 的默认模型** —— `agentDefaultModel.currentSelection()` 的 `provider` + `model`（desktop profile 里 `agent-default-model` 配的是 `commandcode / deepseek/deepseek-v4.1-flash-fast`），于是设置页一个字段都不用填。密钥、配额、429 重试与账号轮换全由 DSH 的 provider 插件负责 —— **插件里不再需要地址与 key**。
-- 桥的生命周期挂在 `ctx.inject(["llm"], …)` + `ctx.effect(...)` 上（`lib\index.js:970-1005`）：宿主没有 `llm` 服务时插件照常工作，只是 `dsh` 路由回落成静态端点，`ocr_status` 会写明原因（不静默）。
+- 桥只监听 `127.0.0.1`（`BIND_HOST`），端口**从 v0.11.0 起是固定的 `llm.bridgePort`（默认 18800）**：重启后地址不变，被别的进程占用时自动顺延（最多试 10 个），`ocr_status.bridge` 用 `requestedPort` / `portShifted` 说明实际用了哪个。token 仍是每次启动随机生成且**不落任何配置文件**；请求/响应按 OpenAI 兼容形状翻译（含 `tools` 往返与 `stream: true` 的 SSE），实现在 `lib\bridge.js`。
+- 模型与 provider 按这个顺序取：**设置页 `llm.model` / `llm.provider`** → **当前会话正在用的模型**（`Session.requestContext()` 的 `provider` / `model`，v0.11.0 起支持：对话里切了模型，下一次评审就跟着变，不用重启） → **DSH 全局默认模型**（`agentDefaultModel.currentSelection()`，desktop profile 里是 `commandcode / deepseek/deepseek-v4.1-flash-fast`）。三者都留空也不用填任何字段。密钥、配额、429 重试与账号轮换全由 DSH 的 provider 插件负责 —— **插件里不再需要地址与 key**。
+- 桥的生命周期挂在 `ctx.inject(["llm"], …)` + `ctx.effect(...)` 上：宿主没有 `llm` 服务、桥起不来、或连模型名都拿不到时，`dsh` 路由**不再默默换成静态端点**（v0.11.0 起），而是让 `ocr_review` 以 `OCR_LLM_MISSING` 明确失败，**一个子进程都不起**（不出结论、也不产生费用），`nextStep` 给出三种原因各自的下一步。要直连静态端点就把 `llm.mode` 显式改成 `endpoint`。
 
 #### 官方插件是怎么用 DSH 的模型的（为什么这里能不再填地址与 key）
 
@@ -186,8 +204,8 @@ ocr 子进程 ──POST http://127.0.0.1:<随机端口>/v1/chat/completions─�
 
 - **DSH 没有给外部进程用的 OpenAI 兼容端点**：全树搜 `chat/completions` 零命中，它的 HTTP 面是 `/api` 上的 RPC（`dsh-api-gateway` 的 `/api/remote.mux`）。所以本机桥不是重复造轮子，而是给「只认 `OCR_LLM_*` 环境变量的独立 CLI（`ocr`）」做的一层翻译。
 - 官方插件都在**进程内**直接调 `ctx.llm.stream({ provider, model, system, messages, signal })`：`dsh-agent-loop`（`preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)`）、`dsh-compaction-basic`（`for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)`）、`dsh-experimental-auto-review`（`readDecision(ctx.llm.stream(options))`）—— 桥的末端就是同一个调用。
-- **可选服务**用 `ctx.get("llm")` 读、不写进插件级 `inject`（官方 `dsh-tool-subagent` / `dsh-tool-fs` / `dsh-session-reference` 都这么做），与本插件的 `ctx.inject(["llm"], …)` 一致：没有 `llm` 的 profile 里插件照常工作，只是回落静态端点。
-- **路由来源**也是官方的两处：会话头 `requestHeader().config` → agent options（`dsh-tool-fs`），全局默认 = `agentDefaultModel.currentSelection()`（`dsh-agent-default-model` 服务，`buildModelCatalog` 的默认参数就是它）。本插件按「设置页 → DSH 默认模型」取值。
+- **可选服务**用 `ctx.get("llm")` 读、不写进插件级 `inject`（官方 `dsh-tool-subagent` / `dsh-tool-fs` / `dsh-session-reference` 都这么做），与本插件的 `ctx.inject(["llm"], …)` 一致：没有 `llm` 的 profile 里插件照常工作，只是 `dsh` 路由**明确失败**（v0.11.0 起不再回落静态端点）。
+- **路由来源**也是官方的三处：设置页 → 会话头 `requestContext()` / `requestHeader().config`（`dsh-tool-fs` 同源，v0.11.0 起本插件新增这一档）→ 全局默认 = `agentDefaultModel.currentSelection()`（`dsh-agent-default-model` 服务，`buildModelCatalog` 的默认参数就是它）。本插件按「设置页 → 当前会话 → DSH 默认模型」取值；`agentDefaultModel` 只代表**全局默认**，所以「跟随当前对话」必须单独读会话那一层。
 - 流式契约（`BlockAssembler`：`block-start` / `text-delta` / `reasoning-delta` / `tool-call-delta` / `block-end` / `usage` / `finish`，`finish.reason.kind ∈ stop | max-tokens | error | aborted`）与官方的 `readDecision` 一致，桥负责把它翻成 OpenAI 的 SSE 与 `tools` 往返。
 
 `endpoint` 路由是保留的老行为：把「LLM 路由」切成 `endpoint`，设置页才显示地址 / 协议 / 凭据引用三行，`ocr` 直连静态端点。
@@ -252,7 +270,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 默认**什么都不自动跑**。你决定要评的时候有两种入口：
 
-1. **每条已完成回合尾部的「启动代码审核」按钮**（`conversation.chat.turnTail`，实现在 `lib/client.js`）。点一下等于对这个会话执行一次 `/ocr-review`；该会话有评审在跑时按钮变成「正在评审…」并禁用（天然防重复点击），失败会把原因显示在按钮旁边并可重试。宿主没有暴露 `remote.commands` 时按钮直接不出现，其余功能不受影响。
+1. **每条已完成回合尾部的「启动代码审核」按钮**（`conversation.chat.turnTail`，实现在 `lib/client.js`）。**v0.11.0 起只在检测到本回合有改动时出现**：客户端注册一个 conversation event definition（`kind = ocrTurnChanges`，只听 `turn/start` 与 `workspace/changes`）记下本回合最后一次改动的 `seq`，按钮再取宿主的 `api/changes.summary?sessionId=..&seq=..`，`total === 0`（且请求成功、形状认识）才隐藏。**失败一律 fail-open**：宿主没提供事件定义能力、读不到 `turn.data`、请求失败/404/形状不认识 —— 都照旧显示按钮。点一下等于对这个会话执行一次 `/ocr-review`；该会话有评审在跑时按钮变成「正在评审…」并禁用（天然防重复点击），失败会把原因显示在按钮旁边并可重试。宿主没有暴露 `remote.commands` 时按钮直接不出现，其余功能不受影响。
 2. **runtime skill `ocr-on-demand-review`**（`onDemand = true` 时注册）。你说「评审一下」「验证这批改动」时，模型可以自己调 `ocr_review` 并**逐条**汇报「文件 → 行 [严重程度] 问题」。`ocr_status` 会报 `onDemand` 与 `skill.registered`，可用来确认注册成功。
 
 按钮和手输的 `/ocr-review` 走的是宿主侧同一条斜杠命令，所以 `ocr_status` 还会报 `command: { name: "ocr-review", registered, reason }`（v0.5.4 起）。`registered` 是 `false` 就说明宿主拒绝了注册 —— 按钮与命令都不可能工作，备注里会直接点名，而不是点了没反应。
@@ -418,21 +436,52 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 | `code: OCR_REVIEWER_UNCERTAIN` | 评审 agent 说信息不足：把范围/规则说清楚，或在 `reviewer.persona` 里补要求。这条**不算通过**（`ok: false`） |
 | 输出被截断 | 看 `lostOutput`/`spillPath`（子进程输出超缓冲会落盘） |
 | 自动评审太频繁 | 设置页调小「每会话最多自动评审次数」、调大「最小间隔」，或把「自动评审」设为 `off` |
-| `ocr_status` 说「本机桥没有就绪」，状态行也显示回落 | `dsh` 路由需要宿主加载了提供 `llm` 服务的插件（本机是 `llm-commandcode` / `llm-pi-ai` 之类）。缺它就自动回落 `endpoint` 路由：要么修好 profile 里的提供方插件，要么把「LLM 路由」切成 `endpoint` 填好地址与凭据引用 |
+| `ocr_status` 说「本机桥没有就绪」，评审直接失败 | `dsh` 路由需要宿主加载了提供 `llm` 服务的插件（本机是 `llm-commandcode` / `llm-pi-ai` 之类）。**v0.11.0 起不再静默回落静态端点**：`ocr_review` 会以 `OCR_LLM_MISSING` 失败（一个子进程都不起，不产生费用），`nextStep` 按三种原因给建议。要么修好 profile 里的提供方插件，要么把 `llm.mode` 显式改成 `endpoint` 并填好地址与凭据引用 |
 | 设置页文案变成英文 | 界面文案走 Client locale 服务（跟随 DSH 语言）：`locale/*.json` 只放卡片标题与描述，界面文案在 `lib\client.js` 的 `TEXT_ZH`/`TEXT_EN`；没有 locale 服务或词典缺键时自动回落中文 |
 | 长评审看起来卡死了，进度行几分钟没动 | v0.8.0 起长跑每 30 秒会打一次心跳，不再留一行静默：`ocr 运行中 2m10s · 还没有任何输出（超时 15 分钟；等不及可以改用 engine=delegate，几秒出规格）`；开始有输出后变成 `……最近一次输出在 4.0s 前`。「还没有任何输出」持续好几分钟，就是那几次 600 秒真机跑给我们的信号：缩小范围（`paths`/`exclude`）、加大 `timeoutMinutes`，或直接换 `engine: "delegate"` —— 规格还是同一份 ocr 规则，但几秒就回来 |
-| 评审在烧 token，可我没要它花钱 | 出厂默认引擎自 v0.8.0 起是 `delegate`（不调 LLM、不花 token）；只有 `ocr` 与 `auto` 会跑 OCR 自己的流水线。**会调 LLM 的每一次运行**现在都会在第一条备注里说清（`成本提示：engine=… 真机历史 176~600s/文件、按 tokens 计费…`），失败结果末尾还会给一行 `下一步：…`，不用自己猜。若设置页或配置文件里 pin 了 `engine`，以那个为准 —— `ocr_status` 会报出实际生效的引擎与来源 |
+| 评审在烧 token，可我没要它花钱 | 出厂默认自 **v0.10.0** 起改回 `engine = ocr`（v0.8.0~v0.9.x 那几版是 `delegate`），这是有意的：默认档该是那条会被打上「评审过」的路径，而 `auto` 在没有 LLM 时会**静默降级**成 delegate，用户以为跑了流水线、拿到的却是半成品。花钱这件事交给「跑前预估 + 可以拒绝」：`engine = ocr` 的评审会在第一条备注里给出「本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟」。不想花就显式设 `engine = delegate`（不调 LLM、不花 token），它会额外告诉你 delegate 下 `effort` 不生效。若设置页或配置文件里 pin 了 `engine`，以那个为准 —— `ocr_status` 会报出实际生效的引擎与来源 |
 | 插件卡片没有图标 / 标题显示成包名 | 清单读取失败：确认 `package.json` 的 `icon` 是相对路径且文件存在、`exports` 含 `"./locale/*.json"`、`locale/{zh,en}.json` 有 `meta.title/description`（`node test/smoke.mjs` 会校验这几条） |
 | `DSH_OPEN_CODE_REVIEW_CONFIG` 指向的文件不存在 | v0.5.0 起不再就此停住：继续回落 `<DSH_HOME>\dsh-open-code-review.json` → 插件目录，并在 `ocr_status` 的备注里明说「指向的 … 不存在，已回落到 …」。升级前那种「静默按出厂默认跑」的情况没有了 |
 | 设置页下拉框看不清（白底白字，或深色主题下深字） | v0.5.0 已修：`<select>` / `<option>` 的颜色改用宿主主题 token（`--dsw-alias-label-primary` / `--dsw-alias-bg-layer-2` / `--dsw-alias-bg-overlay`）并按当前主题声明 `color-scheme`（跟随 `theme/change` 热更新），原生下拉弹层在深浅主题下都可读。升级后若还不对，先刷新页面 |
 | 结果里写着「审查 0 个文件，发现 N 条问题」 | v0.5.0 已修：文件数在 `files[]` 之后继续认 `total_files` / `reviewable_count`，最后回落到「问题里出现过的不同文件数」，摘要不再和问题清单自相矛盾 |
 | 桥的 token 统计自相矛盾（`total` 大于输入+输出） | 两个原因，现在都能看出来。① **缓存**：DSH 的 `inputTokens` 已经扣掉缓存命中，而 `total` 含缓存 —— v0.5.4 起桥把 `cacheReadTokens`/`cacheWriteTokens` 一并转发（`bridge.tokens.cache_read_tokens` / `cache_write_tokens`），那行显示成 `输入 P（其中缓存命中 C · 缓存写入 W） / 输出 O`；v0.5.4 之前这部分缓存 token 直接没进统计，差值看着像凭空多出来。② 上游部分调用只报了总数：`bridge.tokens.partial` 记下这种调用次数，桥那行与 job 行会补「其中 N 次上游只报了总数」。缺失的输入/输出**不会**被编造出来 |
-| 回合尾部没有「启动代码审核」按钮 | 先看 `ocr_status` 的 `onDemand`（应为 `true`）、`skill.registered` 与 `command.registered`（v0.5.4 起，`false` 说明宿主拒绝了 `/ocr-review` 注册，按钮点了也不会动）；按钮由宿主槽位 `conversation.chat.turnTail` + `remote.commands` 提供，宿主没暴露远端命令服务时按钮不出现（这是设计好的降级，不影响其它入口）。改过 `lib\client.js` 后要刷新页面 |
-| 刚装好/刚重启就问 `ocr_status`，报「桥还没就绪」并回落静态端点 | v0.5.2 已修：本机桥是异步 `listen` 的，`resolveLlmRoute()` 现在会等这次启动完成（最多 2 秒）再算路由，所以**第一次**查询就走桥。慢机器上尤其明显（本机有 `ocr` 时只是因为 `ocr --version` 子进程恰好拖了几十毫秒才侥幸躲过） |
+| 回合尾部没有「启动代码审核」按钮 | 先看这一回合**有没有改动** —— v0.11.0 起按钮只在检测到本回合有改动时出现（读完文件的回合、纯提问的回合都不显示）。其次看 `ocr_status` 的 `onDemand`（应为 `true`）、`skill.registered` 与 `command.registered`（v0.5.4 起，`false` 说明宿主拒绝了 `/ocr-review` 注册，按钮点了也不会动）；按钮由宿主槽位 `conversation.chat.turnTail` + `remote.commands` 提供，宿主没暴露远端命令服务时按钮不出现（这是设计好的降级，不影响其它入口）。改过 `lib\client.js` 后要刷新页面 |
+| 刚装好/刚重启就问 `ocr_status`，报「桥还没就绪」 | v0.5.2 已修：本机桥是异步 `listen` 的，`resolveLlmRoute()` 现在会等这次启动完成（最多 2 秒）再算路由，所以**第一次**查询就走桥。慢机器上尤其明显（本机有 `ocr` 时只是因为 `ocr --version` 子进程恰好拖了几十毫秒才侥幸躲过）。v0.11.0 起端口固定为 `llm.bridgePort`（默认 18800），重启后地址不再变 |
 | 机器上**没装** `ocr` 时 `ocr_status` 自相矛盾（路由行写着本机桥地址，`bridge` 却是 `null`、`llmEnv` 为空）；`ocr_review` 只丢一句「设置 `ocrPath`」，可用户其实还没装 | v0.5.3 已修：与装没装 ocr 无关的字段（`bridge`/`llmEnv`/`onDemand` 备注）改到定位之前算，`ocr_status` 末尾再按最新桥统计刷新一次；定位失败时把安装指引（`installHint`）同时写进 `ocr_review` 的 notes、自动评审的投递文本和 `ocr_status.notes` |
 | 改了 `config.json` 里的 `auto` / `onDemand` / `preTest`，行为没变 | v0.5.8 已修，**两个**原因：① 设置页（schema 实例）带着默认值把这些键整层遮住了（取值等于出厂默认现在不算覆盖项）；② 这三个是「装/卸监听器」的决定，以前只在启动与设置页写入时重算，文件层改动只改了值没重算决定。现在闸门只要插件没被关掉就挂着（`off` 只放行），且三个开关会在下一次工具调用/回合收尾时按文件指纹重新 sync；`ocr_status.preTest.mode` 也是现算的，不会再与文件矛盾 |
 | **所有**工具都返回空内容的 `Error: `（`pwsh`、`read`、`glob`、浏览器、状态查询…） | 装的是 **0.5.7 ~ 0.5.9**：`preTest` 闸门挂在**全局** `ctx.tools.guard()` 上，而放行写成了 `return ""`。宿主的实现是 `guardReason(exec) { … if (reason !== void 0) return reason; }` —— **空字符串同样算拒绝理由**，随后管线渲染成 `Error: ${denialReason}`，于是每次工具调用都变成 `Error: `。这不是宿主升级导致的，是本插件 `""` 与 `undefined` 的边界写错。升级到 **0.5.10**（放行返回 `undefined` + 闸门自身异常 fail-open）或 **0.6.0**（连全局 guard 都删掉，只留限定范围的 `tools/pre-execute`）。卡在 0.5.7~0.5.9 的机器在应用内**修不了**（连配置文件都读不了），只能重装/升级插件再重启宿主 |
 | `preTest` 设成 `gate`/`remind` 了，模型还是直接跑测试、或者明明评过了还被挡 | 看 `ocr_status.preTest`：`mode` 应该等于你设的档、`mechanism` 应该是 `pre-execute`（`none` = 宿主没有 `tools/pre-execute` 事件，或插件被 `enabled=false` 关掉）；`denials`/`reminders` 是累计计数，能确认这档真的在起作用；`failOpen`/`lastError`/`lastDecision` 用来看闸门自身有没有出错放行。覆盖状态**按 agent** 记，且**成功写文件会立刻作废**上一次评审；失败（`ok !== true`）的评审不算评过（fail-closed）。只认 shell 类工具里的常见测试入口，别的命令一律放行 |
+
+### 加固（v0.11.0：设置页不再问用户不关心的问题、按钮只在有改动时出现、`ocr` 档把「跑前就知道」补齐）
+
+这一版没有新引擎、没有新能力，改的全是「第一次打开时撞上的东西」。判定线与回看日写在 `docs/usability-plan-2026-10-12.md`。
+
+| 问题 | 现在 |
+| --- | --- |
+| 26 个配置项平铺在一个页面里，大部分出厂值根本不用改 | 设置页**三分法**：首屏 4 项（总开关 / 默认引擎 / 按需评审 / 自动评审，且自动评审只给 `off` 与 `adaptive`）、折叠的「高级设置」3 组（模型路由 / 独立评审 agent（仅 `spawn` 时显示三项）/ 评审先于测试）、末尾**只读诊断区**列被移出的 15 个键的「当前值 · 键名」。schema 与 `config.json` 约定一个都没动 —— 行为零变化 |
+| 按钮在每个回合尾都出现，哪怕这一回合什么都没改 | 客户端注册 conversation event definition（`kind = ocrTurnChanges`，只听 `turn/start` 与 `workspace/changes`）记下本回合最后一次改动的 `seq`，按钮取 `api/changes.summary?sessionId=..&seq=..`，`total === 0` 才隐藏。**失败一律 fail-open**（宿主没有该能力、读不到 `turn.data`、请求失败或形状不认识 → 照旧显示）：宁可见了没改动，不可有改动却看不见 |
+| 桥用随机端口，重启地址就变；地址还没法写进 ocr 的持久配置 | `llm.bridgePort`（默认 **18800**，不进设置页）：重启地址不变，占用则顺延（最多 10 个），`ocr_status.bridge.requestedPort` / `portShifted` 说明实际端口。注入方式仍是每次 spawn 时给 `OCR_LLM_*` 环境变量（token 每次启动随机，不落盘） |
+| 桥起不来时「悄悄换成静态端点」，用户以为跑的是 DSH 的模型 | v0.11.0 起**明确失败**：一个子进程都不起（不出结论、也不产生费用），`OCR_LLM_MISSING` + 三种原因各自的 `nextStep`；要直连端点就显式设 `llm.mode = endpoint`（这条路完整保留） |
+| 只想用「当前对话正在用的模型」，却只能配全局默认 | 路由顺序变成 **插件设置 → 当前会话正在用的模型（`Session.requestContext()`）→ DSH 全局默认**。第二档是新增的，**没有新开关**：对话里切了模型，下一次评审就跟着变 |
+| `ocr` 档跑起来要等几分钟，却什么都不知道 | ① 开跑那一行先给规模（「本次约 N 个文件 → 按真机历史约 lo~hi 分钟」）；② 预估下限已超过本次超时时**开跑前**告警；③ 心跳多一句「预计还需 X 分钟起 / 已过下限 / 已过上限」；④ `partial` 结果**首行置顶**；⑤ 超时/取消的说明补上「保住了什么」（没有结论，已发生的用量不退还）；⑥ 结果带 `reviewSessionId`，可 `ocr session show/export` 与 `ocr viewer` 回看 |
+
+断言数：`test/smoke.mjs` 261 → **286**，`test/client-smoke.mjs` 195 → **208**。全部走罐头子进程与假 ctx，不需要真机 `ocr`。
+
+### 加固（v0.10.0：默认档回到 `ocr`，并把「结论覆盖到哪里」变成可核对的东西）
+
+v0.8.0 把默认从 `auto` 挪到 `delegate`，理由是「最贵的那档不该是不选就默认发生」。理由还成立，但结论反了：`auto` 的问题不是贵，是**没有 LLM 时会静默降级成 `delegate`** —— 你以为在跑流水线，拿到的却是半成品。默认档该是那条会被打上「评审过」的路径，所以回到 `ocr`；钱用「跑前预估 + 可以拒绝」解决，而不是用「悄悄换成便宜档」解决。`delegate` / `auto` / 第三档一个都没删，只是不再是出厂默认。
+
+| 问题 | 现在 |
+| --- | --- |
+| 出厂默认是 `delegate` 时，`reviewer: true` 明明承诺「不可用就报 `OCR_REVIEWER_UNAVAILABLE`，不回落」，实际却被静默吞掉 | 两道门里的 `plan.engine !== "delegate"` 写于默认还是 `auto` 的年代（2026-10-09），隔天翻默认就成了几乎恒假 —— 这是 v0.8.0 的连带回归。现在去掉该条件：`engine = delegate` 也能起独立评审 agent（delegate 出规格、agent 出结论），显式 `reviewer: true` 起不来就按承诺报错。工具路径是一次性单轮，这点如实写进 `notes` |
+| 已经开跑了才知道这次要花多久 | `engine = ocr` 时先跑一次免费的 `ocr delegate preview`（几百毫秒），把「本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟」写进第一条备注；预估失败只少这半句，不阻塞评审、也不编数字 |
+| `delegate` 的规格可能悄悄少给几段 diff，而结论照样写「未发现问题」 | 规格改成**按片交付**：每片抬头 `[片 3/7 · lib/x.js · 本文件 hunk 1-3/6 · 4823B]`；「你的任务」里加了「覆盖回执（硬规则，必须逐片回填）」—— 只要存在未覆盖的片，就不得输出「未发现问题」。`diff` 截断同时从字符级改成 **hunk 级**（整片丢弃并报出收录/丢弃数），采集上限与规格上限统一到同一个 `includeDiffMaxBytes` |
+| 「部分结果」没法被机器读出来 | 工具返回值新增 `partial` / `partialReasons` / `coverage` 三个字段（`RELEASING.md` 划的外部接口）。ocr 侧只认它明写的信号（`partial` / `budget_exceeded` / `failed(budget)` / `status: "failed"`…）；一旦 `partial`，摘要不写「未发现问题」 |
+| `effort` 在 delegate 下静默无效 | `ocr delegate` 没有 `--effort`，现在会明说「effort=high 在 delegate 下不生效」。字段留着不删 |
+| 文档把入口的待认领窗口写成「60 秒」，代码里一直是 10 分钟 | 改文档不改代码：10 分钟是有意的（模型可能隔几轮才真的调用工具，理由写在 `lib/index.js` 的 `ENTRY_PENDING_TTL_MS` 旁），60 秒反而会让「按钮到底有没有人点」这个判据失真 |
+| `autoEngine` 出厂是 `delegate`，于是「我设了 `ocr`，回合尾自动评审却拿到 `delegate`」 | 出厂留空 = **跟随 `engine`**：自动评审的结论来源与手调一致（自动评审本身仍出厂 `off`） |
+
+断言数：`test/smoke.mjs` 243 → **261**（W1/W2/W3/W4 四个工作包的判定线与回看日见 `docs/review-quality-plan-2026-10-12.md`）；新增用例全部走罐头子进程，不需要真机 `ocr`。另有一次真机验收：`engine=ocr` 审一个单文件提交（`4507de6`，9.9s、1141 tokens、0 条问题、留了 `session_id`），跑前成本预估按提交范围给出「1 个文件 → 约 3~10 分钟」；收尾的 `partial` 判定当场改成读 ocr 自己的 `manifest.coverage`（那次验收发现：只认顶层 `partial` 字段会漏报「选中 8 项、只完成 5 项」这种真机情形）。
 
 ### 加固（v0.9.0：把「按钮到底有没有人点」变成一个可核对的数）
 
@@ -440,7 +489,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 | 问题 | 现在 |
 | --- | --- |
-| 命令与按钮自己**不执行评审**（只往会话里注入一句指令）⇒ 入口没法在命令处认领 | 认领点放在「模型真的调 `ocr_review`」那一刻：命令处理器留一个待认领标记（60 秒内有效），随后那次工具调用把它领走；没有待认领就记 `tool` |
+| 命令与按钮自己**不执行评审**（只往会话里注入一句指令）⇒ 入口没法在命令处认领 | 认领点放在「模型真的调 `ocr_review`」那一刻：命令处理器留一个待认领标记（**10 分钟内**有效），随后那次工具调用把它领走；没有待认领就记 `tool`。窗口是 10 分钟不是 60 秒，因为模型可能隔几轮才真的调用工具（`lib/index.js` 的 `ENTRY_PENDING_TTL_MS` 注释写明了这个理由）；v0.9.0 的文档写成「60 秒」，v0.10.0 一并改正 |
 | 按钮与手输命令在宿主侧是同一条命令，分不开 | 浏览器半侧在命令行尾部带 `--entry=button`（宿主把命令名之后的每个字节都当 rawInput，所以标记能穿透到 handler）；插件收下即**剥掉**，模型看到的提示词里没有它 |
 | 「按 skill 说明调用」与「模型自发调用」在工具层是同一次调用 | 不造 `skill` 桶。「模型有没有照 skill 的说明做」是提示词质量问题，用编出来的计数回答它就是自欺 |
 | 自动评审那条路不走工具调用门槛，容易记成 0 | 开跑记 `noteEntryStart("auto")`，每次结算（成功 / 轮次上限 / 异常）都配一笔结果，保证 `started === ok + failed` |
@@ -724,7 +773,7 @@ dsh-open-code-review/
 │  ├─ index.js           # 插件入口：schemastery Config + 工具/命令注册 + 自动评审钩子 + 本机桥接线 + 独立评审 agent 编排（runReviewerReview / 轮次往返 / subagents 子注入）+ 评审进度接线（openReviewJob / finishReviewJob / chunkSink）
 │  ├─ reviewer.js        # 评审 agent：规格提示词、findings schema 与解析、线程与轮次（纯逻辑；subagents 运行时由调用方注入）
 │  ├─ bridge.js          # 本机 LLM 桥：OpenAI 兼容 /v1/chat/completions ⇄ ctx.llm.stream（含宿主硬契约：assistant 消息补 source{kind:"model",provider,model}、tool 消息补 source{kind:"tool",callId}）
-│  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section + 会话内进度行（conversation.input.dock），渲染设置表单（`FIELDS` 25 行 = 基础 6 + 随父开关出现的从属 6 行 + 「高级设置」折叠 13 项；bundle 卡片只渲染只读摘要），文案走 Client locale
+│  ├─ client.js          # 浏览器半侧：注册 plugins.bundle.config + settings.section + 会话内进度行（conversation.input.dock）+ 本回合改动事件定义（conversation 事件 `ocrTurnChanges`，驱动回合尾按钮的脏检查），渲染设置表单（`FIELDS` 26 个键 = 首屏 4 + 随父开关出现的从属 3 + 「高级设置」3 组 4 项 + 只读诊断区 15；bundle 卡片只渲染只读摘要），文案走 Client locale
 │  ├─ config.js          # 三层配置合并、schemaOverrides（读 volatile 引用）
 │  ├─ killswitch.js      # 紧急制动（v0.7.0）：环境变量 / 标记文件两条不依赖配置的「存在即禁用」判定
 │  ├─ hooks.js           # 爆炸半径（v0.7.0）：armHook（事件名白名单 + try/catch + 注册失败记账，永不抛）、safeInject、hookStats
@@ -733,12 +782,12 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 243 项 / 没装 236 项断言：缺 ocr 的用例换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host）、v0.8.0 默认引擎与成本/心跳（默认 delegate 且不读机器上的真实配置、pickEngine 三例、每个失败码都有可执行的 nextStep、costHint 对 delegate 静默、心跳区分「还没输出」与「刚有输出」、nextStep 进 schema、心跳接线源码级断言））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 286 项；缺 ocr 时同一套会跳过真机用例、换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿（条数随之减少）；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host）、v0.8.0/v0.10.0 默认引擎与成本/心跳（默认 ocr、autoEngine 留空跟随 engine、pickEngine 三例、成本预估三例、规格分片与覆盖回执、hunk 级截断与单一上限、partial 三来源、绝不传 `--max-tokens-budget`、每个失败码都有可执行的 nextStep、costHint 对 delegate 静默、心跳区分「还没输出」与「刚有输出」、nextStep 进 schema、心跳接线源码级断言）、v0.11.0 路由与 ocr 档体验（currentInitiator→Session.requestContext 跟随当前会话、设置页优先、桥不可用即 `OCR_LLM_MISSING` 且不落子进程、`llm.bridgePort` 顺延与占满十连、`requestedPort`/`portShifted`、实测规模进开跑行、超时下限开跑前告警、预计剩余三段话术、`reviewSessionId` 与会话回看提示、TIMEOUT/ABORTED 的「保住了什么」、partial 首行置顶、bridgePort 不进设置页的两条守卫））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
    ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，103 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「半截正文也算截断」「桥自己的超时会给客户端交代并计入统计」「畸形请求体 → 400 invalid_body」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数、v0.6.1 的 rejected/lastReject 与 retrySkipReason 逐请求重置、v0.6.2 的无 index 工具调用合并与 reasoning_content）：node test/bridge-smoke.mjs
-   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、设置页基础组与「高级设置」折叠、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
+   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，208 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、v0.11.0 的按钮脏检查（total=0 隐藏 / 读不到 turn 记录隐藏 / 请求抛错与 404 照旧显示 / 宿主没有该能力照旧显示 + 事件定义的 6 条契约）、设置页三分法（首屏 4 项、折叠态无输入控件、15 个被移出的键与只读诊断区）、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
    │                     #   CI 里不再容忍这个跳过：工作流临时装上游 cordis + cosmokit（--no-save）并把 OCR_TEST_CORDIS 指到真 main 文件，跳过即失败

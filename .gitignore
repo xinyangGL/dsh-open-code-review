@@ -6,3 +6,16 @@ npm-debug.log*
 # 插件配置文件只属于当前机器：里面可能写着 API key、本机 ocr 路径。
 # 仓库里放 config.example.json（模板），真实值写 <DSH_HOME>/dsh-open-code-review.json。
 config.json
+
+# 本机工具在本仓库留下的副产物（W5 卫生）：GraphFlow 的自建工作区、smart_download 的进度文件、
+# 以及 GraphFlow 往各 agent 目录写的规则副本。它们不属于插件源码，别混进提交里。
+.graphflow/
+graphflow-out/
+.dsh-progress/
+.claude/
+.trae/
+
+# GraphFlow 往仓库根与 .github 写的 agent 指令（同样是本机工具产物；文件留在磁盘上继续生效，
+# 只是不进版本库 —— 它们是给本机 agent 看的，不是插件交付物）。
+/AGENTS.md
+/.github/copilot-instructions.md

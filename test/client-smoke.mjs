@@ -287,9 +287,10 @@ check(
   "zh 词典含选项文案与分组名",
   String(zhDict["choice.llmMode.dsh"] || "").startsWith("dsh —")
     && zhDict["group.basic"] === "基础"
-    && zhDict["group.tuning"] === "调优"
-    && zhDict["group.runtime"] === "运行与诊断",
-  JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.tuning"], zhDict["group.runtime"]]),
+    && zhDict["group.route"] === "模型路由"
+    && zhDict["group.reviewer"] === "独立评审 agent"
+    && zhDict["group.timing"] === "评审时机",
+  JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.route"], zhDict["group.reviewer"], zhDict["group.timing"]]),
 );
 check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
 check("四个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
@@ -358,29 +359,37 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-/* 主页只放「要做的决定」这 7 行；13 个参数项收进「高级设置」，默认不渲染。 */
-const BASIC_LABELS = ["总开关", "默认引擎", "自动评审", "按需评审", "独立评审 agent", "LLM 路由", "模型名"];
-/* 调优 7（含 v0.5.7 的「评审先于测试」）+ 运行与诊断 6；provider 行只在 dsh 模式下渲染，所以它在 13 项里。 */
-const ADVANCED_LABELS = ["自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "评审先于测试", "结果详细程度", "ocr 可执行文件", "提供方（provider）", "单次超时（分钟）", "评审进度", "调试日志"];
-const ADVANCED_KEYS = ["autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "preTest", "audience", "ocrPath", "llmProvider", "timeoutMinutes", "progress", "verbose"];
+/* 主页只放「要做的决定」这 4 行；高级区（模型路由 2 + 独立评审 agent 1 + 评审时机 1 = 4）默认不渲染；
+   其余 15 项是 v0.11.0 起不再露出的配置项，只在诊断区只读列出。 */
+const BASIC_LABELS = ["总开关", "默认引擎", "按需评审", "自动评审"];
+const ADVANCED_LABELS = ["模型名", "提供方（provider）", "独立评审 agent", "评审先于测试"];
+/* 「独立评审 agent」同时是折叠区里那个分组的名字，而收起提示会点名三个分组 —— 它单列。 */
+const COLLAPSED_LABELS = ["模型名", "提供方（provider）", "评审先于测试"];
+const ADVANCED_KEYS = ["llmModel", "llmProvider", "reviewerAgent", "preTest"];
+const HIDDEN_KEYS = ["llmMode", "llmBaseUrl", "llmProtocol", "llmApiKeyRef", "autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "audience", "ocrPath", "timeoutMinutes", "progress", "verbose"];
+const HIDDEN_LABELS = ["LLM 路由", "端点 Base URL", "端点协议", "API Key 引用", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "结果详细程度", "ocr 可执行文件", "单次超时（分钟）", "评审进度", "调试日志"];
 for (const label of BASIC_LABELS) {
   check(`基础组渲染字段「${label}」`, html.includes(label));
 }
-for (const label of ADVANCED_LABELS) {
+for (const label of COLLAPSED_LABELS) {
   check(`高级项「${label}」默认收起`, !html.includes(label));
 }
-check("高级设置标题显示项数（收起时也显示）", html.includes("高级设置（13 项）"), html.slice(0, 180));
+check("收起提示里点名了三个分组", html.includes("模型路由") && html.includes("独立评审 agent") && html.includes("评审时机"), html.slice(0, 200));
+check("高级设置标题显示项数（收起时也显示 4 项）", html.includes("高级设置（4 项）"), html.slice(0, 180));
 check("高级设置默认收起（aria-expanded=false）", hosts(tree).some((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1" && n.props["aria-expanded"] === "false"));
 check("收起时说明怎么展开", html.includes("已收起"), html.slice(0, 180));
 check("主页说明字段来源徽标", html.includes("设置页已改"));
-/* dsh 模式（默认）不需要地址与 key：静态端点那三行不该出现 */
-for (const label of ["端点 Base URL", "端点协议", "API Key 引用"]) {
-  check(`dsh 模式不渲染「${label}」`, !html.includes(label));
+/* 诊断区：被收起的键没有控件，但键名与当前生效值要能查到（要改就去写 config.json）。 */
+const diagRows = hosts(tree).filter((n) => n.props && typeof n.props["data-ocr-diagnostics-row"] === "string");
+check("诊断区只读列出全部 15 个被收起的键", diagRows.length === 15 && HIDDEN_KEYS.every((k) => diagRows.some((r) => r.props["data-ocr-diagnostics-row"] === k)), `n=${diagRows.length}`);
+check("诊断区写明要改就写 config.json", html.includes("config.json"), textOf(tree).slice(-200));
+check("诊断区带出被收起键的当前生效值", textOf(tree).includes("3 · autoMaxPerSession"), textOf(tree).slice(-240));
+for (const label of HIDDEN_LABELS) {
+  check(`被收起的「${label}」在诊断区里只读出现、没有控件`, textOf(tree).includes(label) && !controlRows(tree).some((r) => HIDDEN_KEYS.includes(r.key)));
 }
 check("带出条目 id", html.includes("include:dsh-open-code-review"));
 check("状态行含 ready/可写", html.includes("状态 ready") && html.includes("可写"));
-check("带出模型当前值", hosts(tree).some((n) => n.tag === "input" && n.props.value === "deepseek/deepseek-v4.1-flash"));
-check("收起时高级数字字段不在 DOM 里", !hosts(tree).some((n) => n.tag === "input" && n.props.type === "number" && n.props.value === "3"));
+check("收起时高级区没有任何控件行", controlRows(tree).filter((r) => ADVANCED_KEYS.includes(r.key)).length === 0, `n=${controlRows(tree).length}`);
 check("已改字段有标记", html.includes("已改"));
 check("enabled 勾选", hosts(tree).some((n) => n.tag === "input" && n.props.type === "checkbox" && n.props.checked === true));
 
@@ -403,7 +412,7 @@ function controlRows(node, out = []) {
 const rows = controlRows(tree);
 /** 只数高级区的行（展开后整棵树里 = 基础组 + 高级区）。 */
 const advancedRows = (t) => controlRows(t).filter((r) => ADVANCED_KEYS.includes(r.key));
-check("基础组 7 个控件行（dsh 模式、独立评审 agent=off，含按需评审）", rows.length === 7, `n=${rows.length}`);
+check("基础组 4 个控件行（dsh 模式、独立评审 agent=off，含按需评审）", rows.length === 4, `n=${rows.length}`);
 /* v0.5.0 步骤 3：默认不自动评审，改成「按需」——这两个决定必须能从主页一眼看出来。 */
 const onDemandRow = rows.find((r) => r.key === "onDemand");
 check(
@@ -411,13 +420,19 @@ check(
   Boolean(onDemandRow) && onDemandRow.field.tag === "input" && onDemandRow.field.props.type === "checkbox" && onDemandRow.field.props.checked === true,
   onDemandRow ? `${onDemandRow.field.tag}/${onDemandRow.field.props.type}/${onDemandRow.field.props.checked}` : "没有该行",
 );
-const autoReviewOptionTexts = rows.find((r) => r.key === "autoReview") ? hosts(rows.find((r) => r.key === "autoReview").row).filter((n) => n.tag === "option").map(textOf) : [];
+const autoReviewRow = rows.find((r) => r.key === "autoReview");
+const autoReviewValues = autoReviewRow ? hosts(autoReviewRow.row).filter((n) => n.tag === "option").map((n) => String(n.props.value)) : [];
+const autoReviewOptionTexts = autoReviewRow ? hosts(autoReviewRow.row).filter((n) => n.tag === "option").map(textOf) : [];
 check(
-  "「自动评审」下拉保留四档，且 off 档写明 v0.5.0 起是默认",
-  [...["adaptive", "inject", "followup", "off"]].every((v) => autoReviewOptionTexts.some((o) => o.includes(v))) && autoReviewOptionTexts.some((o) => o.includes("v0.5.0 起默认")),
-  JSON.stringify(autoReviewOptionTexts),
+  "「自动评审」下拉只给 off / adaptive 两档（v0.11.0 收起 inject / followup），off 档写明 v0.5.0 起是默认",
+  autoReviewValues.join(",") === "off,adaptive" && autoReviewOptionTexts.some((o) => o.includes("v0.5.0 起默认")),
+  JSON.stringify(autoReviewValues),
 );
-check("「自动评审」的说明指向下一行按需评审", html.includes("出厂默认 off") && html.includes("见下一行"));
+check(
+  "「自动评审」的说明写明另两档要写 config.json 的 auto 键",
+  html.includes("出厂默认 off") && html.includes("写 config.json 的 auto 键"),
+  html.slice(0, 200),
+);
 
 /* 高级设置：默认收起 → 点标题展开 → 再点收起（折叠只是不渲染，草稿仍由 saveAll 一起保存） */
 const advToggle = (t) => hosts(t).find((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1");
@@ -429,15 +444,15 @@ check("高级设置有可点的标题", Boolean(advToggle(tree)));
 setAdvanced(true);
 const advTree = render();
 const advRows = controlRows(advTree);
-check("展开后高级项 13 行（调优 7 + 运行与诊断 6）", advancedRows(advTree).length === 13, `n=${advancedRows(advTree).length}`);
+check("展开后高级项 4 行（模型路由 2 + 独立评审 agent 1 + 评审时机 1）", advancedRows(advTree).length === 4, `n=${advancedRows(advTree).length}`);
 check("展开后 aria-expanded=true", advToggle(advTree).props["aria-expanded"] === "true");
-check("展开后不再显示收起提示", !textOf(advTree).includes("已收起"));
+check("展开后不再显示「已收起」的展开提示", !textOf(advTree).includes("低频参数已收起"));
 check(
   "展开后每个高级项都渲染出来",
   ADVANCED_LABELS.every((label) => textOf(advTree).includes(label)),
   ADVANCED_LABELS.filter((l) => !textOf(advTree).includes(l)).join(" / "),
 );
-check("展开后高级数字字段带出当前值", hosts(advTree).some((n) => n.tag === "input" && n.props.type === "number" && n.props.value === "3"));
+check("展开后模型名带出当前值", hosts(advTree).some((n) => n.tag === "input" && n.props.value === "deepseek/deepseek-v4.1-flash"));
 check("高级项也有「恢复默认」", advRows.every((r) => r.buttons.some((b) => textOf(b) === "恢复默认")));
 const preTestRow = advRows.find((r) => r.key === "preTest");
 check(
@@ -446,113 +461,71 @@ check(
     hosts(preTestRow.row).filter((n) => n.tag === "option").map((n) => n.props.value).join(",") === "off,remind,gate",
   preTestRow ? hosts(preTestRow.row).filter((n) => n.tag === "option").map((n) => n.props.value).join(",") : "行不存在",
 );
+/* 高级区的文本框：草稿 → 保存 → form.set（旧用例拿 Base URL 测，那个键已收进诊断区）。 */
+const provRow0 = advRows.find((r) => r.key === "llmProvider");
+check("高级区有 provider 文本行（dsh 模式）", Boolean(provRow0) && provRow0.field.tag === "input");
+if (provRow0) {
+  provRow0.field.props.onChange({ target: { value: "other" } });
+  const provRow1 = controlRows(render()).find((r) => r.key === "llmProvider");
+  const saveProv0 = provRow1 && provRow1.buttons.find((b) => textOf(b) === "保存");
+  check("改动后草稿生效（provider）", Boolean(provRow1) && provRow1.field.props.value === "other");
+  check("改动后出现「保存」", Boolean(saveProv0));
+  if (saveProv0) {
+    await saveProv0.props.onClick();
+    check("保存调用 form.set(llmProvider)", writes.some((w) => w.op === "set" && w.key === "llmProvider" && w.value === "other"), JSON.stringify(writes.slice(-2)));
+  }
+}
 setAdvanced(false);
-check("再点一次收起、DOM 里没有高级行", advancedRows(render()).length === 0 && controlRows(render()).length === 7, `n=${controlRows(render()).length}`);
+check("再点一次收起、DOM 里没有高级行", advancedRows(render()).length === 0 && controlRows(render()).length === 4, `n=${controlRows(render()).length}`);
 
-const modeRow = rows.find((r) => r.key === "llmMode");
-check("找到 LLM 路由行", Boolean(modeRow) && modeRow.field.tag === "select");
-check("LLM 路由行只给 dsh / endpoint 两个选项", Boolean(modeRow) && hosts(modeRow.row).filter((n) => n.tag === "option").length === 2);
-check("dsh 模式下收起时 provider 行不渲染（它在高级区）", !rows.some((r) => r.key === "llmProvider"));
-check("dsh 模式下没有 Base URL 行", !rows.some((r) => r.field.props.value === "https://api.commandcode.ai/provider/v1"));
 check("dsh 模式状态行说明走本机桥", html.includes("LLM 走 DSH 本机桥"));
-
-const modelRow = rows.find((r) => r.field.props.value === "deepseek/deepseek-v4.1-flash");
-check("改动前该行没有「保存」", Boolean(modelRow) && !modelRow.buttons.some((b) => textOf(b) === "保存"));
+/* v0.11.0：LLM 路由与静态端点三件套从设置页收起 —— 页面给不出控件，改它们要写 config.json。 */
+check(
+  "端点四键在设置页没有控件（只能写 config.json）",
+  !controlRows(render()).some((r) => ["llmMode", "llmBaseUrl", "llmProtocol", "llmApiKeyRef"].includes(r.key)),
+  JSON.stringify(controlRows(render()).map((r) => r.key)),
+);
+check(
+  "诊断区写出 endpoint 的写法（llm.mode / baseUrl / protocol / apiKeyRef）",
+  textOf(render()).includes("llm.mode = endpoint") && textOf(render()).includes("llm.baseUrl") && textOf(render()).includes("llm.apiKeyRef"),
+);
+check("改动前没有任何行带「保存」按钮", controlRows(render()).every((r) => !r.buttons.some((b) => textOf(b) === "保存")));
 check("每行都有「恢复默认」", rows.every((r) => r.buttons.some((b) => textOf(b) === "恢复默认")));
-
-/* 切到 endpoint：静态端点三行出现、provider 行消失（直连的老行为） */
-modeRow.field.props.onChange({ target: { value: "endpoint" } });
-const endpointTree = render();
-const endpointRows = controlRows(endpointTree);
-check("endpoint 模式下基础组 10 行（多出静态端点三行）", endpointRows.length === 10, `n=${endpointRows.length}`);
-check("endpoint 模式下收起时不渲染 provider 行", !endpointRows.some((r) => r.key === "llmProvider"));
+/* ---------- 收起进诊断区的低频键：任何状态下都不给控件 ---------- */
 setAdvanced(true);
-check("endpoint 模式下高级区 12 行（provider 项只在 dsh 模式渲染）", advancedRows(render()).length === 12, `n=${advancedRows(render()).length}`);
+const expandedKeys = controlRows(render()).map((r) => r.key);
 setAdvanced(false);
-check("endpoint 模式状态行说明直连", textOf(endpointTree).includes("LLM 直连静态端点"));
+const collapsedKeys = controlRows(render()).map((r) => r.key);
+check(
+  "15 个低频键在收起与展开两种状态下都没有控件（要改就写 config.json）",
+  HIDDEN_KEYS.every((k) => !expandedKeys.includes(k) && !collapsedKeys.includes(k)),
+  JSON.stringify(HIDDEN_KEYS.filter((k) => expandedKeys.includes(k) || collapsedKeys.includes(k))),
+);
+check(
+  "展开态可见键 = 基础 4 + 高级 4（模型路由 2 / 独立评审 agent 1 / 评审时机 1）",
+  expandedKeys.join(",") === "enabled,engine,onDemand,autoReview,llmModel,llmProvider,reviewerAgent,preTest",
+  expandedKeys.join(","),
+);
+check("收起态可见键 = 基础 4", collapsedKeys.join(",") === "enabled,engine,onDemand,autoReview", collapsedKeys.join(","));
+check("诊断区说明「键名即是 config.json 的写法」", html.includes("键名") && html.includes("运行期实况"));
 
-const urlRow = endpointRows.find((r) => r.field.props.value === "https://api.commandcode.ai/provider/v1");
-check("endpoint 模式下找到 Base URL 行", Boolean(urlRow));
-urlRow.field.props.onChange({ target: { value: "https://example.test/v1" } });
-const urlRow2 = controlRows(render()).find((r) => r.field.props.value === "https://example.test/v1");
-check("改动后草稿生效", Boolean(urlRow2));
-const save2 = urlRow2 && urlRow2.buttons.find((b) => textOf(b) === "保存");
-check("改动后出现「保存」", Boolean(save2));
-if (save2) {
-  await save2.props.onClick();
-  check("保存调用 form.set(Base URL)", writes.some((w) => w.op === "set" && w.key === "llmBaseUrl" && w.value === "https://example.test/v1"), JSON.stringify(writes));
-}
-
-/* 切回 dsh：后面几段按 dsh 模式的 17 行断言 */
-controlRows(render()).find((r) => r.key === "llmMode").field.props.onChange({ target: { value: "dsh" } });
-render();
-
-/* ---------- 高级区：数字上限、档位下拉、折叠态徽标 ---------- */
+/* 折叠态也要能看见「高级区里有待保存的改动」，并且能逐字段撤销。
+   用「评审时机」这个下拉来测：它没有内部状态；模型名那行是可搜索下拉，改它会把内部 text/open
+   状态留在测试夹具里，污染后面的候选列表用例。 */
 setAdvanced(true);
-const maxRow = controlRows(render()).find((r) => r.key === "autoMaxPerSession");
-check("找到「每会话上限」数字行", Boolean(maxRow) && maxRow.field.props.type === "number" && maxRow.field.props.value === "3");
-if (maxRow) {
-  maxRow.field.props.onChange({ target: { value: "5" } });
-  const maxRow3 = controlRows(render()).find((r) => r.key === "autoMaxPerSession");
-  const save3 = maxRow3 && maxRow3.buttons.find((b) => textOf(b) === "保存");
-  check("数字改动后出现「保存」", Boolean(save3));
-  if (save3) await save3.props.onClick();
-  check("数字字段写成 number", writes.some((w) => w.op === "set" && w.key === "autoMaxPerSession" && w.value === 5), JSON.stringify(writes));
-  const reset = controlRows(render())
-    .find((r) => r.key === "autoMaxPerSession")
-    ?.buttons.find((b) => textOf(b) === "恢复默认");
-  check("改动后该行有「恢复默认」", Boolean(reset));
-  if (reset) await reset.props.onClick();
-  check("「恢复默认」调用 form.unset", writes.some((w) => w.op === "unset" && w.key === "autoMaxPerSession"), JSON.stringify(writes));
-}
-
-/* 冷却间隔：裸毫秒换成档位下拉，存储仍是毫秒数字 */
-const intervalRow = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
-const intervalSelect = intervalRow && hosts(intervalRow.row).find((n) => n.props && n.props["data-ocr-preset-select"] === "autoMinIntervalMs");
-const intervalOptions = intervalRow ? hosts(intervalRow.row).filter((n) => n.tag === "option").map(textOf) : [];
-check("最小间隔渲染成档位下拉", Boolean(intervalSelect) && intervalSelect.tag === "select", intervalSelect ? intervalSelect.tag : "没有该行");
-check("下拉含四档 + 自定义", ["30 秒", "1 分钟（默认）", "5 分钟", "10 分钟", "自定义…"].every((text) => intervalOptions.some((o) => o.includes(text))), JSON.stringify(intervalOptions));
-check("当前值 60000 选中「1 分钟（默认）」", Boolean(intervalSelect) && intervalSelect.props.value === "60000", intervalSelect ? String(intervalSelect.props.value) : "没有该行");
-if (intervalSelect) {
-  intervalSelect.props.onChange({ target: { value: "300000" } });
-  const pickedRow = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
-  const saveInterval = pickedRow && pickedRow.buttons.find((b) => textOf(b) === "保存");
-  check("选档位后出现「保存」", Boolean(saveInterval));
-  if (saveInterval) {
-    await saveInterval.props.onClick();
-    check("档位按毫秒数字保存（300000）", writes.some((w) => w.op === "set" && w.key === "autoMinIntervalMs" && w.value === 300000), JSON.stringify(writes.slice(-2)));
-  }
-  /* 选「自定义…」→ 出现手填毫秒的数字框 */
-  intervalSelect.props.onChange({ target: { value: "custom" } });
-  const customRow = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
-  const customInput = customRow && hosts(customRow.row).find((n) => n.props && n.props["data-ocr-preset-input"] === "autoMinIntervalMs");
-  check("选「自定义…」后出现数字输入框", Boolean(customInput) && customInput.props.type === "number");
-  if (customInput) {
-    customInput.props.onChange({ target: { value: "45000" } });
-    const customRow2 = controlRows(render()).find((r) => r.key === "autoMinIntervalMs");
-    const saveCustom = customRow2 && customRow2.buttons.find((b) => textOf(b) === "保存");
-    check("自定义值也出现「保存」", Boolean(saveCustom));
-    if (saveCustom) {
-      await saveCustom.props.onClick();
-      check("自定义值按毫秒数字保存（45000）", writes.some((w) => w.op === "set" && w.key === "autoMinIntervalMs" && w.value === 45000), JSON.stringify(writes.slice(-2)));
-    }
-  }
-}
-
-/* 折叠态也要能看见「高级区里有待保存的改动」，并且能逐字段撤销 */
-const timeoutRow = controlRows(render()).find((r) => r.key === "timeoutMinutes");
-check("找到「单次超时」行", Boolean(timeoutRow));
-if (timeoutRow) timeoutRow.field.props.onChange({ target: { value: "20" } });
+const draftPreRow = controlRows(render()).find((r) => r.key === "preTest");
+check("找到高级区的评审时机行", Boolean(draftPreRow) && draftPreRow.field.tag === "select");
+if (draftPreRow) draftPreRow.field.props.onChange({ target: { value: "remind" } });
 setAdvanced(false);
 const collapsedDirty = render();
 check("折叠后标题显示「1 项待保存」", textOf(collapsedDirty).includes("1 项待保存"), textOf(collapsedDirty).slice(0, 160));
-check("折叠后高级行不在 DOM 里", controlRows(collapsedDirty).length === 7, `n=${controlRows(collapsedDirty).length}`);
+check("折叠后高级行不在 DOM 里", controlRows(collapsedDirty).length === 4, `n=${controlRows(collapsedDirty).length}`);
 setAdvanced(true);
-const undoRow = controlRows(render()).find((r) => r.key === "timeoutMinutes");
+const undoRow = controlRows(render()).find((r) => r.key === "preTest");
 const undoBtn = undoRow && undoRow.buttons.find((b) => textOf(b) === "撤销");
 check("折叠期间草稿还在，展开后能逐字段撤销", Boolean(undoBtn));
 if (undoBtn) undoBtn.props.onClick();
-check("撤销后该行不再算脏（值已回到已存值）", !controlRows(render()).find((r) => r.key === "timeoutMinutes").buttons.some((b) => textOf(b) === "保存"));
+check("撤销后该行不再算脏（值已回到已存值）", !controlRows(render()).find((r) => r.key === "preTest").buttons.some((b) => textOf(b) === "保存"));
 setAdvanced(false);
 check("撤销后待保存徽标消失", !textOf(render()).includes("项待保存"));
 
@@ -586,10 +559,11 @@ const fullCatalogResponse = async () => ({
 fakeCtx.remote = { session: { modelCatalog: fullCatalogResponse } };
 /* 后面的降级场景会改写 fakeCtx.remote：收尾时按这份快照恢复，别把共享夹具留在坏状态（评审 #5）。 */
 const healthyRemote = fakeCtx.remote;
+/* 模型名/提供方在 v0.11.0 起属于「高级设置」里的模型路由组：先展开，再让目录异步读完。 */
+setAdvanced(true);
 render();
 await tick();
-const catalogTree = render();
-check("模型目录读完后给出候选数量", textOf(catalogTree).includes("4 个模型"), textOf(catalogTree).slice(-140));
+const catalogTree = render();check("模型目录读完后给出候选数量", textOf(catalogTree).includes("4 个模型"), textOf(catalogTree).slice(-140));
 check("目录读取失败也如实提示", textOf(catalogTree).includes("1 个提供方没读出来"));
 check("带出当前模型的友好名", textOf(catalogTree).includes("当前：DeepSeek v4.1 Flash（Command Code）"), textOf(catalogTree).slice(-160));
 
@@ -636,7 +610,8 @@ if (saveProv) {
 }
 setAdvanced(false);
 
-/* 键盘：输入过滤成唯一匹配后回车选中 */
+/* 键盘：输入过滤成唯一匹配后回车选中（模型名行在高级区，继续展开态） */
+setAdvanced(true);
 const afterSave = render();
 modelInputNode(afterSave).props.onFocus();
 modelInputNode(afterSave).props.onChange({ target: { value: "kimi" } });
@@ -651,7 +626,7 @@ check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.v
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "spawn" } });
 const spawnTree = render();
 const spawnRows = controlRows(spawnTree);
-check("reviewer=spawn 时基础组 10 行（多出子 agent 三行）", spawnRows.length === 10, `n=${spawnRows.length}`);
+check("reviewer=spawn 时展开态 11 行（基础 4 + 路由 2 + 子 agent 3 行额外 + 时机 1）", spawnRows.length === 11, `n=${spawnRows.length}`);
 check("reviewerAgent 只有 off / spawn 两个选项", (() => {
   const row = spawnRows.find((r) => r.key === "reviewerAgent");
   return Boolean(row) && hosts(row.row).filter((n) => n.tag === "option").length === 2;
@@ -670,7 +645,9 @@ check("子 agent 模型行也是可搜索下拉", Boolean(reviewInput) && review
 if (reviewInput) {
   reviewInput.props.onFocus();
   const reviewMenu = render();
-  const reviewItems = hosts(reviewMenu).filter((n) => n.props && n.props["data-ocr-model-item"] === true);
+  /* 菜单节点必须在这一行内部找：树里还有模型名那行的菜单，宽泛查找会点到别人的候选。 */
+  const reviewMenuRow = controlRows(reviewMenu).find((r) => r.key === "reviewerModel");
+  const reviewItems = hosts(reviewMenuRow.row).filter((n) => n.props && n.props["data-ocr-model-item"] === true);
   check("子 agent 模型行能展开候选", reviewItems.length >= 4, `n=${reviewItems.length}`);
   const target = reviewItems.find((n) => textOf(n).includes("Kimi K2.7 Code"));
   check("子 agent 候选里能找到模型", Boolean(target));
@@ -692,10 +669,14 @@ if (reviewInput) {
 /* 切回 off：后面的降级场景与行数断言按默认（不启用）算 */
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "off" } });
 const offAgain = controlRows(render());
-check("切回 off 后子 agent 三行消失、行数回到 7", offAgain.length === 7 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
+check("切回 off 后子 agent 三行消失、展开态行数回到 8", offAgain.length === 8 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
 check("切回 off 后状态行不再提独立 agent", !textOf(render()).includes("评审走独立 agent"));
+setAdvanced(false);
+check("收起后回到基础 4 行", controlRows(render()).length === 4, `n=${controlRows(render()).length}`);
 
 /* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
+/* 模型名/提供方在高级区：下面这一串都在看模型行的退化表现，先把高级区展开。 */
+setAdvanced(true);
 fakeCtx.remote.session.modelCatalog = async () => ({ ok: false, error: { code: "peer-unavailable", message: "peer 断了" } });
 render();
 await tick();
@@ -769,13 +750,16 @@ check("兜底读取口也失败时不渲染候选列表", !modelMenuNode(deadTre
 fakeCtx.remoteThrows = false;
 fakeCtx.remote = healthyRemote; /* 共享夹具恢复健康：后面设置页/条目回退场景还要用它 */
 
+/* 上面的退化场景把高级区展开了（那是共享的组件状态）：卡片/回退 id 用例按默认收起算，先收回去。 */
+setAdvanced(false);
+
 /* 插件卡片（plugins.bundle.config 的 summary 视图）：不再渲染整张表单，改成只读摘要 + 去设置页 */
 const cardTree = expand(miniReact.createElement(reg.component, { view: "summary" }));
 flushEffects();
 const cardHtml = textOf(cardTree);
 const cardRows = hosts(cardTree).filter((n) => n.props && typeof n.props["data-ocr-summary-row"] === "string");
 check("卡片渲染只读摘要（不再是 null）", Boolean(hosts(cardTree).find((n) => n.props && n.props["data-ocr-card-summary"] === "1")), cardHtml.slice(0, 160));
-check("摘要只列基础项（不重复整张表单）", cardRows.length === 7, `n=${cardRows.length}`);
+check("摘要只列基础项（基础 4 行，不重复整张表单）", cardRows.length === 4, `n=${cardRows.length}`);
 check("摘要行带出当前值（开 / 关 / 选项文案）", cardHtml.includes("开") && cardHtml.includes("关") && cardHtml.includes("auto — "), cardHtml.slice(0, 220));
 check("摘要给出完整设置的入口", cardHtml.includes("设置 → 代码评审"), cardHtml.slice(0, 220));
 check("摘要里没有可编辑控件", !hosts(cardTree).some((n) => n.tag === "input" || n.tag === "select"));
@@ -789,7 +773,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 /* 条目 id 回退：主 id 查不到时用备用 id */
 fakeCtx.rejectIds = ["include:dsh-open-code-review"];
 const fbTree = render();
-check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 7, JSON.stringify(fakeCtx.formIds.slice(-2)));
+check("主 id 查不到时回退到包名 id", fakeCtx.formIds.includes("dsh-open-code-review") && controlRows(fbTree).length === 4, JSON.stringify(fakeCtx.formIds.slice(-2)));
 check("回退后字段仍可编辑", controlRows(fbTree).every((r) => r.field.props.disabled !== true));
 
 /* 两个 id 都查不到：给出诊断而不是崩掉 */
@@ -804,7 +788,7 @@ snapshot = { ...snapshot, status: "ready", writable: true };
 const sectionTree = expand(miniReact.createElement(sectionReg.component, {}));
 const sectionHtml = textOf(sectionTree);
 check("设置页渲染标题", sectionHtml.includes("代码评审（阿里 OpenCodeReview）"));
-check("设置页也带 7 个基础控件行（高级区另算）", controlRows(sectionTree).length === 7, `n=${controlRows(sectionTree).length}`);
+check("设置页也带 4 个基础控件行（高级区另算）", controlRows(sectionTree).length === 4, `n=${controlRows(sectionTree).length}`);
 check("设置页照样带出条目 id", sectionHtml.includes("include:dsh-open-code-review"));
 
 /* ------------------------------------------------------------ 会话内进度行（conversation.input.dock） */
@@ -911,15 +895,26 @@ check(
   JSON.stringify(noRemoteCtx.injectCalls),
 );
 const noRemoteCell = noRemoteRegs.find((r) => r.options.name === "settings.section");
-/** 渲染一个独立 cell：跑 effect → 等异步 setState → 用新状态重渲染。 */
+/** 渲染一个独立 cell：跑 effect → 等异步 setState → 用新状态重渲染。
+    高级区在 v0.11.0 起默认收起，而模型名/提供方在高级区里，所以每一步都先把标题点开
+    （setAdvanced 只作用于主树的 render()，独立 cell 得自己点）。 */
 const bareRender = async (cell) => {
   const el = () => miniReact.createElement(cell.component, {});
-  expand(el());
+  const step = () => {
+    let tree = expand(el());
+    const toggle = advToggle(tree);
+    if (toggle && toggle.props["aria-expanded"] !== "true") {
+      toggle.props.onClick();
+      tree = expand(el());
+    }
+    return tree;
+  };
+  step();
   flushEffects();
   await tick();
-  expand(el());
+  step();
   flushEffects();
-  return expand(el());
+  return step();
 };
 const bareTree = noRemoteCell ? await bareRender(noRemoteCell) : null;
 const bareText = bareTree ? textOf(bareTree) : "";
@@ -1025,7 +1020,7 @@ const optionsOf = (t) => hosts(t).filter((n) => n.tag === "option");
 setAdvanced(false);
 const noThemeTree = render();
 const noThemeSelects = selectsOf(noThemeTree);
-check("基础组四个原生下拉都在（引擎/自动评审/独立评审 agent/LLM 路由）", noThemeSelects.length === 4, `n=${noThemeSelects.length}`);
+check("基础组两个原生下拉都在（引擎/自动评审）", noThemeSelects.length === 2, `n=${noThemeSelects.length}`);
 check(
   "下拉不再靠继承配色：文字/底色/边框都走主题 token",
   noThemeSelects.every(
@@ -1040,7 +1035,7 @@ check(
 const noThemeOptions = optionsOf(noThemeTree);
 check(
   "每个 option 都显式给了文字色与底色（白底白字的根因）",
-  noThemeOptions.length >= 11 &&
+  noThemeOptions.length >= 5 &&
     noThemeOptions.every((n) => n.props.style && n.props.style.color === LABEL_TOKEN && n.props.style.background === OPTION_BG_TOKEN),
   `n=${noThemeOptions.length}`,
 );
@@ -1053,14 +1048,14 @@ fakeCtx.themeValue = { getTheme: () => ({ active: { colorScheme: "light" } }) };
 const lightSelects = selectsOf(render());
 check(
   "浅色主题下下拉声明 colorScheme=light",
-  lightSelects.length === 4 && lightSelects.every((n) => n.props.style.colorScheme === "light"),
+  lightSelects.length === 2 && lightSelects.every((n) => n.props.style.colorScheme === "light"),
   JSON.stringify(lightSelects.map((n) => n.props.style.colorScheme)),
 );
 fakeCtx.themeValue = { getTheme: () => ({ active: { colorScheme: "dark" } }) };
 const darkSelects = selectsOf(render());
 check(
   "深色主题下下拉声明 colorScheme=dark",
-  darkSelects.length === 4 && darkSelects.every((n) => n.props.style.colorScheme === "dark"),
+  darkSelects.length === 2 && darkSelects.every((n) => n.props.style.colorScheme === "dark"),
   JSON.stringify(darkSelects.map((n) => n.props.style.colorScheme)),
 );
 fakeCtx.themeValue = { getTheme: () => ({ active: {} }) };
@@ -1073,17 +1068,10 @@ check("订阅 theme/change（切主题时催一次重渲染）", fakeCtx.onCalls
 fakeCtx.themeValue = { getTheme: () => ({ active: { colorScheme: "light" } }) };
 setAdvanced(true);
 const presetTree = render();
-const presetSelect = hosts(presetTree).find((n) => n.props && n.props["data-ocr-preset-select"] === "autoMinIntervalMs");
 check(
-  "「最小间隔」档位下拉也走 token 样式 + colorScheme",
-  Boolean(presetSelect) && presetSelect.props.style.color === LABEL_TOKEN && presetSelect.props.style.colorScheme === "light",
-  JSON.stringify(presetSelect ? presetSelect.props.style : null),
-);
-const presetOptions = presetSelect ? hosts(presetSelect).filter((n) => n.tag === "option") : [];
-check(
-  "档位下拉的六个 option 也显式配色（默认/四档/自定义…）",
-  presetOptions.length === 6 && presetOptions.every((n) => n.props.style && n.props.style.color === LABEL_TOKEN && n.props.style.background === OPTION_BG_TOKEN),
-  `n=${presetOptions.length}`,
+  "已收起的「最小间隔」不再渲染档位控件（v0.11.0：这个键没有控件，PresetNumber 已删）",
+  !hosts(presetTree).some((n) => n.props && (n.props["data-ocr-preset-select"] || n.props["data-ocr-preset-input"])),
+  JSON.stringify(hosts(presetTree).map((n) => n.props && n.props["data-ocr-preset-select"]).filter(Boolean)),
 );
 setAdvanced(false);
 fakeCtx.themeValue = undefined;
@@ -1203,6 +1191,86 @@ check("onDemand=false 时按钮整块不出现", renderTail([]) === null);
 snapshot = { ...snapshot, value: { ...snapshot.value, onDemand: undefined, enabled: false } };
 check("enabled=false 时按钮整块不出现", renderTail([]) === null);
 snapshot = snapshotKept;
+
+/* v0.11.0：按钮只在「本回合确实动了工作区」时出现。
+   改动记录由插件注册的 conversation 定义发布（只发布数据、不发布视图节点）；事件体只有 {turn}，
+   所以真正的文件清单要按 seq 去宿主那里取 api/changes.summary。宿主没有这一支时退回「总是显示」。 */
+const turnWithChanges = (seq) => ({
+  data: { get: (kind) => (kind === "ocrTurnChanges" ? { turn: 1, changesSeq: seq } : undefined) },
+});
+const fetchSummary = (total) => async () => ({ ok: true, json: async () => ({ total, files: [] }) });
+const renderTailReady = async (rows, extra = {}) => {
+  const props = {
+    changesFeedReady: () => true,
+    turn: turnWithChanges(7),
+    fetchChanges: fetchSummary(2),
+    ...extra,
+  };
+  renderTail(rows, props);
+  await tick();
+  return renderTail(rows, props);
+};
+
+const changedTree = await renderTailReady([]);
+check("宿主给了改动记录、本回合确实改了文件：按钮出现", Boolean(tailButton(changedTree)), textOf(changedTree));
+const cleanTree = await renderTailReady([], { fetchChanges: fetchSummary(0) });
+check("本回合没有改动（total=0）：按钮不出现", tailButton(cleanTree) === undefined, cleanTree === null ? "null" : textOf(cleanTree));
+const noRecordTree = await renderTailReady([], { turn: { data: { get: () => undefined } } });
+check("本回合没有改动记录：按钮不出现", tailButton(noRecordTree) === undefined, noRecordTree === null ? "null" : textOf(noRecordTree));
+const offlineTree = await renderTailReady([], { fetchChanges: async () => { throw new Error("离线"); } });
+check("取不到改动清单时退回「总是显示」（fail-open：别在刚改完代码时把入口藏掉）", Boolean(tailButton(offlineTree)), textOf(offlineTree));
+const noRouteTree = await renderTailReady([], { fetchChanges: async () => ({ ok: false, status: 404, json: async () => ({}) }) });
+check("路由不可用（404）时同样退回「总是显示」", Boolean(tailButton(noRouteTree)), textOf(noRouteTree));
+check("宿主没给改动记录这一支时按钮总是显示（降级路径）", Boolean(tailButton(renderTail([]))), "降级");
+check("默认夹具没有 uiConversation：脏检查未生效（退回总是显示）", tailInjected.changesFeedReady() === false, String(tailInjected.changesFeedReady()));
+
+/* 改动记录的定义本身：形状、「只发布数据」的契约、以及数据没变时的引用稳定（宿主靠它避免白刷）。 */
+let capturedDef = null;
+const defCtx = makeCtx({
+  registrations: [],
+  uiConversation: { events: { register(definition) { capturedDef = definition; return () => {}; } } },
+});
+plugin.apply(defCtx);
+check(
+  "注册了本回合改动记录（走 ctx.effect，随 fiber 撤销）",
+  Boolean(capturedDef) && defCtx.effectCalls.includes("本回合改动记录（启动代码审核按钮的脏检查）"),
+  JSON.stringify(defCtx.effectCalls.slice(-2)),
+);
+check(
+  "定义只认 turn/start 与 workspace/changes（事件体只有 turn，其它一律 null）",
+  capturedDef.kind === "ocrTurnChanges"
+    && JSON.stringify(capturedDef.match({ type: "turn/start", data: { turn: 1 } })) === JSON.stringify({ id: "1", role: "start" })
+    && JSON.stringify(capturedDef.match({ type: "workspace/changes", data: { turn: 3 }, seq: 42 })) === JSON.stringify({ id: "3", role: "update" })
+    && capturedDef.match({ type: "tool/call", data: { turn: 1 } }) === null
+    && capturedDef.match({ type: "workspace/changes", data: {} }) === null
+    && capturedDef.match({ type: "workspace/changes", data: { turn: "3" } }) === null,
+  JSON.stringify([capturedDef.match({ type: "turn/start", data: { turn: 1 } }), capturedDef.match({ type: "workspace/changes", data: { turn: 3 }, seq: 42 })]),
+);
+const defState = capturedDef.start({}, { event: { type: "turn/start", data: { turn: 2 } } });
+let startRejects = false;
+try {
+  capturedDef.start({}, { event: { type: "workspace/changes", data: { turn: 2 } } });
+} catch {
+  startRejects = true;
+}
+check("start 只认 turn/start（其余抛错，宿主会据此拒绝）", defState.turn === 2 && defState.changesSeq === undefined && startRejects, JSON.stringify(defState));
+const defAfterUpdate = capturedDef.update({ state: defState }, { event: { type: "workspace/changes", seq: 42 } });
+check("update 用事件的 seq 当坐标（清单另取）", defAfterUpdate.changesSeq === 42 && defAfterUpdate.turn === 2, JSON.stringify(defAfterUpdate));
+const defFirst = capturedDef.buildLocationData({ state: defAfterUpdate }, "turn", undefined);
+const defSame = capturedDef.buildLocationData({ state: defAfterUpdate }, "turn", defFirst);
+const defChanged = capturedDef.buildLocationData({ state: { ...defAfterUpdate, changesSeq: 43 } }, "turn", defFirst);
+check(
+  "发布的 turn 数据 key=kind、没变时返回同一个对象（引用稳定）",
+  defFirst.kind === "turn"
+    && defFirst.turn === 2
+    && defFirst.key === "ocrTurnChanges"
+    && defFirst.value.changesSeq === 42
+    && defSame === defFirst
+    && defChanged !== defFirst
+    && defChanged.value.changesSeq === 43,
+  JSON.stringify([defFirst, defSame === defFirst, defChanged]),
+);
+check("步级作用域不发布数据（返回 null）", capturedDef.buildLocationData({ state: defAfterUpdate }, "step", undefined) === null, "step");
 
 console.log(failures === 0 ? `\n全部通过（共 ${total} 项）` : `\n${failures} 项失败（共 ${total} 项）`);
 if (failures > 0) process.exitCode = 1;

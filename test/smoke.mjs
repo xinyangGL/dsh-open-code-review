@@ -240,6 +240,9 @@ function makeCtx(overrides = {}) {
     },
   };
   if (overrides.llm) ctx.llm = overrides.llm;
+  /* v0.11.0：路由要读「当前会话正在用的模型」，所以这两级也要能替换（不传就是没有）。 */
+  if (overrides.agents) ctx.agents = overrides.agents;
+  if (overrides.sessions) ctx.sessions = overrides.sessions;
   if (overrides.subagents) ctx.subagents = overrides.subagents;
   if (overrides.jobs) ctx.jobs = overrides.jobs;
   /* 命令注册服务也可以替换：用来模拟「register() 抛错」这种宿主侧失败。 */
@@ -388,7 +391,9 @@ if (HAS_SCHEMA) {
 const schema = HAS_SCHEMA ? mod.Config : null;
 let schemaRefs = null;
 try {
-  schemaRefs = typeof schema === "function" ? schema({ llmModel: "deepseek/deepseek-v4.1-flash", llmApiKeyRef: "SMOKE_OCR_KEY" }) : null;
+  /* llmMode 显式给 endpoint（v0.11.0 起 dsh 模式不再回落静态端点）：这一份是整套 smoke 的环境配置，
+     它考的是 ocr 子进程那条流水线。dsh 路由另有专门用例（桥就绪 / 缺模型名 / 桥不可用即失败）。 */
+  schemaRefs = typeof schema === "function" ? schema({ llmMode: "endpoint", llmModel: "deepseek/deepseek-v4.1-flash", llmApiKeyRef: "SMOKE_OCR_KEY" }) : null;
 } catch (err) {
   log(`schema 解析失败：${err?.message ?? err}`);
 }
@@ -410,11 +415,11 @@ if (HAS_SCHEMA) {
  * 宿主（设置页 / host 持久层）交给 apply() 的那份补丁：有 schema 时是 Config 实例（设置页字段是 volatile
  * 引用），CI 上没有这个包就退化成同形状的普通对象 —— apply 内部走 schemaOverrides()，两者语义一致。
  */
-const settingsPatch = schemaRefs ?? mkConfig({ llmModel: "deepseek/deepseek-v4.1-flash", llmApiKeyRef: "SMOKE_OCR_KEY" });
+const settingsPatch = schemaRefs ?? mkConfig({ llmMode: "endpoint", llmModel: "deepseek/deepseek-v4.1-flash", llmApiKeyRef: "SMOKE_OCR_KEY" });
 
 const ref = (value) => Object.freeze({ get: () => value });
 const overrides = cfgMod.schemaOverrides({
-  engine: ref("ocr"),
+  engine: ref("delegate"),
   autoReview: ref("adaptive"),
   timeoutMinutes: ref(20),
   llmModel: ref("deepseek/deepseek-v4.1-flash"),
@@ -426,7 +431,7 @@ check(
   "schemaOverrides：扁平字段名 → 生效配置路径（llm.* / autoReview→auto / 空串回落）",
   overrides?.llm?.model === "deepseek/deepseek-v4.1-flash" &&
     overrides?.llm?.apiKeyRef === "SMOKE_OCR_KEY" &&
-    overrides?.engine === "ocr" &&
+    overrides?.engine === "delegate" &&
     overrides?.auto === "adaptive" &&
     overrides?.timeoutMinutes === 20 &&
     overrides?.ocrPath === undefined &&
@@ -568,17 +573,19 @@ checkEither(
 const bad = await tools.get("ocr_review").execute({ scope: "commit" }, exec);
 check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.code === "OCR_INVALID_ARGS" && bad.summary.includes("需要 commit"), `${bad.code} | ${bad.summary}`);
 
-/* ---------------- v0.8.0：便宜的那档才是默认 / 成本前置 / 失败给下一步 / 长评审心跳 ---------------- */
+/* -------- v0.8.0：成本前置 / 失败给下一步 / 长评审心跳；v0.10.0：手动默认 ocr、自动评审默认 delegate -------- */
 const reviewerCodeValues = Object.values((await import(new URL("../lib/reviewer.js", import.meta.url))).REVIEWER_CODES);
 
 check(
-  "v0.8.0：默认引擎是 delegate（不调 LLM、几秒出规格），空配置也不再有「默认走 LLM 流水线」",
-  cfgMod.DEFAULTS.engine === "delegate" &&
-    cfgMod.normalizeConfig({}).engine === "delegate" &&
-    review.pickEngine(undefined, {}) === "delegate" &&
-    review.pickEngine("ocr", {}) === "ocr" &&
-    review.pickEngine("bogus", { engine: "也坏" }) === "delegate",
-  `DEFAULTS=${cfgMod.DEFAULTS.engine} normalizeConfig(空)=${cfgMod.normalizeConfig({}).engine} pickEngine(空)=${review.pickEngine(undefined, {})}`,
+  "v0.10.0：默认引擎是 ocr（跑 OCR 流水线、跑前给成本预估），autoEngine 留空 = 跟随 engine（不静默换源）",
+  cfgMod.DEFAULTS.engine === "ocr" &&
+    cfgMod.DEFAULTS.autoEngine === "" &&
+    cfgMod.normalizeConfig({}).engine === "ocr" &&
+    cfgMod.normalizeConfig({}).autoEngine === "" &&
+    review.pickEngine(undefined, {}) === "ocr" &&
+    review.pickEngine("delegate", {}) === "delegate" &&
+    review.pickEngine("bogus", { engine: "也坏" }) === "ocr",
+  `DEFAULTS=${cfgMod.DEFAULTS.engine}/${cfgMod.DEFAULTS.autoEngine} normalizeConfig(空)=${cfgMod.normalizeConfig({}).engine} pickEngine(空)=${review.pickEngine(undefined, {})}`,
 );
 
 const allCodes = [...Object.values(review.CODES), ...reviewerCodeValues];
@@ -938,11 +945,11 @@ check(
 /* ocr_status.bridge 在 schema 里声明的键（且 additionalProperties:false）：多一个键
    宿主会在调用期拒收整个返回值——这一支以前零覆盖。M1（v0.4.0）给 describe() 加了
    retrySkips/retrySkipReason/tokens 三个键（10 → 13），v0.6.1 又把「没转发就被拒」拆出
-   rejected/lastReject（13 → 15）。 */
+   rejected/lastReject（13 → 15），v0.11.0 加 requestedPort/portShifted（15 → 17）。 */
 const bridgeKeys = Object.keys(bridgeStatus.bridge ?? {}).sort().join(",");
 check(
-  "ocr_status：bridge 对象恰好是 schema 声明的 15 个键（否则宿主调用期拒收）",
-  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,lastReject,rejected,requests,retries,retrySkipReason,retrySkips,tokenMasked,tokens,uptimeMs,url",
+  "ocr_status：bridge 对象恰好是 schema 声明的 17 个键（否则宿主调用期拒收）",
+  bridgeKeys === "failed,inflight,lastError,lastModel,lastProvider,lastReject,portShifted,rejected,requestedPort,requests,retries,retrySkipReason,retrySkips,tokenMasked,tokens,uptimeMs,url",
   bridgeKeys,
 );
 check(
@@ -1105,6 +1112,199 @@ check(
   bareStatus.llmRoute,
 );
 
+/* --------------- v0.11.0：跟随当前会话 / dsh 不再回落静态端点 / 桥端口 --------------- */
+
+/** v0.11.0：llm.bridgePort 只从 config.json 读（设置页故意不暴露），所以测试要临时换配置文件。 */
+async function withTempConfigFile(patch, fn) {
+  const dir = mkdtempSync(join(tmpdir(), "ocr-bridge-port-"));
+  const file = join(dir, "config.json");
+  writeFileSync(file, JSON.stringify(patch), "utf8");
+  const before = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+  process.env.DSH_OPEN_CODE_REVIEW_CONFIG = file;
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+    else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = before;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const netMod = await import("node:net");
+/** 占住一个 TCP 端口；拿不到（EADDRINUSE）说明本来就被别人占着，同样算「被占用」。 */
+const occupyPort = async (port) => {
+  const srv = netMod.createServer();
+  try {
+    await new Promise((resolve, reject) => {
+      srv.once("error", reject);
+      srv.listen(port, "127.0.0.1", resolve);
+    });
+    return srv;
+  } catch {
+    try {
+      srv.close();
+    } catch {
+      /* 没起来就不用关 */
+    }
+    return null;
+  }
+};
+
+/* (1) 跟随「当前会话」：设置页留空时，会话正在用的 provider/model 优先于 DSH 默认模型。 */
+const sessionCtx = makeCtx({
+  llm: fakeLlmService(() => []),
+  agents: { currentInitiator: () => ({ id: "sess-1" }) },
+  sessions: {
+    get: (id) => (id === "sess-1" ? { requestContext: () => ({ provider: "session-prov", model: "session-model" }) } : undefined),
+  },
+});
+mod.apply(sessionCtx, mkConfig({ llmMode: "dsh", llmProvider: "", llmModel: "" }));
+const sessStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "v0.11.0：设置页留空时跟随「当前会话」正在用的模型（优先于 DSH 默认模型）",
+  String(sessStatus.llmRoute).includes("来自当前会话") &&
+    String(sessStatus.llmEndpoint).includes("session-prov/session-model") &&
+    !String(sessStatus.llmRoute).includes("DSH 默认模型"),
+  `${sessStatus.llmRoute} | ${sessStatus.llmEndpoint}`,
+);
+check(
+  "v0.11.0：跟随当前会话时，子进程拿到的 OCR_LLM_MODEL 就是会话模型",
+  sessStatus.llmEnv.includes("OCR_LLM_MODEL=session-model"),
+  JSON.stringify(sessStatus.llmEnv),
+);
+/* (2) 设置页填了就以设置为准（当前会话只补缺）。 */
+mod.apply(sessionCtx, mkConfig({ llmMode: "dsh", llmProvider: "settings-prov", llmModel: "settings-model" }));
+const settingsWin = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "v0.11.0：设置页填了 provider/model 就以设置为准（当前会话不再参与）",
+  String(settingsWin.llmRoute).includes("来自插件设置") && String(settingsWin.llmEndpoint).includes("settings-prov/settings-model"),
+  `${settingsWin.llmRoute} | ${settingsWin.llmEndpoint}`,
+);
+for (const entry of sessionCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
+
+/* (3) dsh 桥不可用：明确失败，不回落静态端点、不起子进程。 */
+const noBridgeCanned = cannedSubprocess([
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 1, deletions: 0 }], excluded: [] }) },
+  { exitCode: 0, stdout: JSON.stringify({ groups: [{ group_id: "g1", pattern: "**/*.js", rule: "不要把 undefined 当空值" }] }) },
+  { exitCode: 0, stdout: "diff --git a/lib/a.js b/lib/a.js\n" },
+]);
+const noBridgeCtx = makeCtx({ subprocess: noBridgeCanned, llm: undefined, agentDefaultModel: null });
+mod.apply(noBridgeCtx, mkConfig({ engine: "ocr", llmMode: "dsh", llmProvider: "", llmModel: "" }));
+const bridgeExec = { name: "ocr_review", callId: "no-bridge", arguments: {}, agent: makeAgent(), signal: undefined };
+const noBridgeRun = await tools.get("ocr_review").execute({ engine: "ocr" }, bridgeExec);
+check(
+  "v0.11.0：dsh 桥不可用时明确失败（OCR_LLM_MISSING），不再悄悄回落静态端点",
+  noBridgeRun.ok === false &&
+    noBridgeRun.code === "OCR_LLM_MISSING" &&
+    noBridgeRun.engine === "ocr" &&
+    String(noBridgeRun.summary).includes("未执行评审") &&
+    !String(noBridgeRun.notes.join(" ")).includes("回落"),
+  `${noBridgeRun.code} | ${noBridgeRun.summary} | notes=${noBridgeRun.notes.join(" / ")}`,
+);
+check(
+  "v0.11.0：明确失败时一个子进程都没起（不花时间也不花钱）",
+  noBridgeCanned.calls.length === 0,
+  `calls=${noBridgeCanned.calls.length}`,
+);
+check(
+  "v0.11.0：失败里给出一条能立刻做的事（含改 llm.mode=endpoint 的逃生门）",
+  String(noBridgeRun.nextStep).includes("llm.mode") && String(noBridgeRun.nextStep).includes("endpoint"),
+  noBridgeRun.nextStep,
+);
+const autoNoBridge = await tools.get("ocr_review").execute({ engine: "auto" }, bridgeExec);
+check(
+  "v0.11.0：engine=auto 仍按出厂契约降级 delegate（只是不再换 LLM 路径）",
+  autoNoBridge.ok === true && autoNoBridge.engine === "delegate" && String(autoNoBridge.notes.join(" ")).includes("不再回落静态端点"),
+  `${autoNoBridge.engine} | ${autoNoBridge.summary} | notes=${autoNoBridge.notes.join(" / ")}`,
+);
+for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
+
+/* (4) llm.bridgePort：被占用时顺延，并如实报出实际监听地址。 */
+{
+  let base = 0;
+  let held = null;
+  for (let cand = 20800; cand < 20900 && !base; cand += 2) {
+    const a = await occupyPort(cand);
+    if (!a) continue;
+    const b = await occupyPort(cand + 1);
+    if (b) {
+      b.close();
+      base = cand;
+      held = a;
+    } else {
+      a.close();
+    }
+  }
+  if (base) {
+    const shiftCtx = makeCtx({ llm: fakeLlmService(() => []), agentDefaultModel: null });
+    await withTempConfigFile({ llm: { bridgePort: base } }, async () => {
+      mod.apply(shiftCtx, mkConfig({ llmMode: "dsh", llmProvider: "p", llmModel: "m" }));
+      const st = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+      check(
+        "v0.11.0：llm.bridgePort 被读到；首选端口被占则顺延，并标记 requestedPort/portShifted",
+        st.bridge?.requestedPort === base && st.bridge?.portShifted === true && String(st.bridge?.url).endsWith(`:${base + 1}/v1`),
+        `requestedPort=${st.bridge?.requestedPort} portShifted=${st.bridge?.portShifted} url=${st.bridge?.url}`,
+      );
+      check(
+        "v0.11.0：顺延后 ocr_status 报的是实际监听的地址（地址可核对）",
+        String(st.llmEndpoint).includes(`127.0.0.1:${base + 1}`),
+        st.llmEndpoint,
+      );
+      for (const entry of shiftCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
+    });
+  }
+  if (held) held.close();
+}
+
+/* (5) 首选端口与其后 9 个都被占用：桥起不来 → 如实报，不假装就绪。 */
+{
+  const base2 = 21000;
+  const holders = [];
+  for (let port = base2; port < base2 + 10; port += 1) {
+    const srv = await occupyPort(port);
+    if (srv) holders.push(srv);
+  }
+  const deadCtx = makeCtx({ llm: fakeLlmService(() => []), agentDefaultModel: null });
+  await withTempConfigFile({ llm: { bridgePort: base2 } }, async () => {
+    mod.apply(deadCtx, mkConfig({ llmMode: "dsh", llmProvider: "p", llmModel: "m" }));
+    const st = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+    check(
+      "v0.11.0：首选端口与其后 9 个都被占用 → 如实报「都被占用」，不假装桥就绪",
+      !st.bridge && String(st.llmRoute).includes("都被占用"),
+      `bridge=${JSON.stringify(st.bridge)} route=${st.llmRoute}`,
+    );
+    const deadRun = await tools
+      .get("ocr_review")
+      .execute({ engine: "ocr" }, { name: "ocr_review", callId: "dead-port", arguments: {}, agent: makeAgent(), signal: undefined });
+    check(
+      "v0.11.0：端口全被占 → OCR_LLM_MISSING，原因指名端口、下一步给出 llm.bridgePort",
+      deadRun.ok === false &&
+        deadRun.code === "OCR_LLM_MISSING" &&
+        String(deadRun.summary).includes("都被占用") &&
+        String(deadRun.nextStep).includes("bridgePort"),
+      `${deadRun.code} | ${deadRun.summary} | next=${deadRun.nextStep}`,
+    );
+    for (const entry of deadCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
+  });
+  for (const srv of holders) srv.close();
+}
+
+/* (6) 两条源码级守卫：老文案确实删了；bridgePort 确实没进设置页。 */
+{
+  const routeIndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+  check(
+    "v0.11.0：dsh 落回静态端点那条老文案已从源码删掉（不再有静默换 LLM 路径的路径）",
+    !routeIndexSource.includes("这次回落成静态端点"),
+    "源码里仍能找到「这次回落成静态端点」",
+  );
+  const routeClientSource = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  check(
+    "v0.11.0：llm.bridgePort 不作为设置页配置项放出来（默认不用改的东西不给用户看）",
+    !routeClientSource.includes("bridgePort"),
+    `client.js 里出现 bridgePort ${(routeClientSource.match(/bridgePort/g) ?? []).length} 次`,
+  );
+}
+
 /* --------------------------- 结果码与 fail-closed（罐头子进程，不依赖真 ocr） --------- */
 
 const codeKeys = Object.keys(review.CODES ?? {});
@@ -1200,7 +1400,10 @@ function cannedSubprocess(runs) {
 function cannedHarness(runs, config = {}, overrides = {}) {
   const canned = cannedSubprocess(runs);
   const ctx2 = makeCtx({ subprocess: canned, ...overrides });
-  mod.apply(ctx2, mkConfig({ engine: "ocr", llmMode: "dsh", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash", ...config }));
+  /* llmMode 用 endpoint（v0.11.0 起 dsh 模式不再回落静态端点）：这批用例考的是 ocr 子进程那条流水线
+     —— 罐头子进程根本不看 env，起真桥只会让每个用例都绑一个端口。dsh 路由本身在下面
+     「本机 LLM 桥」那几条 + bridge-smoke 里单独覆盖，「桥不可用就明确失败」也有专门用例。 */
+  mod.apply(ctx2, mkConfig({ engine: "ocr", llmMode: "endpoint", llmProvider: "commandcode", llmModel: "deepseek/deepseek-v4.1-flash", ...config }));
   const exec2 = { name: "ocr_review", callId: "canned", arguments: {}, agent: makeAgent(), signal: undefined };
   return { canned, ctx: ctx2, exec: exec2, call: (args) => tools.get("ocr_review").execute(args, exec2) };
 }
@@ -1328,6 +1531,372 @@ check(
   JSON.stringify(detailed),
 );
 
+/* 跑前成本预估（v0.10.0）：engine=ocr 先跑一次 `ocr delegate preview` 拿本次可审文件数，再跑真正的评审。 */
+const estimateCase = cannedHarness([
+  {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      files: [
+        { path: "lib/a.js", insertions: 3, deletions: 1 },
+        { path: "lib/b.js", insertions: 1, deletions: 0 },
+        { path: "lib/c.js", insertions: 2, deletions: 2 },
+      ],
+      excluded: ["x.md", "y.md"],
+    }),
+  },
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], issues: [] }) },
+]);
+const estimateRun = await estimateCase.call({ engine: "ocr" });
+const estimateNotes = (estimateRun.notes ?? []).join("\n");
+check(
+  "v0.10.0：engine=ocr 跑前先拿一次 delegate preview 做规模预估（评审本身照旧一次 review）",
+  estimateCase.canned.calls.length === 2 &&
+    estimateCase.canned.calls[0]?.spec.argv.includes("delegate") &&
+    estimateCase.canned.calls[1]?.spec.argv.includes("review") &&
+    estimateRun.ok === true &&
+    /实测可审 3 个文件/.test(estimateNotes) &&
+    /约 9~30 分钟/.test(estimateNotes),
+  `${estimateCase.canned.calls.map((call) => call.spec.argv[1] ?? "").join(",")} | ${estimateNotes.replace(/\n/g, " ").slice(0, 140)}`,
+);
+const estimateFailCase = cannedHarness([
+  { exitCode: 1, stdout: "", stderr: "ocr delegate preview 失败" },
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 1, deletions: 0 }], issues: [] }) },
+]);
+const estimateFailRun = await estimateFailCase.call({ engine: "ocr" });
+const estimateFailNotes = (estimateFailRun.notes ?? []).join("\n");
+check(
+  "v0.10.0：预估拿不到时只是少那半句，评审照跑（不因预估失败而失败、也不编数字）",
+  estimateFailRun.ok === true && !/实测可审/.test(estimateFailNotes) && /成本提示：engine=ocr/.test(estimateFailNotes),
+  `${estimateFailRun.code} ok=${estimateFailRun.ok} | ${estimateFailNotes.replace(/\n/g, " ").slice(0, 140)}`,
+);
+const estimatePathCase = cannedHarness([
+  {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      files: [
+        { path: "lib/a.js", insertions: 3, deletions: 1 },
+        { path: "lib/b.js", insertions: 1, deletions: 0 },
+      ],
+    }),
+  },
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], issues: [] }) },
+]);
+const estimatePathRun = await estimatePathCase.call({ engine: "ocr", paths: ["lib/a.js"] });
+const estimatePathNotes = (estimatePathRun.notes ?? []).join("\n");
+check(
+  "v0.10.0：给了 paths 时预估按 paths 过滤后报数（不拿整个工作区的清单冒充本次规模）",
+  /实测可审 1 个文件/.test(estimatePathNotes),
+  estimatePathNotes.replace(/\n/g, " ").slice(0, 140),
+);
+
+/* ocr 档体验（v0.11.0 · W4）：预估前置、预计剩余、超时下限告警、partial 置顶、会话 id、停止/超时说明「保住了什么」。 */
+{
+  const m = review.estimateMinutes({ reviewable: 4 });
+  check(
+    "v0.11.0：estimateMinutes 与 estimateText 同口径（3~10 分钟/文件），拿不到文件数就 null",
+    m?.files === 4 && m?.lo === 12 && m?.hi === 40 && review.estimateMinutes({}) === null && review.estimateMinutes({ reviewable: 0 }) === null,
+    JSON.stringify(m),
+  );
+  check(
+    "v0.11.0：spendNotice 给开跑那一行（无预估 / preview 时为空串）",
+    review.spendNotice({}, { reviewable: 2 }) === "本次约 2 个文件 → 按真机历史约 6~20 分钟" &&
+      review.spendNotice({}, null) === "" &&
+      review.spendNotice({ preview: true }, { reviewable: 2 }) === "",
+    review.spendNotice({}, { reviewable: 2 }),
+  );
+  check(
+    "v0.11.0：remainingText 三段话术（未到下限 / 过下限 / 过上限），无预估时闭嘴",
+    /预计还需 6 分钟起/.test(review.remainingText(0, { reviewable: 2 })) &&
+      /已过预估下限 6 分钟/.test(review.remainingText(10 * 60000, { reviewable: 2 })) &&
+      /已过预估上限 20 分钟/.test(review.remainingText(25 * 60000, { reviewable: 2 })) &&
+      review.remainingText(60000, null) === "",
+    review.remainingText(10 * 60000, { reviewable: 2 }),
+  );
+  check(
+    "v0.11.0：timeoutWarning 只在下限越界时给（上限越界不拦人）",
+    /小于预估下限 6 分钟/.test(review.timeoutWarning({}, { reviewable: 2 }, 3)) &&
+      review.timeoutWarning({}, { reviewable: 2 }, 6) === "" &&
+      review.timeoutWarning({}, { reviewable: 2 }, 30) === "" &&
+      review.timeoutWarning({ preview: true }, { reviewable: 2 }, 3) === "",
+    review.timeoutWarning({}, { reviewable: 2 }, 3).slice(0, 60),
+  );
+  check(
+    "v0.11.0：心跳带预估时多一句「还要等多久」（老签名不动）",
+    review.heartbeatLine(60000, null, 15, { reviewable: 2 }).includes("预计还需 5 分钟起") &&
+      !review.heartbeatLine(60000, null, 15).includes("预计还需") &&
+      review.heartbeatLine(95000).includes("还没有任何输出"),
+    review.heartbeatLine(60000, null, 15, { reviewable: 2 }),
+  );
+  check(
+    "v0.11.0：extractSessionId 只认 ocr 的字段名，拿不到就空串（不猜）",
+    review.extractSessionId({ session_id: "abc" }) === "abc" &&
+      review.extractSessionId({ sessionId: "def" }) === "def" &&
+      review.extractSessionId({ nope: "x" }) === "" &&
+      review.extractSessionId(null) === "",
+    review.extractSessionId({ session_id: "abc" }),
+  );
+
+  /* 开跑那一行：预估前置（第一次 delegate preview 拿规模，第二次才是 review），且 note 里带会话 id。 */
+  const phaseJobs = makeJobsRegistry();
+  const phaseCase = cannedHarness(
+    [
+      { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({ session_id: "s-123", files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], issues: [] }),
+      },
+    ],
+    { timeoutMinutes: 1 },
+    { jobs: phaseJobs },
+  );
+  const phaseRun = await phaseCase.call({ engine: "ocr" });
+  const phaseNotes = (phaseRun.notes ?? []).join("\n");
+  const phases = (phaseJobs.starts[0]?.progressLines ?? []).concat((phaseJobs.starts[0]?.output ?? []).map((row) => row.text)).join("\n");
+  check(
+    "v0.11.0：开跑那一行先给规模（预估下限 3 分钟 > 超时 1 分钟 → 开跑前告警 + 结果里也留一条）",
+    phaseRun.ok === true &&
+      /本次约 1 个文件 → 按真机历史约 3~10 分钟/.test(phases) &&
+      /超时 1 分钟小于预估下限 3 分钟/.test(phaseNotes) &&
+      /缩小范围/.test(phaseNotes),
+    `phases=${phases.replace(/\n/g, " | ").slice(0, 120)} notes=${phaseNotes.replace(/\n/g, " ").slice(0, 100)}`,
+  );
+  check(
+    "v0.11.0：结果带 ocr 会话 id —— 摘要在前，note 给出 session show/export/viewer 三步",
+    phaseRun.reviewSessionId === "s-123" &&
+      /ocr 会话：s-123/.test(phaseRun.summary) &&
+      /ocr session show s-123/.test(phaseNotes) &&
+      /ocr session export s-123/.test(phaseNotes) &&
+      /ocr viewer/.test(phaseNotes),
+    `${phaseRun.reviewSessionId} | ${String(phaseRun.summary).slice(0, 90)}`,
+  );
+  check(
+    "v0.11.0：拿不到 session_id 时不编（summary 不提会话，note 也不出现 session show）",
+    !/ocr 会话/.test(estimateRun.summary ?? "") && !/ocr session show/.test(estimateNotes),
+    String(estimateRun.summary ?? "").slice(0, 80),
+  );
+
+  /* partial 置顶：ocr 侧摘要第一句就是「部分结果」，而不是先说「审查了 N 个文件」。 */
+  const partialCase = cannedHarness([
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 1, deletions: 0 }], excluded: [] }) },
+    {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        partial: true,
+        files: [{ path: "lib/a.js", insertions: 1, deletions: 0 }],
+        issues: [],
+      }),
+    },
+  ]);
+  const partialRun = await partialCase.call({ engine: "ocr" });
+  check(
+    "v0.11.0：ocr 报部分结果时「⚠️ 部分结果」是摘要第一个词（不许先说审了几个文件）",
+    partialRun.partial === true && /^⚠️ 部分结果/.test(String(partialRun.summary ?? "")) && /不能当作/.test(String(partialRun.summary ?? "")),
+    String(partialRun.summary ?? "").slice(0, 110),
+  );
+
+  /* 停止 / 超时：说清「保住了什么」（= 没有结论，只有已发生的用量）。
+     超时那条在罐头子进程里没法真触发（timeoutMs = timeoutMinutes*60000 + 60000，最短也要分钟级），
+     所以用「跑到一半取消」走 ABORTED 真路径 + 一条源码级守卫盯 TIMEOUT 的文案。 */
+  const w4AbortCase = cannedHarness([
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 0 }] }) },
+    { exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true },
+  ]);
+  const w4Ctl = new AbortController();
+  const w4AbortRun = tools
+    .get("ocr_review")
+    .execute({ engine: "ocr" }, { ...w4AbortCase.exec, signal: w4Ctl.signal });
+  const w4Review = () => w4AbortCase.canned.calls.find((call) => call.spec.argv.includes("review"));
+  for (let i = 0; i < 200 && !w4Review(); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  w4Ctl.abort();
+  const w4AbortValue = await w4AbortRun;
+  const w4AbortNotes = (w4AbortValue.notes ?? []).join("\n");
+  check(
+    "v0.11.0：取消的说明里写清「已跑过的不留结论」与「缩小范围/换 delegate 更快」",
+    w4AbortValue.code === "OCR_ABORTED" &&
+      /被切断/.test(w4AbortNotes) &&
+      /不留下结论/.test(w4AbortNotes) &&
+      /缩小范围/.test(w4AbortNotes),
+    `${w4AbortValue.code} | ${w4AbortNotes.replace(/\n/g, " ").slice(0, 140)}`,
+  );
+  const w4IndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+  check(
+    "v0.11.0：超时文案说清「没有结论」与「已发生的用量不退还」（源码级守卫，罐头里跑不到真超时）",
+    /被终止，没有结论/.test(w4IndexSource) && /这部分不因终止而退还/.test(w4IndexSource) && /一次性 JSON/.test(w4IndexSource),
+    "lib/index.js 里找不到超时/取消的「保住了什么」文案",
+  );
+}
+
+/* 覆盖回执与部分结果（v0.10.0 · W3）：规格按片交付，预算不够就整片丢弃并报数；部分结果不许当「未发现问题」。 */
+{
+  const threeHunks = [
+    "diff --git a/lib/a.js b/lib/a.js",
+    "index 111..222 100644",
+    "--- a/lib/a.js",
+    "+++ b/lib/a.js",
+    "@@ -1,2 +1,2 @@",
+    "-old1",
+    "+new1",
+    "@@ -10,2 +10,2 @@",
+    "-old2",
+    "+new2",
+    "@@ -20,2 +20,2 @@",
+    "-old3",
+    "+new3",
+    "",
+  ].join("\n");
+  const blocks = review.splitDiffSlices(threeHunks);
+  check(
+    "v0.10.0 W3：diff 能按「文件块 → hunk」切开（按片交付的片头靠它）",
+    blocks.length === 1 && blocks[0].path === "lib/a.js" && blocks[0].hunks.length === 3,
+    `blocks=${blocks.length} path=${blocks[0]?.path} hunks=${blocks[0]?.hunks.length}`,
+  );
+  const headBytes = Buffer.byteLength(blocks[0].head, "utf8");
+  const hunk0Bytes = Buffer.byteLength(blocks[0].hunks[0], "utf8");
+  const oneHunk = review.planDiffSlices(threeHunks, headBytes + hunk0Bytes + 5, 0);
+  check(
+    "v0.10.0 W3：预算只够 1 个 hunk 时整片丢弃其余（绝不切在 hunk 中间）",
+    oneHunk.truncated === true &&
+      oneHunk.keptHunks === 1 &&
+      oneHunk.droppedHunks === 2 &&
+      oneHunk.slices.length === 1 &&
+      oneHunk.slices[0].hunkFrom === 1 &&
+      oneHunk.slices[0].hunkTo === 1 &&
+      oneHunk.slices[0].hunkTotal === 3,
+    `kept=${oneHunk.keptHunks}/${oneHunk.totalHunks} dropped=${oneHunk.droppedHunks} ${oneHunk.slices[0]?.hunkFrom}-${oneHunk.slices[0]?.hunkTo}/${oneHunk.slices[0]?.hunkTotal}`,
+  );
+  const cut = review.truncateDiffByHunk(threeHunks, 400 + oneHunk.usedBytes + 5);
+  check(
+    "v0.10.0 W3：gitDiff 的截断也是 hunk 级 —— 只留整片、报出收录/丢弃数、不出现半截 hunk",
+    cut.truncated === true &&
+      cut.keptHunks === 1 &&
+      cut.droppedHunks === 2 &&
+      cut.text.includes("+new1") &&
+      !cut.text.includes("-old2") &&
+      !cut.text.includes("+new3") &&
+      /收录 1\/3 个 hunk/.test(cut.text) &&
+      cut.text.includes("只整片丢弃"),
+    `kept=${cut.keptHunks}/${cut.totalHunks} dropped=${cut.droppedHunks} bytes=${Buffer.byteLength(cut.text, "utf8")}`,
+  );
+  const specOptions = {
+    plan: { cwd: "/repo", scope: "workspace" },
+    preview: { repository: "/repo", mode: "workspace", reviewable_count: 1 },
+    rules: { groups: [{ group_id: "g1", pattern: "**/*.js", rule: "不要把 undefined 当空值" }] },
+    diff: threeHunks,
+    files: [{ path: "lib/a.js", status: "modified", insertions: 3, deletions: 3 }],
+  };
+  const fullSpec = review.buildDelegateSpecDetailed({ ...specOptions, maxBytes: 100000 });
+  check(
+    "v0.10.0 W3：规格按片交付 —— 片头写明文件/本文件 hunk 区间/字节数，且要求逐片回执",
+    /\[片 1\/1 · lib\/a\.js · 本文件 hunk 1-3\/3 · \d+B\]/.test(fullSpec.text) &&
+      fullSpec.text.includes("## 覆盖回执（硬规则，必须逐片回填）") &&
+      fullSpec.text.includes("片 i/n → 未读到") &&
+      fullSpec.text.includes("不得输出「未发现问题」") &&
+      fullSpec.coverage?.totalHunks === 3 &&
+      fullSpec.coverage?.keptHunks === 3 &&
+      fullSpec.coverage?.truncated === false,
+    `coverage=${JSON.stringify(fullSpec.coverage)}`,
+  );
+  const fortyHunks = Array.from({ length: 40 }, (_, i) => `@@ -${i * 5},1 +${i * 5},1 @@\n-old${i}\n+new${i}`).join("\n");
+  const skeletonBytes = Buffer.byteLength(review.buildDelegateSpecDetailed({ ...specOptions, diff: "", maxBytes: 100000 }).text, "utf8");
+  const tightSpec = review.buildDelegateSpecDetailed({
+    ...specOptions,
+    diff: `diff --git a/lib/a.js b/lib/a.js\n${fortyHunks}\n`,
+    maxBytes: skeletonBytes + 200,
+  });
+  check(
+    "v0.10.0 W3：预算装不下时整片丢弃、coverage 记数，任务段与回执段必须活着（截断不许吃掉骨架）",
+    tightSpec.coverage?.truncated === true &&
+      tightSpec.coverage?.partial === true &&
+      tightSpec.coverage?.droppedFiles === 1 &&
+      /收录 \d+\/40 个 hunk/.test(tightSpec.text) &&
+      tightSpec.text.includes("## 你的任务") &&
+      tightSpec.text.includes("## 覆盖回执"),
+    `coverage=${JSON.stringify(tightSpec.coverage)}`,
+  );
+  const partialSeen = review.detectPartial({ files: [{ path: "a.js", status: "failed", error: "budget" }] });
+  check(
+    "v0.10.0 W3：只有 ocr 明说「部分失败」时才标 partial（纯函数，不猜）",
+    review.detectPartial({ files: [], issues: [] }).partial === false &&
+      review.detectPartial({ partial: true }).partial === true &&
+      partialSeen.partial === true &&
+      /报告失败/.test(partialSeen.reasons.join("；")),
+    JSON.stringify(partialSeen),
+  );
+  /* 真机字段（2026-10-12 验收实收）：status / manifest.terminal_state / manifest.coverage。
+     验收发现：只认顶层 partial/budget_exceeded 那几个键的话，真机跑出「选中 8 项、只完成 5 项」时
+     一个信号都命不中 → 会照样输出「未发现问题」，正好踩中我们自己立的规矩。 */
+  const realClean = {
+    status: "complete",
+    summary: { files_reviewed: 1, comments: 0 },
+    manifest: {
+      terminal_state: "complete",
+      coverage: { selected: [{ path: "a.js" }], completed: [{ path: "a.js" }], reused: [], failed: [], waived: [] },
+    },
+  };
+  const realGap = {
+    status: "complete",
+    manifest: { terminal_state: "complete", coverage: { selected: [{}, {}], completed: [{}], reused: [], failed: [], waived: [] } },
+  };
+  const realFailed = {
+    status: "complete",
+    manifest: { terminal_state: "complete", coverage: { selected: [{}, {}], completed: [{}], reused: [], failed: [{}], waived: [] } },
+  };
+  const realTerminal = { status: "complete", manifest: { terminal_state: "interrupted", coverage: { selected: [], completed: [], reused: [], failed: [], waived: [] } } };
+  const gapSeen = review.detectPartial(realGap);
+  check(
+    "v0.10.0 W3：认 ocr 真机的 manifest.coverage 与 terminal_state（选中 > 完成+复用 就标 partial）",
+    review.detectPartial(realClean).partial === false &&
+      gapSeen.partial === true &&
+      /覆盖不足：选中 2 项、完成 1 项/.test(gapSeen.reasons.join("；")) &&
+      review.detectPartial(realFailed).partial === true &&
+      /coverage\.failed 1 项/.test(review.detectPartial(realFailed).reasons.join("；")) &&
+      review.detectPartial(realTerminal).partial === true &&
+      /terminal_state=interrupted/.test(review.detectPartial(realTerminal).reasons.join("；")) &&
+      review.detectPartial({ status: "interrupted" }).partial === true,
+    JSON.stringify({ clean: review.detectPartial(realClean), gap: gapSeen.reasons }),
+  );
+}
+{
+  /* 让 diff 远超 includeDiffMaxBytes（默认 120000）：gitDiff 先按 hunk 截断、规格预算再丢尾部若干片。
+     这样不依赖「把配置注入进去」也能确定性地走到 partial。 */
+  const hugeHunks = Array.from({ length: 6000 }, (_, i) => `@@ -${i * 5},1 +${i * 5},1 @@\n-old${i}\n+new${i}`).join("\n");
+  const delegateRuns = (diffText) => [
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 40, deletions: 40 }], excluded: [] }) },
+    { exitCode: 0, stdout: JSON.stringify({ groups: [{ group_id: "g1", pattern: "**/*.js", rule: "不要把 undefined 当空值" }] }) },
+    { exitCode: 0, stdout: diffText },
+  ];
+  const delegatePartialCase = cannedHarness(delegateRuns(`diff --git a/lib/a.js b/lib/a.js\n${hugeHunks}\n`));
+  const delegatePartialRun = await delegatePartialCase.call({ engine: "delegate" });
+  check(
+    "v0.10.0 W3：delegate 的 diff 被截断时结果标 partial，摘要与 notes 都点名「未覆盖的片不得当 clean」",
+    delegatePartialRun.ok === true &&
+      delegatePartialRun.partial === true &&
+      delegatePartialRun.coverage?.truncated === true &&
+      delegatePartialRun.coverage?.droppedHunks > 0 &&
+      /部分结果/.test(String(delegatePartialRun.summary)) &&
+      (delegatePartialRun.notes ?? []).some((n) => /未回填的片按未覆盖处理/.test(n)),
+    `partial=${delegatePartialRun.partial} coverage=${JSON.stringify(delegatePartialRun.coverage)} | ${String(delegatePartialRun.summary).slice(0, 160)}`,
+  );
+}
+const partialOcrCase = cannedHarness([
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 1, deletions: 0 }], issues: [], partial: true }) },
+]);
+const partialOcrRun = await partialOcrCase.call({ engine: "ocr" });
+check(
+  "v0.10.0 W3：ocr 报部分结果时摘要不许写「未发现问题」（部分结果 ≠ 干净）",
+  partialOcrRun.ok === true &&
+    partialOcrRun.partial === true &&
+    /部分结果/.test(String(partialOcrRun.summary)) &&
+    /不能当作/.test(String(partialOcrRun.summary)) &&
+    !/未发现问题（返回的 JSON 带问题清单字段且为空）/.test(String(partialOcrRun.summary)),
+  `${partialOcrRun.code} partial=${partialOcrRun.partial} | ${String(partialOcrRun.summary).slice(0, 140)}`,
+);
+check(
+  "v0.10.0 W3：插件绝不传 --max-tokens-budget（预算不足必须显式暴露，不靠 ocr 静默截半）",
+  !/--max-tokens-budget/.test(readFileSync(new URL("../lib/review.js", import.meta.url), "utf8")),
+  "review.js 里没有 --max-tokens-budget",
+);
+
 /* 取消（工具调用被中断 / 插件卸载）：signal 一 abort，子进程立刻被终结。 */
 const abortCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true }]);
 const abortController = new AbortController();
@@ -1343,24 +1912,33 @@ check(
 );
 
 /* 跑到一半才取消：子进程必须被 terminate（不是只在开跑前挡一下）。 */
-const midCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true }]);
+const midCase = cannedHarness([
+  /* 第一次 spawn 是跑前规模预估（秒级、立刻结束），第二次才是真正的评审。 */
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 0 }] }) },
+  { exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true },
+]);
 const midCtl = new AbortController();
 const midRun = midCase.call
   ? tools.get("ocr_review").execute({ engine: "ocr" }, { ...midCase.exec, signal: midCtl.signal })
   : null;
-for (let i = 0; i < 200 && midCase.canned.calls.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+const midReview = () => midCase.canned.calls.find((call) => call.spec.argv.includes("review"));
+for (let i = 0; i < 200 && !midReview(); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
 midCtl.abort();
 const midValue = await midRun;
 check(
   "取消：跑到一半被中断 → 子进程被 terminate，结果报 OCR_ABORTED",
-  midValue.ok === false && midValue.code === "OCR_ABORTED" && midCase.canned.calls[0]?.terminated === true,
-  `${midValue.code} terminated=${midCase.canned.calls[0]?.terminated} | ${midValue.summary}`,
+  midValue.ok === false && midValue.code === "OCR_ABORTED" && midReview()?.terminated === true,
+  `${midValue.code} terminated=${midReview()?.terminated} spawn=${midCase.canned.calls.map((call) => call.spec.argv[1] ?? "").join(",")} | ${midValue.summary}`,
 );
 
 /* dispose：abort 在飞评审 + 等它收尾（不留孤儿进程，也不丢半截结果）。 */
-const disposeCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), delayMs: 300 }]);
+const disposeCase = cannedHarness([
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 0 }] }) },
+  { exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), delayMs: 300 },
+]);
 const inflight = disposeCase.call({ engine: "ocr" });
-await new Promise((resolve) => setTimeout(resolve, 40)); // 等 spawn 真的发生
+/* 等真正的评审 spawn（第一次 spawn 是跑前预估）。 */
+await until(() => disposeCase.canned.calls.some((call) => call.spec.argv.includes("review")));
 const lifecycleEntry = disposeCase.ctx.effects.find((entry) => String(entry.label).includes("在飞"));
 check(
   "生命周期：apply 注册了「在飞 ocr 评审的收尾」effect",
@@ -1380,10 +1958,11 @@ check(
   `inflightSettled=${inflightSettled}`,
 );
 const disposeValue = await inflight;
+const disposeReview = disposeCase.canned.calls.find((call) => call.spec.argv.includes("review"));
 check(
   "生命周期：dispose 会 abort 在飞的子进程（terminate 被调用）",
-  disposeCase.canned.calls[0]?.terminated === true,
-  `terminated=${disposeCase.canned.calls[0]?.terminated}`,
+  disposeReview?.terminated === true,
+  `terminated=${disposeReview?.terminated} spawn=${disposeCase.canned.calls.map((call) => call.spec.argv[1] ?? "").join(",")}`,
 );
 check(
   "生命周期：被 dispose 掐掉的评审标记为 OCR_ABORTED（不会当成功结果投递）",
@@ -1587,10 +2166,17 @@ checkEither(
 
 /* 停止链路：面板「停止」→ job cancel → 评审自己的 AbortController → 终结子进程 → 结算成 killed。 */
 const killRegistry = makeJobsRegistry();
-const killCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true }], {}, { jobs: killRegistry });
+const killCase = cannedHarness(
+  [
+    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 0 }] }) },
+    { exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true },
+  ],
+  {},
+  { jobs: killRegistry },
+);
 check("进度：cannedHarness 能把 jobs 服务带进 makeCtx（kill 场景的前提）", killCase.ctx.jobs === killRegistry);
 const killRun = killCase.call({ engine: "ocr" });
-await until(() => killRegistry.starts.length === 1 && killCase.canned.calls.length >= 1);
+await until(() => killRegistry.starts.length === 1 && killCase.canned.calls.some((call) => call.spec.argv.includes("review")));
 const stopping = killRegistry.starts[0];
 check("进度：评审一开始就登记（面板/进度行立刻看得见，无需等结果）", Boolean(stopping) && stopping.status === "running", `${stopping?.id} ${stopping?.progress}`);
 const killed = killRegistry.kill(stopping.id, {}, "用户停止");
@@ -1602,10 +2188,11 @@ check(
     stopping.status === "killed" && String(stopping.detail).startsWith("用户停止") && String(stopping.detail).includes("OCR_ABORTED"),
   `${stopping.status} | ${stopping.detail} | kills=${JSON.stringify(killRegistry.kills)}`,
 );
+const killReview = killCase.canned.calls.find((call) => call.spec.argv.includes("review"));
 check(
   "停止：子进程被终结，结果报 OCR_ABORTED（不会当成功结果投递）",
-  killCase.canned.calls[0]?.terminated === true && killedValue.ok === false && killedValue.code === "OCR_ABORTED",
-  `${killedValue.code} terminated=${killCase.canned.calls[0]?.terminated}`,
+  killReview?.terminated === true && killedValue.ok === false && killedValue.code === "OCR_ABORTED",
+  `${killedValue.code} terminated=${killReview?.terminated}`,
 );
 
 /* ------------------------------------------- 独立评审 agent（只读子 agent + findings 往返） */
@@ -1749,6 +2336,59 @@ check(
   offForcedRun.engine + " start=" + offSub.calls.start.length,
 );
 check("给的 subagents 服务在 apply 时被登记过（list 被调用）", offSub.calls.list >= 1, "list=" + offSub.calls.list);
+
+/* v0.10.0：engine=delegate 也起得起来。旧条件 `plan.engine !== "delegate"` 写在默认引擎还是 auto 的
+   年代，v0.8.0 把默认翻成 delegate 之后它在出厂配置下恒假 —— 独立评审 agent 因此永远开不起来，
+   而工具 schema 还承诺 reviewer:true 会用。这一组断言就是钉死这个回归。 */
+const dlSub = cannedSubagents({ structured: FINDINGS_ONE });
+const dlCase = cannedHarness(reviewerSpecRuns(), { engine: "delegate", reviewerAgent: "spawn" }, { subagents: dlSub.runtime });
+const dlRun = await dlCase.call({});
+check(
+  "v0.10.0：engine=delegate + reviewer.agent=spawn 也起独立评审 agent（规格由 delegate 出）",
+  dlRun.ok === true && dlRun.engine === "agent" && dlRun.issues.length === 1 && dlSub.calls.start.length === 1,
+  dlRun.engine + " code=" + dlRun.code + " issues=" + dlRun.issues.length + " start=" + dlSub.calls.start.length,
+);
+const dlForced = cannedHarness(reviewerSpecRuns(), { engine: "delegate" }, { subagents: dlSub.runtime });
+const dlForcedRun = await dlForced.call({ reviewer: true });
+check(
+  "v0.10.0：engine=delegate + 显式 reviewer:true 同样起子 agent（不再被 engine 挡住）",
+  dlForcedRun.ok === true && dlForcedRun.engine === "agent" && dlForcedRun.reviewer.round === 1 && dlForcedRun.reviewer.rounds === 1,
+  dlForcedRun.engine + " reviewer=" + JSON.stringify(dlForcedRun.reviewer),
+);
+check(
+  "v0.10.0：工具入口起独立评审 agent 时，备注写明「只跑 1 轮」",
+  dlForcedRun.notes.some((n) => n.includes("只跑 1 轮")),
+  JSON.stringify(dlForcedRun.notes),
+);
+
+/* 自动评审这条路同样漏：engine=delegate 时第三档恒假。 */
+const autoDlMap = new Map();
+const autoDlSink = [];
+const autoDlSub = cannedSubagents({ structured: { verdict: "clean", summary: "审完没问题", findings: [] } });
+const autoDlCase = cannedHarness(
+  reviewerSpecRuns(),
+  { engine: "delegate", reviewerAgent: "spawn", autoReview: "adaptive", autoMinIntervalMs: 0 },
+  { listeners: autoDlMap, subagents: autoDlSub.runtime },
+);
+const autoDlAgent = localAgent(autoDlSink);
+emitOn(autoDlMap, "tools/result", { name: "edit", agent: autoDlAgent }, { isError: false });
+emitOn(autoDlMap, "agent/turn-stopping", { agent: autoDlAgent, reason: "test" });
+/* 等「交付」而不是等 list：subagents 的 list 在 apply 时就调过，等它会抢在自动评审跑完之前断言。 */
+await waitUntil(() => autoDlSink.length > 0, 8000);
+check(
+  "v0.10.0：自动评审在 engine=delegate + reviewer.agent=spawn 下也起独立评审 agent",
+  autoDlSub.calls.start.length === 1,
+  "start=" + autoDlSub.calls.start.length + " | " + (autoDlSink.length ? textOf(autoDlSink[0]).slice(0, 140) : "(没有交付)"),
+);
+
+/* delegate 的 argv 里没有 --effort：显式传了必须留一句备注，不能静默无效。 */
+const effCase = cannedHarness(reviewerSpecRuns(), { engine: "delegate" });
+const effRun = await effCase.call({ effort: "high" });
+check(
+  "v0.10.0：delegate 下 effort 不生效并在备注里说明（不再静默无效）",
+  effRun.engine === "delegate" && effRun.ok === true && effRun.notes.some((n) => n.includes("effort=high 在 delegate 下不生效")),
+  effRun.engine + " ok=" + effRun.ok + " notes=" + JSON.stringify(effRun.notes),
+);
 
 /* 工具入口 reviewer:true：起一个只读子 agent，拿结构化 findings。 */
 const okSub = cannedSubagents({ structured: FINDINGS_ONE });

@@ -3,6 +3,111 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.11.0] — 2026-10-12
+
+**能用得下去的三件事：设置页不再问用户不关心的问题、按钮只在有改动时出现、`ocr` 档把「跑前就能知道的事」补齐。**
+
+这一版没有新引擎、没有新能力，改的全是「用户第一次打开时会撞上的东西」：26 个配置项平铺在一个页面里
+（大部分出厂值根本不用改）、按钮在每个回合尾都出现（哪怕这一回合什么都没改）、`ocr` 档跑起来要等几分钟
+却什么都不知道。三条各自都有明确的判定线，写在 `docs/usability-plan-2026-10-12.md`。
+
+Added
+- **跑前规模进「开跑那一行」**：`engine = ocr` 时先做一次免费的规模预估（`ocr delegate preview`，几百毫秒），
+  把「本次约 N 个文件 → 按真机历史约 lo~hi 分钟」放在 job 的第一行，而不是等 6 分钟后在结果里才看到；
+  预估下限已经超过本次超时时**开跑前**再给一条告警（「很可能跑到一半被掐断，而掐断后拿不到任何结论」）。
+- **预计剩余（心跳第三段）**：长评审的进度行多一句「预计还需 X 分钟起 / 已过预估下限，按上限还剩约 Y 分钟 /
+  已过预估上限」—— 这不是进度条（ocr 的 stdout 只有横幅，谎报百分比比不报更糟），是拿跑前预估当尺子的三档
+  诚实话术；拿不到预估就闭嘴。
+- **`reviewSessionId`**（工具返回值新增字段）：结果带回 ocr 自己的会话 id，配 `ocr session show <id>`（逐文件
+  结果）、`ocr session export <id>`（自包含 HTML）、`ocr viewer`（浏览器里过一遍、可标 fixed/ignored）。
+- **`llm.bridgePort`**（默认 **18800**，**不进设置页**，写 `config.json` 改）：本机桥不再用随机端口，重启地址
+  不变；首选端口被占用时顺延（最多试 10 个），`ocr_status.bridge` 用 `requestedPort` / `portShifted` 说明。
+- **设置页只读诊断区**：被移出表单的 15 个键在页面末尾逐条列出「当前值 · 键名」，并注明「要改就写
+  `config.json` 的 `<键>`；运行期实况用 `ocr_status`」。
+
+Changed
+- **设置页三分法**（`lib/client.js`）：首屏 4 项（总开关 / 默认引擎 / 按需评审 / 自动评审，且自动评审只给
+  `off` 与 `adaptive` 两档）、折叠的「高级设置」3 组（模型路由 / 独立评审 agent（仅 `spawn` 时显示三项）/
+  评审先于测试）、末尾只读诊断区。其余 15 个键**仍然保留 schema 与 `config.json` 约定**（行为零变化），
+  只是不再作为输入控件出现。
+- **回合尾按钮只在「本回合有改动」时出现**：客户端注册一个 conversation event definition
+  （`kind = ocrTurnChanges`，只匹配 `turn/start` 与 `workspace/changes`），按钮读本回合落下的 `changesSeq`，
+  再取宿主的 `api/changes.summary?sessionId=..&seq=..`；`total === 0` 才隐藏。**失败一律 fail-open**：
+  宿主没提供事件定义能力、取不到 `turn.data`、请求失败或形状不认识，都照旧显示按钮（宁可见了没改动，
+  不可有改动却看不见）。按钮的 `onDemand=false` 仍然不渲染。
+- **`dsh` 模式不再静默回落静态端点**（v0.10.0 已预告，这版收口）：本机桥起不来 / 模型名缺失时，
+  `ocr_review` 直接以 `OCR_LLM_MISSING` 失败并给出三种原因的 `nextStep`，**一个子进程都不起**（不出结论、
+  也不产生费用）；要直连静态端点请显式把 `llm.mode` 改成 `endpoint`（这条路仍然完整保留）。
+- **LLM 路由顺序 = 插件设置 → 当前会话正在用的模型 → DSH 全局默认**：第二档是新增的（读
+  `Session.requestContext()`），于是「对话里切了模型」下一次评审就跟着变，不需要重启、也**没有新开关**。
+- **`partial` 结果首行置顶**：`ocr` / `delegate` 两侧的摘要都以「⚠️ 部分结果（…）」开头 ——
+  「这次算不算数」要先于「审了几个文件」。
+- **超时 / 取消的说明补上「保住了什么」**：两者都是「没有结论」（`ocr` 只在结束时吐一次性 JSON），
+  已发生的上游用量照常计费不退还；`nextStep` 也改成可执行的一步（缩小范围 / 调大 `timeoutMinutes` / 换
+  `delegate`）。
+
+Tests
+- `test/smoke.mjs` 261 → **286**：`estimateMinutes` / `spendNotice` / `remainingText` / `timeoutWarning` 纯函数、
+  心跳第三段（老签名不动）、`extractSessionId`（不猜字段）、开跑那一行的规模与超时告警（走 job 注册表读
+  真实进度行）、会话 id 的摘要与备注、拿不到会话 id 时不编、`partial` 首行置顶、跑到一半取消的说明。
+- `test/client-smoke.mjs` 195 → **208**：脏检查 6 条（有改动显示 / `total=0` 隐藏 / 读不到回合记录隐藏 /
+  请求抛异常显示 / 404 显示 / 宿主没有事件定义能力时显示）+ definition 6 条（注册进 `ctx.effect`、
+  `match` 只认 `turn/start` 与 `workspace/changes`、`start` 只接 `turn/start`、`update` 记录 `seq`、
+  `buildLocationData` 引用稳定、step 作用域返回 null）。
+- 真机验收（2026-10-12）：桥落在首选端口 18800（`requestedPort=18800`、`portShifted=false`）；
+  `ocr_review(scope=commit)` 的 job 第一行带规模、结果带 `reviewSessionId`；设置页首屏 4 个控件行。
+
+## [0.10.0] — 2026-10-12
+
+**默认引擎反转回 `ocr`，并把「结论覆盖到哪里」变成可核对的东西。**
+
+v0.8.0 把出厂默认从 `auto` 挪到 `delegate`，理由是「最贵的那档不该是不选就默认发生」。这个理由依然成立，
+但结论反了：`auto` 的问题不是「贵」，是**在没有 LLM 时会静默降级成 delegate** —— 用户以为跑的是流水线，
+拿到的却是「规则 + 清单」这种半成品。默认档该是那条会被打上「评审过」的路径：`ocr`。
+钱的问题改用「跑前给一条成本预估、跑不跑你说了算」解决，而不是用「悄悄换成便宜档」解决。
+`delegate` / `auto` / `reviewer.agent = spawn` 一个都没删，只是不再是出厂默认。
+
+Added
+- **跑前成本预估**（`engine = ocr`）：评审开始前先跑一次 `ocr delegate preview`（不调 LLM、几百毫秒），
+  把「本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟」写进第一条备注；
+  预估失败就只少这半句，不阻塞评审，也不编数字。
+- **覆盖回执与部分结果**：`delegate` 的规格按片交付，每片带头部
+  `[片 3/7 · lib/x.js · 本文件 hunk 1-3/6 · 4823B]`，「你的任务」里多了一节
+  「覆盖回执（硬规则，必须逐片回填）」；只要存在未覆盖的片，就不得输出「未发现问题」。
+  工具返回值新增 `partial` / `partialReasons` / `coverage` 三个字段（`RELEASING.md` 划的外部接口）。
+
+Changed
+- **出厂默认 `engine` 回到 `ocr`**（`lib/config.js` 的 `DEFAULTS.engine`）：五处同步（`DEFAULTS`、
+  `pickEngine()` 兜底、工具描述、设置页顺序、EN/中文文案）。
+- **`autoEngine` 出厂留空 = 跟随 `engine`**：以前它是独立的一档（`delegate`），于是「我设了 `ocr`，
+  回合尾自动评审却拿到 `delegate`」这种事会发生；现在自动评审的结论来源与手调一致。
+- **第三档不再被 `engine` 挡住**（修 v0.8.0 的连带回归）：两道门里的 `plan.engine !== "delegate"`
+  写于默认还是 `auto` 的年代（2026-10-09），隔天翻默认后变成几乎恒假 ——
+  「`reviewer: true` 不可用就报 `OCR_REVIEWER_UNAVAILABLE`，不回落」这句承诺在出厂配置下永远走不到。
+  现在 `engine = delegate` 也能起独立评审 agent（delegate 出规格、agent 出结论）；工具路径仍是一次性单轮，
+  这一点如实写进 `notes`。
+- **`effort` 在 delegate 下不再静默无效**：`ocr delegate` 没有 `--effort`，现在会明说
+  「effort=high 在 delegate 下不生效」。
+- **`diff` 截断改成 hunk 级**（以前按字符切，可能切在 hunk 中间，且不说切掉了哪个文件的第几个 hunk）：
+  现在整片丢弃并报出「收录 x/y 个 hunk、x/y 个文件片，丢弃 …」；采集与规格统一到同一个上限
+  （`includeDiffMaxBytes`，默认 120000），不再有「采集 120000 / 规格 200000」两个数各说各话。
+- 文档修正：`README` 与 v0.9.0 的条目以前把入口待认领窗口写成「60 秒内有效」，代码里
+  （`lib/index.js` 的 `ENTRY_PENDING_TTL_MS`）一直是 **10 分钟**，注释也写明了理由（模型可能隔几轮才真的
+  调用工具）。改的是文档不是代码 —— 60 秒会让「按钮到底有没有人点」这个判据本身失真。
+
+Tests
+- `test/smoke.mjs` 251 → **261**：默认引擎与 `autoEngine` 跟随、`pickEngine` 三例、成本预估三例
+  （拿不到预估不阻塞、给了 `paths` 按 paths 报数）、规格分片与片头、hunk 级截断（纯函数 + 真跑一次超限
+  diff）、预算装不下时任务段与回执段必须活着、`partial` 的来源、`detectPartial` 纯函数、
+  「ocr 报部分结果时摘要不许写未发现问题」，以及「插件绝不传 `--max-tokens-budget`」的源码级断言。
+- 新增用例全部走罐头子进程，不需要真机 `ocr`；真机那几条照旧。
+- 真机验收（2026-10-12）：`engine=ocr` 审单文件提交 `4507de6`（`screenshots.json`）——9.9s、1141 tokens、
+  0 条问题、留了 `session_id`；跑前成本预估按提交范围给出「本次实测可审 1 个文件 → 按真机历史约 3~10 分钟」。
+- 验收当场修掉一个诚实性缺口：`detectPartial` 原先只认顶层 `partial` / `budget_exceeded` / 逐项
+  `status:"failed"` 这些**推定**字段，而真机 JSON 用的是 `status`、`manifest.terminal_state`、
+  `manifest.coverage.{selected,completed,reused,failed}` —— 真机出现「选中 8 项、只完成 5 项」时一个信号都
+  命不中，照样会报「未发现问题」（正是本版要消灭的那类谎）。现在按真机字段判定，测试 +1。
+
 ## [0.9.0] — 2026-10-10
 
 **按入口记账**（`ocr_status.stats`）。这条来自成熟度评估的 P1-1：判据是「连续两周按钮点击 0 次 ⇒
@@ -22,7 +127,7 @@ Added
 Changed
 - 回合尾部按钮执行宿主命令时带内部标记 `/ocr-review --entry=button`；插件在 handler 里收下即**剥掉**，
   模型看到的提示词里没有它，手输不带标记 ⇒ 记成 `command`。命令与按钮本身不执行评审（只注入一句指令），
-  所以入口只能在「模型真的调 `ocr_review`」那一刻认领：命令处理器留一个 60 秒内有效的待认领标记。
+  所以入口只能在「模型真的调 `ocr_review`」那一刻认领：命令处理器留一个 10 分钟内有效的待认领标记。
 
 Not added (and why)
 - **没有 `skill` 桶**。模型自发调用与按 on-demand skill 说明调用在工具层是同一次调用，分不开；
