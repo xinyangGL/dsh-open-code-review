@@ -1305,6 +1305,38 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
   );
 }
 
+/* (7) 源码级守卫（2026-10-13 真机踩坑）：模型下拉的「定位基准」与「不透明背景」。
+   mini-DOM 没有排版引擎，这两条在 client-smoke 里量不出来 —— 它们是样式对象里的事实，
+   所以在源码这一层钉住（真机复核用 bsk 的 aria 快照 + 元素几何，见 docs/ROADMAP.md §6）。 */
+{
+  const pickerSource = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  const sStart = pickerSource.indexOf("const S = {");
+  const sEnd = sStart >= 0 ? pickerSource.indexOf("\n    };", sStart) : -1;
+  const styleBlock = sStart >= 0 && sEnd > sStart ? pickerSource.slice(sStart, sEnd) : "";
+  const comboKeys = (styleBlock.match(/(^|\s)combo:\s*\{/g) ?? []).length;
+  check(
+    "模型下拉：样式表里 combo 只有一个（重复键会让后一个静默覆盖前一个的 position: relative）",
+    comboKeys === 1,
+    `S 里找到 ${comboKeys} 个 combo 键`,
+  );
+  const comboStyle = /(?:^|\s)combo:\s*\{([^}]*)\}/.exec(styleBlock)?.[1] ?? "";
+  check(
+    "模型下拉：combo 带 position: relative（菜单的定位基准；缺了菜单会改成以设置面板为基准、掉到面板外被 overflow:hidden 裁掉，点开什么也看不见）",
+    /position:\s*"relative"/.test(comboStyle),
+    `combo = ${comboStyle.trim() || "(没找到)"}`,
+  );
+  check(
+    "模型下拉：菜单是 position:absolute + top:100%（配合上面的定位基准才有意义）",
+    /(?:^|\s)menu:\s*\{[^}]*position:\s*"absolute"/.test(styleBlock) && /(?:^|\s)menu:\s*\{[^}]*top:\s*"100%"/.test(styleBlock),
+    "S.menu 不是 absolute + top:100%",
+  );
+  check(
+    "模型下拉：背景只认真正不透明的祖先（半透明叠层不算），拿不到时有 Canvas 兜底",
+    /a >= 0\.95/.test(pickerSource) && pickerSource.includes("var(--dsw-alias-bg-layer-2, Canvas)"),
+    "guessBg 仍可能把半透明叠层当背景，或没有兜底色",
+  );
+}
+
 /* --------------------------- 结果码与 fail-closed（罐头子进程，不依赖真 ocr） --------- */
 
 const codeKeys = Object.keys(review.CODES ?? {});

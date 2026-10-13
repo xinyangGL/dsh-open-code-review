@@ -36,8 +36,8 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
 | 可用性 M1/M2 | 含一次真机 reload | 2026-10-19 | usability-plan §4 |
 | 可用性 M3 + 风险 R1 | 宿主是否把 `workspace/changes` 与 `uiConversation` 暴露给第三方客户端插件 —— 结论写进 README | 2026-10-26 | usability-plan §4 / §7 R1 |
 | 可用性 M4 + `ocr` 档观感 | 真机长评审里六项体验的实际观感 | 2026-11-02 | usability-plan §4 |
-| v0.11.1 模型候选（原「模型名不能选」） | 刷新页面后能读出候选；读成失败时出现「重试读取目录」而不是永远「正在读取…」；同一地址不再出现 30+ 条重复请求 | 刷新页面即可确认 | 2026-10-13 真机 console；CHANGELOG `0.11.1` |
-| v0.11.1 修复本身（两条已实测 + 2026-10-13 14:10:34 已重启） | ✅ 展开「高级设置」后 `/api/session/modelCatalog` 10 秒内**只发 1 次**（修复前同为一次展开会连出 30+ 条）；✅ 读失败时该行直接写出原因（HTTP 403）并渲染「重试读取目录」。⬜ 仍缺：在一个**有 client API 权限**的会话里看到候选真的列出来；而且必须在一个**加载了本版代码**的页面里看 —— 用户当场那个窗口的页面是应用启动（≤ 2026-10-13 13:17:30）时加载的，比修复落盘（`lib/client.js` 13:37:31）早，要整页刷新或重启 DSH 之后才谈得上验收本修复。**2026-10-13 14:10:34 用户已重启 DSH**（新宿主 PID 17088，晚于最后一次提交 `d56c87c` 14:01:27）⇒ 页面现在应当加载到本版代码；这一条仍只能由用户在**正常会话**里看 —— 我的浏览器标签页没有 `dsh web` 的 token，所有 `/api/*` 一律 401/403 | 用户刷新页面后确认候选 | 2026-10-13 真机（QuarkPC / 127.0.0.1:19387） |
+| v0.11.1 模型候选：读取 | 刷新页面后能读出候选；读成失败时出现「重试读取目录」而不是永远「正在读取…」；同一地址不再出现 30+ 条重复请求 | 刷新页面即可确认 | 2026-10-13 真机 console；CHANGELOG `0.11.1` |
+| v0.11.1 模型候选：下拉能看见 | ✅ **2026-10-13 用 bsk 在真机页面上量化确认**：修前菜单 rect `[556, 854, 800, 231]`（设置面板 `[556, 50, 800, 800]` + `overflow:hidden`）⇒ 菜单在屏幕外被裁掉；修后 `[981, 583, 335, 231]` ⇒ 在输入框正下方、面板内，截图可见 4 条候选，点一条写回 `deepseek-flash`。⬜ 仍缺：用户在自己那台桌面 GUI 里刷新一次页面后看到候选（用户的窗口需要整页刷新，见 §3 的两层加载面） | 真机几何 + 截图（`C:\Users\吴礼凯\AppData\Local\Temp\ocr-ui-menu-opaque.png`） | 2026-10-13 bsk 复核；CHANGELOG `0.11.1` |
 
 ## 3. 发行门（`RELEASING.md`，尚未做）
 
@@ -138,3 +138,28 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
     （`resolved.call` 绝不进 deps ／ `ctx` 必须留 ／ `locale` 不能顶替 `ctx`）、`CHANGELOG.md` 0.11.1 段写明更正、
     `test/client-smoke.mjs` 的「服务迟到」场景加警示注释。教训与 2026-10-12 那次同源：
     **提交信息与变更记录里不能写代码里没有的改动。**
+  - **2026-10-13 用 bsk 做真机 UI 调试，找到「下拉点开什么也看不见」的真因**（用户指出「目录读到了 76 个模型，
+    但按钮点开没有任何内容」，并问「你能不能自己用 UI 测试工具测」）。做法：
+    ① agent 工具表（`cordis_inspect_query(host, Tool, listTools)`，105 个工具）里**没有** browser/UI 测试工具，
+    `browser_inspect` 报 unknown tool；本机能用的 UI 测试手段是 **`bsk`（browser-skill 0.3.2，
+    `C:\Users\吴礼凯\.local\bin\bsk.exe`）**，它只能驱动 Edge/Chrome，**接不进 Electron 里的桌面 GUI**。
+    ② 于是在 **web profile** 里临时装上同一个插件（`dsh plugin --profile web add link:…`）、
+    `dsh web --port 19388 --no-open` 起一个**带自己 token** 的实例，用 `bsk` 的 Edge 会话打开，走到
+    「设置 → 代码评审 → 高级设置」—— 拿到的是**已鉴权**的真实页面（`/api/*` 全通）。
+    ③ 复现与量化（`bsk evaluate` 量几何 + `bsk screenshot`）：修前菜单 rect `[556, 854, 800, 231]`，
+    而设置面板是 `[556, 50, 800, 800]` 且 `overflow: hidden` ⇒ 菜单整个落在面板下沿（850）之外被裁掉，
+    `elementFromPoint` 在该处打不到任何元素（= 屏幕上确实没有）。
+    ④ 真因：`lib/client.js` 的 `S` 里 **`combo` 键写了两次**（`{ position: "relative" }` 与 `{ display: "grid", … }`），
+    对象字面量后一个键静默覆盖前一个 ⇒ 组合框不再是定位元素 ⇒ 菜单的定位基准变成**面板本身**，
+    `top: 100%` 于是等于面板高度。修法：把 `position: "relative"` 并回**唯一**的 `combo` 键；
+    修后 rect = `[981, 583, 335, 231]`（输入框正下方、面板内），截图可见 4 条候选，点一条写回 `deepseek-flash`。
+    ⑤ 顺带修掉同一处的第二个观感缺陷：`guessBg()` 只排除 `transparent`，取到了 `rgba(127,127,135,0.045)` 这类
+    **叠层色**，菜单半透明、候选文字与后面说明文字互相穿透；改成只认 alpha ≥ 0.95 的背景，
+    并以 `var(--dsw-alias-bg-layer-2, Canvas)` 兜底（修后实测 `background: rgb(44, 44, 46)`）。
+    ⑥ 回归：`test/smoke.mjs` 新增 4 条**源码级守卫**（`combo` 键唯一 / `combo` 带 `position: relative` /
+    `menu` 是 `absolute` + `top: 100%` / 背景判定排除半透明叠层且有 Canvas 兜底）。
+    ⑦ 清理：web profile 里那个测试实例与临时安装用完即撤（`dsh plugin --profile web remove …` + 停 19388），
+    桌面 profile 的插件与配置不动。
+    ⚠️ 教训：上一轮把「模型名不能选」整条归到「目录读取」线上，其实**同时有两个独立缺陷** ——
+    读取风暴（已修）与下拉定位（本次修）。**只看 aria 快照会以为菜单正常（DOM 里确实有 4 条候选），
+    必须量几何 / 看截图才能发现它在屏幕外。**
