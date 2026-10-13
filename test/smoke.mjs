@@ -460,6 +460,25 @@ check("parseJsonLoose + extractIssues 兼容两种字段形态并去重", issues
 const argv = review.buildOcrArgv(review.normalizeTarget({ scope: "range", from: "main", to: "dev", effort: "high", exclude: ["**/dist/**"] }, { timeoutMinutes: 15, maxTimeoutMinutes: 45, audience: "agent" }, REPO), {});
 check("buildOcrArgv(range) 参数拼装", argv.argv.join(" ") === "review --from main --to dev --format json --audience agent --color never --effort high --exclude **/dist/** --timeout 15", argv.argv.join(" "));
 
+/* v0.12.0（E1）：scope=workspace 配 paths 过去被**静默忽略**（ocr review 没有 --path，用户点名的路径根本没进命令）。
+   现在显式拒绝，并给出三条出路；delegate 档与 scan 档不受影响（它们真的会用 paths）。 */
+const wsPathsPlan = review.normalizeTarget({ scope: "workspace", paths: ["src/a.js"] }, {}, REPO);
+check(
+  "E1：scope=workspace + paths（ocr/auto 档）→ 显式报错，且指出 scan / commit-range / delegate 三条出路",
+  !!wsPathsPlan.error &&
+    wsPathsPlan.error.includes("不接受 paths") &&
+    wsPathsPlan.error.includes("scope=scan") &&
+    wsPathsPlan.error.includes("engine=delegate"),
+  wsPathsPlan.error,
+);
+const wsPathsDelegatePlan = review.normalizeTarget({ scope: "workspace", paths: ["src/a.js"], engine: "delegate" }, {}, REPO);
+const scanPathsPlan = review.normalizeTarget({ scope: "scan", paths: ["src/a.js"] }, {}, REPO);
+check(
+  "E1 不误伤：delegate 档（用 paths 过滤规格）与 scan 档的 paths 都不报错",
+  wsPathsDelegatePlan.error === "" && scanPathsPlan.error === "",
+  `delegate=${JSON.stringify(wsPathsDelegatePlan.error)} scan=${JSON.stringify(scanPathsPlan.error)}`,
+);
+
 /* ------------------------------------------------------------- 端到端：工具 */
 
 /* 评审进度（可选 jobs 服务）替身：ctx 上有它，插件才会把每次评审登记成 job。
@@ -1278,10 +1297,15 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
       .execute({ engine: "ocr" }, { name: "ocr_review", callId: "dead-port", arguments: {}, agent: makeAgent(), signal: undefined });
     check(
       "v0.11.0：端口全被占 → OCR_LLM_MISSING，原因指名端口、下一步给出 llm.bridgePort",
-      deadRun.ok === false &&
-        deadRun.code === "OCR_LLM_MISSING" &&
-        String(deadRun.summary).includes("都被占用") &&
-        String(deadRun.nextStep).includes("bridgePort"),
+      HAS_OCR
+        ? deadRun.ok === false &&
+            deadRun.code === "OCR_LLM_MISSING" &&
+            String(deadRun.summary).includes("都被占用") &&
+            String(deadRun.nextStep).includes("bridgePort")
+        : /* 离线档（CI 没装 ocr）：插件在查桥之前先解析 ocr 可执行文件，所以这里必然先报 OCR_NOT_FOUND。
+             「端口耗尽」那条路只能在装了 ocr 的机器上验，但离线档也必须断言点东西 —— 断言失败原因确实是
+             「找不到 ocr」，免得把「环境缺 ocr」误当成「端口那条路坏了」（CI 2026-10-13 就是这么红的）。 */
+          deadRun.ok === false && deadRun.code === "OCR_NOT_FOUND",
       `${deadRun.code} | ${deadRun.summary} | next=${deadRun.nextStep}`,
     );
     for (const entry of deadCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
@@ -1641,11 +1665,13 @@ const estimatePathCase = cannedHarness([
   { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], issues: [] }) },
 ]);
 const estimatePathRun = await estimatePathCase.call({ engine: "ocr", paths: ["lib/a.js"] });
-const estimatePathNotes = (estimatePathRun.notes ?? []).join("\n");
+const estimatePathNotes = [estimatePathRun.summary, ...(estimatePathRun.notes ?? [])].join("\n");
 check(
-  "v0.10.0：给了 paths 时预估按 paths 过滤后报数（不拿整个工作区的清单冒充本次规模）",
-  /实测可审 1 个文件/.test(estimatePathNotes),
-  estimatePathNotes.replace(/\n/g, " ").slice(0, 140),
+  "E1：workspace 档给 paths（ocr 引擎）→ OCR_INVALID_ARGS，不再静默忽略、也不再报一个比实际更小的预估",
+  estimatePathRun.ok === false &&
+    estimatePathRun.code === "OCR_INVALID_ARGS" &&
+    estimatePathNotes.includes("不接受 paths"),
+  `${estimatePathRun.code} | ${estimatePathNotes.replace(/\n/g, " ").slice(0, 140)}`,
 );
 
 /* ocr 档体验（v0.11.0 · W4）：预估前置、预计剩余、超时下限告警、partial 置顶、会话 id、停止/超时说明「保住了什么」。 */
@@ -2414,6 +2440,28 @@ check(
   dlForcedRun.ok === true && dlForcedRun.engine === "agent" && dlForcedRun.reviewer.round === 1 && dlForcedRun.reviewer.rounds === 1,
   dlForcedRun.engine + " reviewer=" + JSON.stringify(dlForcedRun.reviewer),
 );
+
+/* v0.12.0（E2）：规格本身是「部分结果」时（这里用超大 diff 逼出按 hunk 截断，不依赖注入配置——
+   见上一条 v0.10.0 W3 用例的做法），独立评审 agent 这一档以前会把 partial 丢掉：子 agent 只看得到半份
+   规格，clean 摘要却照写「未发现问题」。这与 v0.11.2 修的是同一个失败方向，只是发生在 agent 档。 */
+const e2HugeHunks = Array.from({ length: 6000 }, (_, i) => `@@ -${i * 5},1 +${i * 5},1 @@\n-old${i}\n+new${i}`).join("\n");
+const e2SpecRuns = [
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 40, deletions: 40 }], excluded: [] }) },
+  { exitCode: 0, stdout: JSON.stringify({ groups: [{ group_id: "g1", pattern: "**/*.js", rule: "不要把 undefined 当空值" }] }) },
+  { exitCode: 0, stdout: `diff --git a/lib/a.js b/lib/a.js\n${e2HugeHunks}\n` },
+];
+const e2Sub = cannedSubagents({ structured: { verdict: "clean", summary: "看过的部分没问题", findings: [] } });
+const e2Case = cannedHarness(e2SpecRuns, { engine: "delegate", reviewerAgent: "spawn" }, { subagents: e2Sub.runtime });
+const e2Run = await e2Case.call({});
+check(
+  "E2：规格被截断（部分结果）+ 子 agent 说 clean → partial=true、摘要标⚠️部分结果、且不许出现「未发现问题」",
+  e2Run.ok === true &&
+    e2Run.partial === true &&
+    /^⚠️ 部分结果/.test(String(e2Run.summary)) &&
+    !String(e2Run.summary).includes("未发现问题") &&
+    e2Run.reviewer?.verdict === "clean",
+  `partial=${e2Run.partial} verdict=${e2Run.reviewer?.verdict} | ${String(e2Run.summary).replace(/\n/g, " ").slice(0, 150)}`,
+);
 check(
   "v0.10.0：工具入口起独立评审 agent 时，备注写明「只跑 1 轮」",
   dlForcedRun.notes.some((n) => n.includes("只跑 1 轮")),
@@ -2647,9 +2695,37 @@ for (const [label, payload] of hrBadShapes) {
 const hrEmptyCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }) }]);
 const hrEmptyRun = await hrEmptyCase.call({ engine: "ocr" });
 check(
-  "fail-closed（P0 回归）：空文件清单 + 空问题清单才算真的「未发现问题」",
-  hrEmptyRun.ok === true && hrEmptyRun.summary.includes("未发现问题"),
-  `${hrEmptyRun.code || "(无 code)"} ok=${hrEmptyRun.ok} | ${hrEmptyRun.summary}`,
+  "M6：空文件清单 + 空问题清单 = 「本次没有检测到任何改动」，不是「未发现问题」",
+  hrEmptyRun.ok === true &&
+    hrEmptyRun.summary.includes("没有检测到任何代码改动") &&
+    !hrEmptyRun.summary.includes("未发现问题") &&
+    hrEmptyRun.partial === true,
+  `${hrEmptyRun.code || "(无 code)"} ok=${hrEmptyRun.ok} partial=${hrEmptyRun.partial} | ${hrEmptyRun.summary}`,
+);
+/* M6 的两侧边界：有改动但一个都没审 → 说清「没有可审的代码改动」；真审了文件且清单为空 → 才允许说「未发现问题」。 */
+const hrExcludedCase = cannedHarness([
+  {
+    exitCode: 0,
+    stdout: JSON.stringify({ files: [], issues: [], total_files: 1, reviewable_count: 0, excluded_files: ["notes.txt"] }),
+  },
+]);
+const hrExcludedRun = await hrExcludedCase.call({ engine: "ocr" });
+check(
+  "M6：有改动但一个都没审（被排除）→ 说「没有可审的代码改动」，且 partial=true",
+  hrExcludedRun.ok === true &&
+    hrExcludedRun.summary.includes("没有可审的代码改动") &&
+    !hrExcludedRun.summary.includes("未发现问题") &&
+    hrExcludedRun.partial === true,
+  `${hrExcludedRun.code || "(无 code)"} partial=${hrExcludedRun.partial} | ${hrExcludedRun.summary}`,
+);
+const hrCleanCase = cannedHarness([
+  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js" }], issues: [], total_files: 1, reviewable_count: 1 }) },
+]);
+const hrCleanRun = await hrCleanCase.call({ engine: "ocr" });
+check(
+  "M6 不误伤：真审了文件且问题清单为空 → 仍然说「未发现问题」（partial=false）",
+  hrCleanRun.ok === true && hrCleanRun.summary.includes("未发现问题") && hrCleanRun.partial === false,
+  `${hrCleanRun.code || "(无 code)"} partial=${hrCleanRun.partial} | ${hrCleanRun.summary}`,
 );
 const hrMixedCase = cannedHarness([
   { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js" }], issues: [{ file: "a.js", line: 2, message: "真问题" }, { file: "b.js", line: 5 }] }) },

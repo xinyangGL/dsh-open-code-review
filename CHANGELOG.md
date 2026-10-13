@@ -3,6 +3,36 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.12.0] — 2026-10-13（批 1 / 进行中）
+
+**只针对「代码审核」这条线的不足盘点（不加新功能，但已有的内容必须好用）：先修最危险的三条 —— 结论会在不该干净的时候说干净。**
+
+Fixed
+- **E2（最危险）**：`engine=agent`（独立评审 agent）这一档会丢掉规格的「部分结果」标记 —— 子 agent 只看得到
+  半份规格（diff 被按 hunk 截断 / 缺规则正文 / 拿不到 diff），**clean 摘要却照写「未发现问题」**。
+  v0.11.2 修的是 ocr 档同一个失败方向，agent 档漏了。现在这一档**无条件继承** `partial` / `partialReasons` /
+  `coverage`；clean + partial 时不再输出「未发现问题」，改成 `⚠️ 部分结果（…）` 开头 + 「只覆盖了部分改动，
+  已覆盖的部分没有发现问题」，并给出「缩小范围重跑 / 改用 ocr 引擎」的下一步。
+- **E1（承诺了做不到的事）**：`scope=workspace` 配 `paths` 过去被**静默忽略** —— `ocr` 的根命令是 `ocr review`，
+  它没有 `--path`（只有 `ocr scan` 有），所以「只审 lib/x.js」实际审的是全部未提交改动；更糟的是规格预估
+  （`estimateReviewSize`）还按 `paths` 报了一个比实际更小的规模。现在这种组合**显式报错**
+  （`OCR_INVALID_ARGS`，并给出 `scope=scan` / `scope=commit|range` / `engine=delegate` 三条出路），
+  预估里那段按 `paths` 过滤一并删掉。`engine=delegate`（真的会用 paths 过滤规格）与 `scope=scan` 不受影响。
+  README 的命令示例与工具 schema 说明同步改（原来那句「只审 src/ 下的改动」是做不到的）。
+- **M6（说反了的话）**：工作区**完全干净**时，`reviewedFileCount()` 的回落链（`files` → `total_files` →
+  `reviewable_count`）会让摘要写成**「审查 N 个文件，未发现问题」**——可这次一个文件都没审。现在分成三种：
+  ① 连改动都没有（`emptyReview`）→「本次没有检测到任何代码改动」；② 有改动但一个都没审到
+  （`nothingReviewable`）→「没有可审的代码改动」+ 列出被排除的文件；③ 真审了文件且问题清单为空 → 才允许
+  说「未发现问题」。①② 都带 `partial=true`，结论里明说「没有做出任何结论」。
+
+Tests
+- `test/smoke.mjs` 291 → **298** 条：E1 三条（拒绝 / delegate 与 scan 不误伤 / 预估不再按 paths 少报规模）、
+  E2 一条（超大 diff 逼出规格截断 + 子 agent 说 clean → `partial=true`、摘要标 `⚠️ 部分结果`、不含
+  「未发现问题」）、M6 三条（空改动 / 全被排除 / 真干净不误伤）。
+- **CI 修复**：`v0.11.0：端口全被占` 这条用例在**离线档**（机器上没装 ocr）必然先报 `OCR_NOT_FOUND`，
+  此前没分档 ⇒ GitHub Actions 六个 job 全 `FAIL Offline test suites`。现在按 `HAS_OCR` 分档断言
+  （离线档断言「失败原因确实是找不到 ocr」——不静默跳过、也不把环境缺 ocr 误判成产品缺陷）。
+
 ## [0.11.2] — 2026-10-13
 
 **盘点「已有的东西到底好不好用」时真机撞出来的两个缺陷：按需评审 skill 注册成功却读不出来；改动全是不可审类型时会说「未发现问题」。**（两条都不是重构，是把声明与实际对齐。）

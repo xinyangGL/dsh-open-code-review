@@ -265,7 +265,9 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 ### 命令 `/ocr-review`
 
-在输入框敲 `/ocr-review`（可在后面跟要求，例如 `/ocr-review 只审 src/ 下的改动`）→ 插件立刻给当前会话注入一段指令，让模型调用 `ocr_review` 并按结果逐条处理（真实缺陷就改，误报说明理由）。
+在输入框敲 `/ocr-review`（可在后面跟要求，例如 `/ocr-review 用 scope=commit 审最近一次提交`）→ 插件立刻给当前会话注入一段指令，让模型调用 `ocr_review` 并按结果逐条处理（真实缺陷就改，误报说明理由）。
+
+> 想在指定的文件/目录里审，要明确用 `scope=scan`（例：`/ocr-review 用 scope=scan 只扫 src/`）。`scope=workspace` **不接受**路径过滤 —— ocr 的根命令是 `ocr review`，它没有 `--path`；v0.12.0 起这种组合会**显式报错**，而不是像以前那样静默忽略你点名的路径（`engine=delegate` 是例外：它真的会用 paths 过滤返回的规格）。
 
 ### 按需评审（v0.5.0 起的默认方式）
 
