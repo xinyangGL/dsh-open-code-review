@@ -3,6 +3,24 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.11.1] — 2026-10-13
+
+**修「高级设置里的模型名不能选」：候选目录不再请求风暴，读不到也不再只有一句「正在读取…」。**
+
+Fixed
+- **模型目录的读取风暴**（`lib/client.js` 的 `useModelCatalog`）：宿主的 `ctx.remote.session` 是**生成的 namespace**
+  —— 每次读 `session.modelCatalog` 都返回一个**新的**包装函数，而旧实现把这个函数放进了 `useEffect` 的依赖数组，
+  于是每次渲染都重取一次目录、取完 `setState` 又触发渲染。真机上就是请求风暴（2026-10-13 实测 console 里
+  `/api/session/modelCatalog` 同一地址连出 30+ 条请求），界面永远停在「正在读取 DSH 模型目录…」、模型名选不动。
+  现在函数与会话对象用 `ref` 接住，依赖只留稳定值（`ctx` / `unsupported` / `unsupportedReason` / `nonce`）。
+- **读不到目录时给得出下一步**：新增 8 秒超时（文案「等待 8 秒没有响应」），并在模型名那一行渲染
+  「重试读取目录」按钮（标记 `data-ocr-model-retry`），点一下立刻重取；这仍然只是候选列表的问题，
+  输入框任何时候都可以直接手输模型名。
+
+Tests
+- `test/client-smoke.mjs` 213 项（v0.11.0 提交时 208）：新增「宿主 namespace 每次读都是新函数」的回归夹具
+  （断言目录读取次数是常数级、反复渲染不再增长）与「读失败 → 出现重试入口 → 点重试恢复候选」的端到端夹具。
+
 ## [0.11.0] — 2026-10-12
 
 **能用得下去的三件事：设置页不再问用户不关心的问题、按钮只在有改动时出现、`ocr` 档把「跑前就能知道的事」补齐。**

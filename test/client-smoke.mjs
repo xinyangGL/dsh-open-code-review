@@ -677,11 +677,65 @@ check("收起后回到基础 4 行", controlRows(render()).length === 4, `n=${co
 /* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
 /* 模型名/提供方在高级区：下面这一串都在看模型行的退化表现，先把高级区展开。 */
 setAdvanced(true);
-fakeCtx.remote.session.modelCatalog = async () => ({ ok: false, error: { code: "peer-unavailable", message: "peer 断了" } });
+/* 目录换了实现不再自动重取（那是旧实现的 bug）：服务回来/换实现都要显式「重试」或重开设置页。 */
+fakeCtx.remote = undefined;
+render();
+fakeCtx.remote = { session: { modelCatalog: async () => ({ ok: false, error: { code: "peer-unavailable", message: "peer 断了" } }) } };
 render();
 await tick();
 const errTree = render();
 check("Remote 信封失败时给出诊断", textOf(errTree).includes("读取 DSH 模型目录失败") && textOf(errTree).includes("peer 断了"), textOf(errTree).slice(-140));
+
+/* 读失败时给一条显式补救路径：旧实现靠"每次渲染都重取"掩盖了这件事，真机上反而刷不出结果。 */
+const errModelRow = controlRows(errTree).find((r) => r.key === "llmModel");
+const errRetry = errModelRow ? hosts(errModelRow.row).find((n) => n.props && n.props["data-ocr-model-retry"] === true) : null;
+check("目录读失败时给出「重试读取目录」入口", Boolean(errRetry), errModelRow ? textOf(errModelRow.row).slice(-90) : "没有该行");
+fakeCtx.remote.session.modelCatalog = fullCatalogResponse;
+if (errRetry) errRetry.props.onClick();
+render(); /* 点完重试要再渲染一次：效果在渲染末尾 flush，之后才是异步取回 */
+await tick();
+const recoveredTree = render();
+check("点「重试」重新读目录并恢复候选", textOf(recoveredTree).includes("4 个模型"), textOf(recoveredTree).slice(-140));
+
+/* 真机回归：宿主 remote namespace 是"生成的"——每次读 `session.modelCatalog` 都拿到一个新函数
+   （`resolveCatalogCall` 因此每次渲染都会返回一个新的 `call`）。旧实现把这个函数放进 useEffect
+   依赖，真机上就是请求风暴：取目录 → setState → 再渲染 → 再取目录，界面永远停在「正在读取…」、
+   模型名选不动（2026-10-13 真机 console 里 30+ 条重复的 /api/session/modelCatalog 就是它）。
+   这里用访问器复刻宿主这个特性，断言读取次数是常数级、且反复渲染不再增长。 */
+let churnFetches = 0;
+const churnRemote = {};
+Object.defineProperty(churnRemote, "session", {
+  configurable: true,
+  get() {
+    return {
+      get modelCatalog() {
+        return async () => {
+          churnFetches += 1;
+          return fullCatalogResponse();
+        };
+      },
+    };
+  },
+});
+const savedRemote = fakeCtx.remote;
+fakeCtx.remote = undefined;
+render(); /* 先回到"没有 remote"：deps 变了，但这一步不该取目录 */
+fakeCtx.remote = churnRemote;
+render(); /* 服务回来：只该取一次 */
+await tick();
+const churnTree = render();
+const churnSettled = churnFetches;
+check("生成的 namespace：目录仍然读得回来", textOf(churnTree).includes("4 个模型"), textOf(churnTree).slice(-140));
+check("生成的 namespace：读取次数是常数级（props.ctx 一次 + 子 fiber 生效一次），不是每次渲染一次", churnSettled >= 1 && churnSettled <= 2, `fetches=${churnSettled}`);
+render();
+render();
+render();
+check(
+  "生成的 namespace：反复渲染不再重取（deps 里只留稳定值）",
+  churnFetches === churnSettled,
+  `fetches=${churnFetches}, settled=${churnSettled}`,
+);
+fakeCtx.remote = savedRemote;
 
 /* 取不到 ctx.remote 时退化成纯文本输入 */
 fakeCtx.remote = undefined;
