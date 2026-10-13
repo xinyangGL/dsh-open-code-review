@@ -828,6 +828,40 @@ checkEither(
   `${rendered.length} 字符`,
 );
 
+/* E3（v0.12.0 批 1）：结论的「可用性行」—— 部分结果 / 完整结果 / 失败三种口径，连同覆盖回执一起渲染。
+   这一行是给模型与用户看的「这份结论能用到什么程度」，不再要求读者自己拼 partial + coverage 两个字段。 */
+const e3Partial = review.valueToText(
+  {
+    ok: true,
+    engine: "delegate",
+    scope: "workspace",
+    exitCode: 0,
+    durationMs: 900,
+    partial: true,
+    partialReasons: ["diff 按 hunk 整片截断"],
+    coverage: { totalFiles: 3, totalHunks: 12, keptHunks: 7, droppedHunks: 5, slices: 2, truncated: true },
+    summary: "规格已生成",
+    reviewSessionId: "sess-1",
+  },
+  {},
+);
+check(
+  "E3：部分结果 → 可用性行说「只能作为部分结论」，并把覆盖回执（收录/丢弃/截断）与 ocr 会话一起渲染",
+  e3Partial.includes("可用性：**只能作为部分结论**") &&
+    e3Partial.includes("收录 7/12 个 hunk") &&
+    e3Partial.includes("丢弃 5 个 hunk") &&
+    e3Partial.includes("diff 被截断") &&
+    e3Partial.includes("ocr 会话：sess-1"),
+  e3Partial.split("\n").find((line) => line.startsWith("可用性：")) ?? "(没有可用性行)",
+);
+const e3Clean = review.valueToText({ ok: true, engine: "ocr", scope: "commit", exitCode: 0, durationMs: 1000, partial: false, summary: "审查 1 个文件，未发现问题" }, {});
+const e3Fail = review.valueToText({ ok: false, engine: "ocr", scope: "workspace", exitCode: 1, durationMs: 300, partial: false, code: "OCR_NOT_FOUND", summary: "找不到 ocr" }, {});
+check(
+  "E3：完整结果说「可作为本次范围的完整结论」；失败说「本次没有成功，没有结论」",
+  e3Clean.includes("可用性：可作为本次范围的完整结论") && e3Fail.includes("可用性：本次没有成功，没有结论"),
+  `${e3Clean.split("\n")[1] ?? ""} || ${e3Fail.split("\n")[1] ?? ""}`,
+);
+
 /* v0.5.0 步骤 3：按需评审（按钮 + skill）的状态必须在 ocr_status 里可见；
    这个实例的宿主没有 skills 服务 → registered=false 且给出原因（真机核验时必须是 true）。 */
 check(
