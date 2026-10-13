@@ -3,6 +3,29 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.11.2] — 2026-10-13
+
+**盘点「已有的东西到底好不好用」时真机撞出来的两个缺陷：按需评审 skill 注册成功却读不出来；改动全是不可审类型时会说「未发现问题」。**（两条都不是重构，是把声明与实际对齐。）
+
+Fixed
+- **按需评审 skill「注册成功、模型一读就红」**：`加载技能 Error: loaded skill "ocr-on-demand-review" source must be a string`。
+  宿主的 `skills.register()` 只补 `invocation` 与 `provider`、**不补 `source`**（`dsh-skill/lib/index.js` 的
+  `register` 与 `validateDefinition` 是两个地方），而加载时还要再跑一遍 `validateDefinition()`
+  （要求 `name/description/source/provider/content` 全是字符串）。于是 `ocr_status` 只看「register 有没有抛错」
+  ⇒ 报 `registered=true`、功能却是坏的：用户说「验证一下 / 评审」时模型拿不到技能正文，只剩命令注入的那段提示词撑着。
+  现在定义里补上 `source: "runtime"`。
+  - 复现（跑着的桌面宿主，1 行）：`skill ocr-on-demand-review` → 上面那条报错。
+  - 修后验证（全新 headless profile，装同一份插件）：同一调用拿到技能正文原样返回，不再报错。
+- **没有可审文件时会说「未发现问题」**：工作区只有一个 `.txt` 改动时，`ocr review` 返回 `reviewable_count=0`
+  + 空 `files` + 空 `issues` + `exit 0`；而 `reviewedFileCount()` 的回落会把 `total_files` 当成「审了几个文件」
+  ⇒ 摘要打出**「审查 1 个文件，未发现问题」**，可这次一个文件都没审。这正是本插件最不该出现的失败方向
+  （与 W3「部分结果不许当未发现问题」同一条规矩）。现在这种情形按**部分结果**处理：`partial=true` +
+  「本次没有可审的代码改动」+ 列出被排除的文件 + 下一步（换 `scope` 或显式给 `paths`）。
+
+Tests
+- `test/smoke.mjs` 新增 2 条守卫：① skill 定义满足宿主加载校验（`source` 必须自己给 —— 注册期查不出来，
+  只有加载期才会炸）；② 没有可审文件时摘要既说清原因、也**不许**出现「未发现问题」。
+
 ## [0.11.1] — 2026-10-13
 
 **修「高级设置里的模型名不能选」：候选目录不再请求风暴，读不到也不再只有一句「正在读取…」。**

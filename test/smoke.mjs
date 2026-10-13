@@ -1474,6 +1474,33 @@ check(
   `${cleanRun.code} | ${cleanRun.summary}`,
 );
 
+/* v0.11.2（真机 2026-10-13 撞到）：改动全是不可审类型时，ocr 给出 reviewable_count=0 + 空 files/issues，
+   而 reviewedFileCount 的回落会把 total_files 当成「审了几个文件」，于是摘要打出「审查 1 个文件，未发现问题」
+   —— 一个文件都没审却说没问题，正好是本插件最不该出现的失败方向。 */
+const noReviewableCase = cannedHarness([
+  {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      total_files: 1,
+      reviewable_count: 0,
+      excluded_files: ["notes.txt"],
+      files: [],
+      issues: [],
+    }),
+  },
+]);
+const noReviewableRun = await noReviewableCase.call({ engine: "ocr" });
+check(
+  "v0.11.2：没有可审文件时不许说「未发现问题」（要报 partial + 说清被排除的文件）",
+  noReviewableRun.ok === true &&
+    noReviewableRun.partial === true &&
+    noReviewableRun.summary.includes("没有可审的代码改动") &&
+    noReviewableRun.summary.includes("notes.txt") &&
+    !noReviewableRun.summary.includes("未发现问题") &&
+    noReviewableRun.notes.some((n) => n.includes("换 scope")),
+  `ok=${noReviewableRun.ok} partial=${noReviewableRun.partial} summary=${noReviewableRun.summary}`,
+);
+
 const issueCase = cannedHarness([
   {
     exitCode: 0,
@@ -3710,6 +3737,21 @@ const preExecute = (listeners) => {
       onDemandStatus.skill?.registered === true &&
       onDemandStatus.skill?.reason === "",
     `registered=${registered.length} name=${def?.name} status=${JSON.stringify(onDemandStatus.skill)}`,
+  );
+
+  /* 宿主的加载校验（dsh-skill/lib/index.js:480-489 validateDefinition）要求 name/description/source/
+     provider/content 全是字符串；而 register() 只补 invocation 与 provider，**不补 source**（同文件
+     :193-215）。缺它时注册成功、ocr_status 报 registered=true，模型一读却是红的：
+     `加载技能 Error: loaded skill "ocr-on-demand-review" source must be a string`（2026-10-13 真机复现）。
+     这里按宿主的校验面钉住插件自己必须给的那几个字段。 */
+  check(
+    "v0.11.2：skill 定义满足宿主加载校验（source 必须自己给——register() 只补 invocation/provider）",
+    def?.source === "runtime" &&
+      typeof def?.name === "string" &&
+      typeof def?.description === "string" &&
+      typeof def?.content === "string" &&
+      def.content.length > 0,
+    `source=${JSON.stringify(def?.source)} name=${typeof def?.name} description=${typeof def?.description} content=${typeof def?.content}`,
   );
 
   const registeredOff = [];

@@ -1,6 +1,6 @@
 {
   "name": "dsh-open-code-review",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "private": true,
   "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、按需评审（回合尾部的「启动代码审核」按钮 —— v0.11.0 起只在检测到本回合有改动时才出现 —— 加运行时 skill，出厂默认不自动评审）、评审先于测试（preTest=remind/gate 把评审接进「跑测试之前」）、三档引擎（v0.10.0 起出厂默认 ocr 流水线：要真调 LLM、按 tokens 计费，但跑前先给一条本次规模的成本预估、可随时停；delegate 不调 LLM、几秒出规格，仍可显式选择；第三档是独立的只读评审子 agent，engine 不再挡它），结果按文件逐条列出「文件:行 [严重程度] 问题」并给每个失败码附「下一步」，每次评审都有实时进度（Jobs 面板 + 会话内进度行 + 30 秒心跳、预计剩余与成本前置提示、可停止）。",
   "keywords": [
