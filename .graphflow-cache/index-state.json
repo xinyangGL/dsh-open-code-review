@@ -1,0 +1,150 @@
+{
+  "version": 2,
+  "state": {
+    "CHANGELOG.md": {
+      "mtimeMs": 1791876464336.6255,
+      "hash": "ba15bcff2d5ca6b6699a912634b4cf78",
+      "numNodes": 92
+    },
+    "config.example.json": {
+      "mtimeMs": 1791626324098.6045,
+      "hash": "6245512c3cb07d9a0c58e127e37051b8",
+      "numNodes": 2
+    },
+    "CONTRIBUTING.md": {
+      "mtimeMs": 1791634942872.5938,
+      "hash": "e09360f5d957a331a62566e2d63e01b8",
+      "numNodes": 14
+    },
+    "package.json": {
+      "mtimeMs": 1791876464306.1023,
+      "hash": "49cdb338e74505faafff8c6bd1f8f683",
+      "numNodes": 2
+    },
+    "README.md": {
+      "mtimeMs": 1791870420215.263,
+      "hash": "82ff3607ee1fbed48a416c39b5239658",
+      "numNodes": 58
+    },
+    "README.zh.md": {
+      "mtimeMs": 1791870420183.4429,
+      "hash": "c6a6f96122f21e8ffa91f7100fb20e90",
+      "numNodes": 99
+    },
+    "RELEASING.md": {
+      "mtimeMs": 1791638250704.0244,
+      "hash": "24c0bf659845e1e25f77c15288d0069f",
+      "numNodes": 16
+    },
+    "screenshots.json": {
+      "mtimeMs": 1791599526785.4224,
+      "hash": "1568cea4fd4eea3fb9788d96884fee86",
+      "numNodes": 2
+    },
+    "SECURITY.md": {
+      "mtimeMs": 1791634952033.5222,
+      "hash": "a89320c44a4aee6ce8954ab4d04d5047",
+      "numNodes": 12
+    },
+    "locale/en.json": {
+      "mtimeMs": 1791536764165.7136,
+      "hash": "95df02b51291d752ba8c37975b1eba67",
+      "numNodes": 2
+    },
+    "locale/zh.json": {
+      "mtimeMs": 1791536759113.29,
+      "hash": "1d0543a8087ac1535f2ac2ef48584e05",
+      "numNodes": 2
+    },
+    "lib/bridge.js": {
+      "mtimeMs": 1791870236289.0454,
+      "hash": "ef2611042207336a593c8c3dceff97c8",
+      "numNodes": 34
+    },
+    "lib/client.js": {
+      "mtimeMs": 1791874256372.4673,
+      "hash": "ed14088ea43a042f42e0496692a886fe",
+      "numNodes": 2
+    },
+    "lib/config.js": {
+      "mtimeMs": 1791870236261.6865,
+      "hash": "4ca0212d0eb37b4e50237231654e5c44",
+      "numNodes": 63
+    },
+    "lib/hooks.js": {
+      "mtimeMs": 1791629824576.7126,
+      "hash": "38d7ee3f8ac0daf2b5bf50b8689b4fb6",
+      "numNodes": 17
+    },
+    "lib/host-contract.js": {
+      "mtimeMs": 1791631956784.9922,
+      "hash": "d5ba3e704bd265ba63c0ed48bee44d4e",
+      "numNodes": 12
+    },
+    "lib/index.js": {
+      "mtimeMs": 1791876242628.938,
+      "hash": "dd99ae9f6b24d477c536a1b3d6a70e66",
+      "numNodes": 105
+    },
+    "lib/job.js": {
+      "mtimeMs": 1791521022045.2515,
+      "hash": "a13beff2931a97fdfd002cd75077bf53",
+      "numNodes": 14
+    },
+    "lib/killswitch.js": {
+      "mtimeMs": 1791631929113.3752,
+      "hash": "a831d757cffef14034a41dd34b645610",
+      "numNodes": 15
+    },
+    "lib/ocr-cli.js": {
+      "mtimeMs": 1791776259447.308,
+      "hash": "1caa007ee6801da346e43a2e886cbc05",
+      "numNodes": 18
+    },
+    "lib/review.js": {
+      "mtimeMs": 1791787637349.5027,
+      "hash": "cd2dbd4a856a71c8c0bfd3fa651f665d",
+      "numNodes": 57
+    },
+    "lib/reviewer.js": {
+      "mtimeMs": 1791524295519.6414,
+      "hash": "be0e931de6e29baade58a91ab0d80970",
+      "numNodes": 26
+    },
+    "docs/host-contract.md": {
+      "mtimeMs": 1791626295834.7048,
+      "hash": "504f7205997e7ea5a69968c1a767bf25",
+      "numNodes": 20
+    },
+    "docs/maturity-assessment-2026-10-10.md": {
+      "mtimeMs": 1791778317533.0024,
+      "hash": "40fab98cfdd95c299d54414d9daee8fa",
+      "numNodes": 36
+    },
+    "docs/pretest-gate-safety-design.md": {
+      "mtimeMs": 1791617696491.062,
+      "hash": "0fdad6f4dbd2803702beadadd23849d8",
+      "numNodes": 53
+    },
+    "docs/review-quality-plan-2026-10-12.md": {
+      "mtimeMs": 1791788725511.8274,
+      "hash": "a703ea575e9bf8c5e5a0cd0ddac06c9f",
+      "numNodes": 37
+    },
+    "docs/ROADMAP.md": {
+      "mtimeMs": 1791876671217.4736,
+      "hash": "15418a0a666318a325e0a09e3b85661c",
+      "numNodes": 16
+    },
+    "docs/usability-plan-2026-10-12.md": {
+      "mtimeMs": 1791792282629.52,
+      "hash": "95458aa008fa99013994ebd3e002664c",
+      "numNodes": 22
+    },
+    ".github/PULL_REQUEST_TEMPLATE.md": {
+      "mtimeMs": 1791634972363.879,
+      "hash": "91246c01d1d669cd27bb7b41c9399fad",
+      "numNodes": 10
+    }
+  }
+}

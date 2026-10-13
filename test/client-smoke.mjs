@@ -1189,9 +1189,22 @@ const renderTail = (rows, props = {}) => {
   return built;
 };
 const tailButton = (tree) => (tree ? hosts(tree).find((n) => n.tag === "button") : undefined);
+/* R3（v0.12.0 批 1）：宿主没有 jobs（hooks 里没有 jobs / 给不出 useJobs）时，按钮**仍然渲染** ——
+   入口不该因为宿主没有进度服务就整块消失。 */
+const noJobsTree = expand(
+  miniReact.createElement(tailReg.component, {
+    sessionId: "s1",
+    cfgCtx: tailInjected.cfgCtx,
+    hooks: {},
+    runReview: tailInjected.runReview,
+    t: (key, fallback) => fallback,
+    changesFeedReady: () => false,
+  }),
+);
 check(
-  "没有 useJobs（宿主没给 jobs 的 hook）时返回 null",
-  expand(miniReact.createElement(tailReg.component, { sessionId: "s1" })) === null,
+  "R3：宿主没有 jobs 时按钮仍然渲染（入口不依赖进度服务）",
+  noJobsTree !== null && textOf(noJobsTree).includes("启动代码审核"),
+  noJobsTree === null ? "返回了 null（入口被藏掉了）" : textOf(noJobsTree).slice(0, 60),
 );
 check(
   "没有 sessionId 时返回 null",

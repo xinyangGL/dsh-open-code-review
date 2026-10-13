@@ -907,6 +907,35 @@ check(
   );
 }
 
+/* R6（v0.12.0 批 1）：覆盖回执只有一份文案 —— 结论的「可用性」行与 job 记录共用 coverageSummary()。 */
+const r6Coverage = { totalFiles: 3, totalHunks: 12, keptHunks: 7, droppedHunks: 5, slices: 2, truncated: true };
+check(
+  "R6：覆盖回执单一来源（coverageSummary 同时喂结论文本与 job 记录；空输入返回空串）",
+  review.coverageSummary(r6Coverage) === "收录 7/12 个 hunk · 2/3 个文件片 · 丢弃 5 个 hunk · diff 被截断" &&
+    review.coverageSummary({}) === "" &&
+    review.coverageSummary(null) === "" &&
+    e3Partial.includes(`覆盖：${review.coverageSummary(r6Coverage)}`),
+  `${review.coverageSummary(r6Coverage)} || 空=${JSON.stringify(review.coverageSummary({}))}`,
+);
+
+/* R3（v0.12.0 批 1）：回合尾部按钮不再要求 jobs —— 入口不该因为宿主没有 jobs 服务整块消失。 */
+{
+  const r3ClientSource = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  check(
+    "R3：回合尾部按钮的依赖里没有 jobs（进度行仍依赖它），按钮只要求 sessionId",
+    !/ctx\.inject\(\["jobs", "configForms"/.test(r3ClientSource) &&
+      /ctx\.inject\(\["configForms", "remote", "remote\.commands"\]/.test(r3ClientSource) &&
+      /ctx\.inject\(\["jobs"\]/.test(r3ClientSource) &&
+      /if \(!props\.sessionId\) return null;/.test(r3ClientSource),
+    [
+      `旧依赖=${/ctx\.inject\(\["jobs", "configForms"/.test(r3ClientSource)}`,
+      `新依赖=${/ctx\.inject\(\["configForms", "remote", "remote\.commands"\]/.test(r3ClientSource)}`,
+      `进度行仍要 jobs=${/ctx\.inject\(\["jobs"\]/.test(r3ClientSource)}`,
+      `按钮守门=${/if \(!props\.sessionId\) return null;/.test(r3ClientSource)}`,
+    ].join(" · "),
+  );
+}
+
 /* v0.5.0 步骤 3：按需评审（按钮 + skill）的状态必须在 ocr_status 里可见；
    这个实例的宿主没有 skills 服务 → registered=false 且给出原因（真机核验时必须是 true）。 */
 check(
