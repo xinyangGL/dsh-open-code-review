@@ -37,14 +37,21 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
 | 可用性 M3 + 风险 R1 | 宿主是否把 `workspace/changes` 与 `uiConversation` 暴露给第三方客户端插件 —— 结论写进 README | 2026-10-26 | usability-plan §4 / §7 R1 |
 | 可用性 M4 + `ocr` 档观感 | 真机长评审里六项体验的实际观感 | 2026-11-02 | usability-plan §4 |
 | v0.11.1 模型候选（原「模型名不能选」） | 刷新页面后能读出候选；读成失败时出现「重试读取目录」而不是永远「正在读取…」；同一地址不再出现 30+ 条重复请求 | 刷新页面即可确认 | 2026-10-13 真机 console；CHANGELOG `0.11.1` |
-| v0.11.1 修复本身（已实测两条中的两条） | ✅ 展开「高级设置」后 `/api/session/modelCatalog` 10 秒内**只发 1 次**（修复前同为一次展开会连出 30+ 条）；✅ 读失败时该行直接写出原因（HTTP 403）并渲染「重试读取目录」。⬜ 仍缺：在一个**有 client API 权限**的会话里看到候选真的列出来 | 用户刷新页面后确认候选 | 2026-10-13 真机（QuarkPC / 127.0.0.1:19387） |
+| v0.11.1 修复本身（已实测两条中的两条） | ✅ 展开「高级设置」后 `/api/session/modelCatalog` 10 秒内**只发 1 次**（修复前同为一次展开会连出 30+ 条）；✅ 读失败时该行直接写出原因（HTTP 403）并渲染「重试读取目录」。⬜ 仍缺：在一个**有 client API 权限**的会话里看到候选真的列出来；而且必须在一个**加载了本版代码**的页面里看 —— 用户当场那个窗口的页面是应用启动（≤ 2026-10-13 13:17:30）时加载的，比修复落盘（`lib/client.js` 13:37:31）早，要整页刷新或重启 DSH 之后才谈得上验收本修复 | 用户刷新页面后确认候选 | 2026-10-13 真机（QuarkPC / 127.0.0.1:19387） |
 
 ## 3. 发行门（`RELEASING.md`，尚未做）
 
 - ⬜ **push → tag `v0.11.1` → GitHub Release → CI 六 job 全绿**（`tmp-ci-watch.mjs <sha>`）。
 - ⬜ **挂新扩展点的版本先在作者 profile 真机跑满 24 小时**：v0.11.0/v0.11.1 挂了新的客户端扩展点
-  （conversation event definition）。当前进程加载本版的时间 = **2026-10-12 15:52** ⇒ 24h 门槛 ≈ **2026-10-13 15:52**；
-  期间还需一次真实评审 + 一次失败路径（例如临时把 `timeoutMinutes` 调到 1）。
+  （conversation event definition）。**2026-10-13 更正**：本文件先前写「当前进程加载本版的时间 = 2026-10-12 15:52」
+  是错的 —— DSH 主机进程（`DeepSeek Harness.exe` PID 59072，本机桥 18800 的占用者）**启动于 2026-10-13 13:17:30**，
+  而本版所有改动都落在那个时刻**之后**：`lib/client.js` 13:37:31、`package.json` 13:39:42、提交 `bd0c9f3` 13:42:45、
+  `lib/index.js` 13:43:49、`lib/config.js` 与 `lib/bridge.js` 13:43:56、`CHANGELOG.md` 13:47:00、提交 `e8eb966` 13:48:04。
+  ⇒ **现在跑着的宿主里没有本版的新代码**，清单里「重启 DSH 后确认 `ocr_status` 报的版本/指纹是本版」这一条还没做到；
+  24h 计时必须以「重启并加载了本版的进程」起算。
+  加载面分两层（实测）：客户端 bundle 按**页面加载**取盘 —— 修复落盘后新开的页面里已经出现 `data-ocr-model-retry`；
+  宿主代码按**进程启动** require —— 桥里的 `llm.effort` 转发必须重启才生效。
+  重启后仍需一次真实评审 + 一次失败路径（例如临时把 `timeoutMinutes` 调到 1）。
   **所以本次只提交、没打标签。**
 - ⬜ 全新 profile 装卸验收：`dsh plugin --profile <tmp> add github:xinyangGL/dsh-open-code-review`，
   核对包内 `version` 与内容（**不含** `config.json`），然后 `remove`。

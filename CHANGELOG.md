@@ -12,7 +12,9 @@ Fixed
   —— 每次读 `session.modelCatalog` 都返回一个**新的**包装函数，而旧实现把这个函数放进了 `useEffect` 的依赖数组，
   于是每次渲染都重取一次目录、取完 `setState` 又触发渲染。真机上就是请求风暴（2026-10-13 实测 console 里
   `/api/session/modelCatalog` 同一地址连出 30+ 条请求），界面永远停在「正在读取 DSH 模型目录…」、模型名选不动。
-  现在函数与会话对象用 `ref` 接住，依赖只留稳定值（`ctx` / `unsupported` / `unsupportedReason` / `nonce`）。
+  现在函数与会话对象用 `ref` 接住，依赖里**一个对象都不留**（`locale` / `unsupported` / `unsupportedReason` /
+  `nonce`，全是原始值）—— 就算宿主每帧换一个 `ctx` 对象，也不会再自激（第一版把 `ctx` 留在依赖里，
+  只挡住了「函数每次都是新的」这一条自激路径，不够干净）。
 - **读不到目录时给得出下一步**：新增 8 秒超时（文案「等待 8 秒没有响应」），并在模型名那一行渲染
   「重试读取目录」按钮（标记 `data-ocr-model-retry`），点一下立刻重取；这仍然只是候选列表的问题，
   输入框任何时候都可以直接手输模型名。
