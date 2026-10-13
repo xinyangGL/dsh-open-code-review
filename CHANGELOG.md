@@ -38,6 +38,8 @@ Fixed
   生效的上限 + 60s 宽限算（默认 61 分钟）；改 `maxTimeoutMinutes` 与改 `llm.bridgePort` 一样要重启才生效。
 - **R5（常量收敛）**：`lib/index.js` 里曾有一处手写的结果码字符串 `OCR_REVIEWER_UNCERTAIN`（写错一个字符只有
   真机才看得见），现在一律走 `REVIEWER_CODES`，并加了一条源码级守卫防止再写回来。
+- **R4（假账的前提被关掉）**：`usage` 是「桥的累计 usage 前后差」，并发时会把他人的请求算进本轮 —— 这条机制洞
+  被 T1 的单飞闸关掉（同一实例同时只跑一次评审），并把这条不变式写进代码：**放开并发就必须改成 per-run 记账**。
 
 Tests
 - `test/smoke.mjs` 291 → **304** 条：E1 三条（拒绝 / delegate 与 scan 不误伤 / 预估不再按 paths 少报规模）、
