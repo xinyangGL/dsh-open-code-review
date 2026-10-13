@@ -15,6 +15,7 @@
 | v0.10.0 | 默认档回到 `ocr`（`autoEngine` 出厂留空 = 跟随 `engine`）；覆盖回执 + `partial`/`partialReasons`/`coverage` 进工具 schema（partial 时禁止「未发现问题」）；跑前成本预估；修两处 v0.8.0 连带回归（`plan.engine !== "delegate"` 让第三档不可达 + 显式 `reviewer:true` 被静默吞掉） | commit `cfc31eb`；`CHANGELOG.md`；[review-quality-plan-2026-10-12.md](review-quality-plan-2026-10-12.md) §7 |
 | v0.11.0 | 设置页三分法（首屏 4 项 / 高级 3 组 / 只读诊断区列 15 个被移出的键）；按钮只在「本回合有改动」时出现（fail-open）；本机桥固定端口 `llm.bridgePort`（默认 18800）；dsh 路由不再静默回落 `endpoint`（`OCR_LLM_MISSING` + `nextStep`）；路由顺序加入「当前会话正在用的模型」；`ocr` 档体验六项 | commit `cfc31eb`；[usability-plan-2026-10-12.md](usability-plan-2026-10-12.md) §7 |
 | v0.11.1 | 修「高级设置里的模型名不能选」：模型目录读取风暴（生成的 namespace 每读一次就是新函数，却进了 `useEffect` 依赖）＋8 秒超时与「重试读取目录」按钮；新增模型思考强度 `llm.effort`（仅文件层，转发为 DSH `GenerateOptions.reasoningEffort`） | commit `bd0c9f3` + `a35480b`；`CHANGELOG.md` |
+| v0.11.2 | 盘点真机撞出的两个缺陷：按需评审 skill 的 `source`（**注册成功 ≠ 能加载**，`ocr_status` 那时报 `registered=true` 是假绿）＋「没有可审文件」不再说成「未发现问题」 | commit `2050561`；`CHANGELOG.md` 0.11.2；本文 §6 |
 
 **测试口径**（提交时实测，`npm test` `EXIT=0`）：smoke **286** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
@@ -38,7 +39,6 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
 | 可用性 M4 + `ocr` 档观感 | 真机长评审里六项体验的实际观感 | 2026-11-02 | usability-plan §4 |
 | v0.11.1 模型候选：读取 | 刷新页面后能读出候选；读成失败时出现「重试读取目录」而不是永远「正在读取…」；同一地址不再出现 30+ 条重复请求 | 刷新页面即可确认 | 2026-10-13 真机 console；CHANGELOG `0.11.1` |
 | v0.11.1 模型候选：下拉能看见 | ✅ **2026-10-13 用 bsk 在真机页面上量化确认**：修前菜单 rect `[556, 854, 800, 231]`（设置面板 `[556, 50, 800, 800]` + `overflow:hidden`）⇒ 菜单在屏幕外被裁掉；修后 `[981, 583, 335, 231]` ⇒ 在输入框正下方、面板内，截图可见 4 条候选，点一条写回 `deepseek-flash`。⬜ 仍缺：用户在自己那台桌面 GUI 里刷新一次页面后看到候选（用户的窗口需要整页刷新，见 §3 的两层加载面） | 真机几何 + 截图（`C:\Users\吴礼凯\AppData\Local\Temp\ocr-ui-menu-opaque.png`） | 2026-10-13 bsk 复核；CHANGELOG `0.11.1` |
-
 | v0.11.2 skill 可加载 | 重启桌面 DSH 后 `skill ocr-on-demand-review` 返回技能正文（不再是 `source must be a string`）；「没有可审文件」的情形在界面上显示为部分结果而不是「未发现问题」 | 重启后即可确认 | 2026-10-13 headless 已验证；桌面进程仍跑旧代码 |
 | v0.11.2 没有可审文件不说「未发现问题」 | ✅ **2026-10-13 已用 `test/smoke.mjs` 的守卫钉住**（`partial=true` + 「本次没有可审的代码改动」+ 不许出现「未发现问题」） | 已完成 | CHANGELOG `0.11.2` |
 
