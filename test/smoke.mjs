@@ -3602,6 +3602,15 @@ const preExecute = (listeners) => {
     } rounds=${norm.reviewer.rounds} 同一引用=${norm.llm === llmInput}`,
   );
 
+  const effortTrim = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, llm: { ...cfgMod.DEFAULTS.llm, effort: "  HIGH  " } }).llm.effort;
+  const effortBogus = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, llm: { ...cfgMod.DEFAULTS.llm, effort: 42 } }).llm.effort;
+  const effortLong = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, llm: { ...cfgMod.DEFAULTS.llm, effort: "x".repeat(80) } }).llm.effort;
+  check(
+    "v0.11.1：llm.effort 只 trim + 截断 64（不做白名单：合法 id 由模型自己声明，非法值交给 DSH 拒绝）",
+    cfgMod.DEFAULTS.llm.effort === "" && effortTrim === "HIGH" && effortBogus === "" && effortLong.length === 64,
+    `默认=${JSON.stringify(cfgMod.DEFAULTS.llm.effort)} trim=${JSON.stringify(effortTrim)} 数字=${JSON.stringify(effortBogus)} 长度=${effortLong.length}`,
+  );
+
   const llmBefore = JSON.stringify(cfgMod.DEFAULTS.llm);
   const reviewerBefore = JSON.stringify(cfgMod.DEFAULTS.reviewer);
   const shallow = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS }); // 浅拷贝 DEFAULTS：嵌套块与 DEFAULTS 同一个引用

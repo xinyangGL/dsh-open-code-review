@@ -17,7 +17,17 @@ Fixed
   「重试读取目录」按钮（标记 `data-ocr-model-retry`），点一下立刻重取；这仍然只是候选列表的问题，
   输入框任何时候都可以直接手输模型名。
 
+Added
+- **模型思考强度 `llm.effort`**（**不进设置页**，写 `config.json` 改；默认空 = 不指定）：本机桥在转发时把它当
+  DSH `GenerateOptions.reasoningEffort` 交给宿主，所以「思考强度」和模型、provider、配额一样留在 DSH 里面。
+  合法值由**每个模型自己声明**（模型目录里的 `reasoning.efforts`），所以插件**不做白名单、也不夹取**：填了
+  不支持的值由 DSH 在真正调用上游之前拒绝、错误原样报出来（静默降级会让人以为换了档位其实没换）。
+  改完不用重启（桥每次请求现读配置）。与 `ocr_review({ effort })` 不是一回事：那个是 OCR 自己的**评审力度**。
+
 Tests
+- `test/bridge-smoke.mjs` 104 项（v0.11.0 提交时 103）：新增 `llm.effort` 转发夹具 —— 第一次请求带
+  `reasoningEffort: "high"`，把配置改成空之后**下一次请求不再写这个键**（证明改配置即时生效、且不塞空串）。
+- `test/smoke.mjs` 287 项（v0.11.0 提交时 286）：新增 `llm.effort` 归一化断言（trim、截断 64、非字符串回默认空）。
 - `test/client-smoke.mjs` 213 项（v0.11.0 提交时 208）：新增「宿主 namespace 每次读都是新函数」的回归夹具
   （断言目录读取次数是常数级、反复渲染不再增长）与「读失败 → 出现重试入口 → 点重试恢复候选」的端到端夹具。
 

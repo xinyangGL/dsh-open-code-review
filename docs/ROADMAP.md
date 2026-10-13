@@ -14,10 +14,13 @@
 | v0.9.0 | 按入口记账：`tool` / `command` / `button` / `auto` 四个桶，每桶 `started/ok/failed/lastAt/lastCode` | commit `4615cb9` |
 | v0.10.0 | 默认档回到 `ocr`（`autoEngine` 出厂留空 = 跟随 `engine`）；覆盖回执 + `partial`/`partialReasons`/`coverage` 进工具 schema（partial 时禁止「未发现问题」）；跑前成本预估；修两处 v0.8.0 连带回归（`plan.engine !== "delegate"` 让第三档不可达 + 显式 `reviewer:true` 被静默吞掉） | commit `cfc31eb`；`CHANGELOG.md`；[review-quality-plan-2026-10-12.md](review-quality-plan-2026-10-12.md) §7 |
 | v0.11.0 | 设置页三分法（首屏 4 项 / 高级 3 组 / 只读诊断区列 15 个被移出的键）；按钮只在「本回合有改动」时出现（fail-open）；本机桥固定端口 `llm.bridgePort`（默认 18800）；dsh 路由不再静默回落 `endpoint`（`OCR_LLM_MISSING` + `nextStep`）；路由顺序加入「当前会话正在用的模型」；`ocr` 档体验六项 | commit `cfc31eb`；[usability-plan-2026-10-12.md](usability-plan-2026-10-12.md) §7 |
-| v0.11.1 | 设置页「模型名」不再请求风暴：`useModelCatalog` 不再把宿主生成的 `session.modelCatalog`（每次读都是**新函数**）放进 effect deps；加 8 秒超时与「重试读取目录」 | 工作区改动 + `CHANGELOG.md` `0.11.1` |
+| v0.11.1 | 修「高级设置里的模型名不能选」：模型目录读取风暴（生成的 namespace 每读一次就是新函数，却进了 `useEffect` 依赖）＋8 秒超时与「重试读取目录」按钮；新增模型思考强度 `llm.effort`（仅文件层，转发为 DSH `GenerateOptions.reasoningEffort`） | commit `bd0c9f3` + `a35480b`；`CHANGELOG.md` |
 
 **测试口径**（提交时实测，`npm test` `EXIT=0`）：smoke **286** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
+
+**v0.11.1 实测**（commit `a35480b`，`npm test` `EXIT=0`）：smoke **287** / killswitch 44 / host-contract 37 /
+job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部通过。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
 `RELEASING.md` 的「一个 tag 只带一个高风险改动」在这条线上已经被破坏过一次；要不要拆（重写历史）由作者决定。
@@ -38,8 +41,8 @@ reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
 
 ## 3. 发行门（`RELEASING.md`，尚未做）
 
-- ⬜ **push → tag `v0.11.0` → GitHub Release → CI 六 job 全绿**（`tmp-ci-watch.mjs <sha>`）。
-- ⬜ **挂新扩展点的版本先在作者 profile 真机跑满 24 小时**：v0.11.0 挂了新的客户端扩展点
+- ⬜ **push → tag `v0.11.1` → GitHub Release → CI 六 job 全绿**（`tmp-ci-watch.mjs <sha>`）。
+- ⬜ **挂新扩展点的版本先在作者 profile 真机跑满 24 小时**：v0.11.0/v0.11.1 挂了新的客户端扩展点
   （conversation event definition）。当前进程加载本版的时间 = **2026-10-12 15:52** ⇒ 24h 门槛 ≈ **2026-10-13 15:52**；
   期间还需一次真实评审 + 一次失败路径（例如临时把 `timeoutMinutes` 调到 1）。
   **所以本次只提交、没打标签。**
@@ -72,9 +75,11 @@ reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
 - **协作式代码评审**：不要「把东西堆给模型」，而是协作式地评（同批）。
 - **展示效果对齐 Cursor / Trae 的 review 展示**（同批）。
 - （原「模型选择控件不能选了」缺陷已定位并修复，移入 §2 待验收；根因与证据见 §6 的 2026-10-13 条。）
-- **模型思考强度（reasoningEffort）配置**（同 m02522）：技术上可行（桥把请求转给 `ctx.llm.stream`，
-  宿主链路里确实有 `reasoningEffort`），但要先确认 `GenerateOptions` 是否接受该字段；
-  另需澄清：ocr 自己的 `--effort` 是**评审力度**，与模型思考强度不是一回事。
+- ~~**模型思考强度（reasoningEffort）配置**~~ → **已实现（v0.11.1，commit `a35480b`）**：`llm.effort`（仅文件层，
+  不进设置页）经本机桥转发为 DSH `GenerateOptions.reasoningEffort`；宿主契约已核实
+  （`reasoningEffort?: ReasoningEffortId`，且**不支持的值由 DSH 在调用上游之前拒绝**，所以插件不做白名单也不夹取）。
+  仍缺的一半：真机跑一次 `ocr` 档，确认它真的改变了思考行为。另澄清：ocr 自己的 `--effort` 是**评审力度**
+  （low/medium/high），与模型思考强度不是一回事。
 
 ## 6. 变更记录
 
@@ -97,3 +102,10 @@ reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
   - 测试口径更正（同日上午的一次误判）：`npm test` 用「管道 + `Select-Object -Last 40`」跑时 `EXIT=1`，
     换成完整落盘再读，八套各自打印「全部通过」，**整体 `npm exit=0`**
     （286 / 44 / 37 / 51 / 45 / 103 / 213 / cordis-inject）。前面那句「整体 EXIT=1」作废。
+  - 新增**模型思考强度** `llm.effort`（仅文件层、不进设置页）：`lib/config.js`（`DEFAULT_LLM_EFFORT = ""`、
+    归一化只 trim + 截断 64、**不做白名单**）、`lib/index.js`（`startLlmBridge({ effort: () => cfgNow()?.llm?.effort })`）、
+    `lib/bridge.js`（有值才写 `dshOptions.reasoningEffort`，留空不写这个键）。宿主契约由子 agent 从 DSH 源码核实：
+    `GenerateOptions.reasoningEffort?: ReasoningEffortId`，且「Unsupported explicit efforts reject before provider
+    I/O; no clamping or aliasing is performed」——所以插件不猜枚举、也不夹取。测试：`test/bridge-smoke.mjs` 新增
+    一条（转发 + 改配置后下一次请求不带该键）、`test/smoke.mjs` 新增一条（trim / 截断 / 非字符串回默认空）；
+    `npm test` `EXIT=0`（smoke 287 / bridge 104 / client-smoke 213）。

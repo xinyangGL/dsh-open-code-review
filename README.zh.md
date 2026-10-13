@@ -181,6 +181,7 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 | `reviewer.persona` | `""` | 仅文件层 | 评审人格/纪律（留空=插件内置 `DEFAULT_REVIEWER_PERSONA`）；schema 里有、设置页没有这一行 |
 | `includeDiffMaxBytes` | `120000` | 仅文件层 | 单次带出的 diff 上限（字符） |
 | `llm.bridgePort` | `18800` | 仅文件层（**v0.11.0 新增**） | 本机桥的首选监听端口：固定下来后重启地址不变；被占用时自动顺延（最多试 10 个），实际端口见 `ocr_status.bridge.requestedPort` / `portShifted`。**故意不做成设置页控件**（默认不用改） |
+| `llm.effort` | `""` | 仅文件层（**v0.11.1 新增**） | 模型思考强度：本机桥转发时把它当 DSH `GenerateOptions.reasoningEffort` 交给「当前会话正在用的模型」；留空 = 不指定（跟随 DSH / 模型自己声明的默认档）。合法值由**模型自己声明**（模型目录里的 `reasoning.efforts`），所以插件不校验：写错由 DSH 在调用上游之前拒绝并原样报错（不静默降级）。每次请求现读，改完不用重启。**与 `ocr_review({ effort })` 不是一回事**：那个是 OCR 的评审力度（low/medium/high） |
 | `maxIssuesInText` | `40` | 仅文件层 | 文本渲染最多列多少条问题（完整数据仍在 `issues`/`rawJson`） |
 | `progress` | `true` | 文件层（诊断区只读） | 评审进度：每次评审登记成宿主后台任务（kind `ocr-review`），Jobs 面板与会话内各有一条实时进度；关掉后评审照跑，只是不可见（见「评审进度」） |
 | `verbose` | `false` | 文件层（诊断区只读） | 打印调试日志（本机桥的日志也走它） |

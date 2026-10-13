@@ -694,6 +694,32 @@ check("桥：DSH 侧没配 provider/model → 500 且提示去设置里选", unr
 
 const streamBridge = await startLlmBridge({ stream: happy.stream, target: () => ({ provider: "p", model: "m" }), logger });
 const streamed = await post(streamBridge.url, streamBridge.token, { model: "m", stream: true, messages: [{ role: "user", content: "u" }] });
+
+/* v0.11.1：思考强度（llm.effort）—— ocr 不会在请求体里带它，桥从插件配置实时取，
+   作为 GenerateOptions.reasoningEffort 转发；留空时**不写这个键**（不塞空串，交给 DSH 决定）。 */
+{
+  let currentEffort = "high";
+  const effortSeen = [];
+  const effortBridge = await startLlmBridge({
+    stream: async function* stream(options) {
+      effortSeen.push({ value: options.reasoningEffort, has: Object.prototype.hasOwnProperty.call(options, "reasoningEffort") });
+      yield { type: "text-delta", index: 0, text: "ok" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+    target: () => ({ provider: "p", model: "m" }),
+    effort: () => currentEffort,
+    logger,
+  });
+  await post(effortBridge.url, effortBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+  currentEffort = ""; // 改配置 → 下一次请求就不带这个键（不需要重启桥）
+  await post(effortBridge.url, effortBridge.token, { model: "m", messages: [{ role: "user", content: "u" }] });
+  check(
+    "v0.11.1：llm.effort 作为 reasoningEffort 转发；留空时不写这个键（改配置下一次评审就生效）",
+    effortSeen.length === 2 && effortSeen[0].has === true && effortSeen[0].value === "high" && effortSeen[1].has === false,
+    JSON.stringify(effortSeen),
+  );
+  await effortBridge.close();
+}
 check(
   "桥：stream:true 走 SSE（data: 帧 + [DONE]）",
   streamed.status === 200 && streamed.contentType.includes("text/event-stream") && streamed.raw.includes("\"content\":\"pong\"") && streamed.raw.trimEnd().endsWith("[DONE]"),
