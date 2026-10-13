@@ -37,7 +37,7 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
 | 可用性 M3 + 风险 R1 | 宿主是否把 `workspace/changes` 与 `uiConversation` 暴露给第三方客户端插件 —— 结论写进 README | 2026-10-26 | usability-plan §4 / §7 R1 |
 | 可用性 M4 + `ocr` 档观感 | 真机长评审里六项体验的实际观感 | 2026-11-02 | usability-plan §4 |
 | v0.11.1 模型候选（原「模型名不能选」） | 刷新页面后能读出候选；读成失败时出现「重试读取目录」而不是永远「正在读取…」；同一地址不再出现 30+ 条重复请求 | 刷新页面即可确认 | 2026-10-13 真机 console；CHANGELOG `0.11.1` |
-| v0.11.1 修复本身（已实测两条中的两条） | ✅ 展开「高级设置」后 `/api/session/modelCatalog` 10 秒内**只发 1 次**（修复前同为一次展开会连出 30+ 条）；✅ 读失败时该行直接写出原因（HTTP 403）并渲染「重试读取目录」。⬜ 仍缺：在一个**有 client API 权限**的会话里看到候选真的列出来；而且必须在一个**加载了本版代码**的页面里看 —— 用户当场那个窗口的页面是应用启动（≤ 2026-10-13 13:17:30）时加载的，比修复落盘（`lib/client.js` 13:37:31）早，要整页刷新或重启 DSH 之后才谈得上验收本修复 | 用户刷新页面后确认候选 | 2026-10-13 真机（QuarkPC / 127.0.0.1:19387） |
+| v0.11.1 修复本身（两条已实测 + 2026-10-13 14:10:34 已重启） | ✅ 展开「高级设置」后 `/api/session/modelCatalog` 10 秒内**只发 1 次**（修复前同为一次展开会连出 30+ 条）；✅ 读失败时该行直接写出原因（HTTP 403）并渲染「重试读取目录」。⬜ 仍缺：在一个**有 client API 权限**的会话里看到候选真的列出来；而且必须在一个**加载了本版代码**的页面里看 —— 用户当场那个窗口的页面是应用启动（≤ 2026-10-13 13:17:30）时加载的，比修复落盘（`lib/client.js` 13:37:31）早，要整页刷新或重启 DSH 之后才谈得上验收本修复。**2026-10-13 14:10:34 用户已重启 DSH**（新宿主 PID 17088，晚于最后一次提交 `d56c87c` 14:01:27）⇒ 页面现在应当加载到本版代码；这一条仍只能由用户在**正常会话**里看 —— 我的浏览器标签页没有 `dsh web` 的 token，所有 `/api/*` 一律 401/403 | 用户刷新页面后确认候选 | 2026-10-13 真机（QuarkPC / 127.0.0.1:19387） |
 
 ## 3. 发行门（`RELEASING.md`，尚未做）
 
@@ -47,11 +47,19 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
   是错的 —— DSH 主机进程（`DeepSeek Harness.exe` PID 59072，本机桥 18800 的占用者）**启动于 2026-10-13 13:17:30**，
   而本版所有改动都落在那个时刻**之后**：`lib/client.js` 13:37:31、`package.json` 13:39:42、提交 `bd0c9f3` 13:42:45、
   `lib/index.js` 13:43:49、`lib/config.js` 与 `lib/bridge.js` 13:43:56、`CHANGELOG.md` 13:47:00、提交 `e8eb966` 13:48:04。
-  ⇒ **现在跑着的宿主里没有本版的新代码**，清单里「重启 DSH 后确认 `ocr_status` 报的版本/指纹是本版」这一条还没做到；
-  24h 计时必须以「重启并加载了本版的进程」起算。
+  ⇒ 那个进程里没有本版的新代码，清单里「重启 DSH 后确认 `ocr_status` 报的版本/指纹是本版」当时还没做到。
   加载面分两层（实测）：客户端 bundle 按**页面加载**取盘 —— 修复落盘后新开的页面里已经出现 `data-ocr-model-retry`；
   宿主代码按**进程启动** require —— 桥里的 `llm.effort` 转发必须重启才生效。
-  重启后仍需一次真实评审 + 一次失败路径（例如临时把 `timeoutMinutes` 调到 1）。
+
+  **2026-10-13 14:10:34 用户已重启 DSH**（新宿主 `DeepSeek Harness.exe` PID 17088，19387 与 18800 都归它，
+  晚于最后一次提交 `d56c87c` 的 14:01:27）⇒ 指纹这一条达成：`ocr_status` 报本机桥 `127.0.0.1:18800`、
+  路由「来自当前会话」（ark-coding-plan / deepseek-v4.1-flash）、事件钩子各 ×1（没有重启前那种累积）、
+  宿主能力 13 项、LLM 连通性与 tool-call 往返 OK。同日补上另外两项：
+  **一次真实评审**（`engine=ocr`、`scope=commit d56c87c` → exit=0、188.3s、1 个可审文件、2 条发现、
+  ocr 会话 `061f0c54-9e11-4291-9825-8eed5a692856`）与**一次失败路径**（坏 commit + `engine=delegate`
+  → exit=1、0.3s、`OCR_DELEGATE_PREVIEW_FAILED` + 下一步）。
+  ⇒ **24h 计时以 2026-10-13 14:10:34 起算，门槛 = 2026-10-14 14:10:34**；用户在 15:52 前选择了
+  「重启 → 我做完真机验收 → 从重启起算满 24h 再打 tag」这条路。
   **所以本次只提交、没打标签。**
 - ⬜ 全新 profile 装卸验收：`dsh plugin --profile <tmp> add github:xinyangGL/dsh-open-code-review`，
   核对包内 `version` 与内容（**不含** `config.json`），然后 `remove`。
@@ -116,3 +124,17 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
     I/O; no clamping or aliasing is performed」——所以插件不猜枚举、也不夹取。测试：`test/bridge-smoke.mjs` 新增
     一条（转发 + 改配置后下一次请求不带该键）、`test/smoke.mjs` 新增一条（trim / 截断 / 非字符串回默认空）；
     `npm test` `EXIT=0`（smoke 287 / bridge 104 / client-smoke 213）。
+  - **DSH 已重启并完成三项真机验收**（14:10:34 新宿主 PID 17088）：① 指纹 —— 见 §3；② 真实评审 —— `engine=ocr`、
+    `scope=commit d56c87c` → exit=0、188.3s（落在 README 口径 176~600s 内）、1 个可审文件、2 条发现、
+    ocr 会话 `061f0c54-9e11-4291-9825-8eed5a692856`；③ 失败路径 —— 坏 commit + `engine=delegate` → exit=1、0.3s、
+    `OCR_DELEGATE_PREVIEW_FAILED` + 下一步。⇒ 24h 门槛 = **2026-10-14 14:10:34**。
+  - **⚠️ 自审揪出我自己的一个错误（留档）**：上面那次真实评审在 `lib/client.js` 上报了 2 条问题，第一条直接指出
+    **提交 `d56c87c` 与 `CHANGELOG` 里说的「依赖从 `[ctx,…]` 改成 `[locale,…]`、一个对象都不留」是不实的** ——
+    核对 `git show d56c87c` 后确认：那个提交只把 `makeT(localeOf(ctx))` 拆成两行，`deps` **从未改动**，至今是
+    `[ctx, unsupported, unsupportedReason, nonce]`。第二条（medium）说 `localeOf(ctx)` 返回的是 locale **服务对象**、
+    不是原始值 —— 也正确。结论：`deps` **本来就该保留 `ctx`**（子 fiber 迟到激活时靠它把目录从兜底读取口换成官方
+    读法，`test/client-smoke.mjs` 的「服务迟到」场景钉住这条；去掉 `ctx`、或换成 `locale`，那条断言都会变红），
+    所以正确的动作不是「把 `ctx` 换掉」，而是**把写错的话更正**：`lib/client.js` 的注释改成三条约束
+    （`resolved.call` 绝不进 deps ／ `ctx` 必须留 ／ `locale` 不能顶替 `ctx`）、`CHANGELOG.md` 0.11.1 段写明更正、
+    `test/client-smoke.mjs` 的「服务迟到」场景加警示注释。教训与 2026-10-12 那次同源：
+    **提交信息与变更记录里不能写代码里没有的改动。**
