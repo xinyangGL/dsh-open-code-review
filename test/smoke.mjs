@@ -862,6 +862,51 @@ check(
   `${e3Clean.split("\n")[1] ?? ""} || ${e3Fail.split("\n")[1] ?? ""}`,
 );
 
+/* T1（v0.12.0 批 1）：单飞闸 —— 同一个插件实例同时只跑一次评审。
+   runReview 是**同步**取闸的，所以「先发起、不 await，紧接着再发一次」能稳定命中第二次。 */
+const t1First = tools.get("ocr_review").execute({ preview: true }, exec);
+const t1Second = await tools.get("ocr_review").execute({ preview: true }, exec);
+const t1FirstResult = await t1First;
+checkEither(
+  "T1：并发第二次调用 → OCR_ALREADY_RUNNING（说清谁在跑、跑了多久），不再两条流水线并跑",
+  t1FirstResult.ok === true &&
+    t1Second.ok === false &&
+    t1Second.code === "OCR_ALREADY_RUNNING" &&
+    t1Second.summary.includes("已经有一次评审在跑") &&
+    t1Second.nextStep.length > 0 &&
+    t1Second.engine === "",
+  t1FirstResult.ok === false && t1FirstResult.code === "OCR_NOT_FOUND" && t1Second.code === "OCR_ALREADY_RUNNING",
+  `${t1Second.code} | ${t1Second.summary}`,
+);
+const t1Third = await tools.get("ocr_review").execute({ preview: true }, exec);
+checkEither(
+  "T1：闸门在 finally 里释放 —— 上一次跑完之后，下一次调用照常执行",
+  t1Third.ok === true,
+  t1Third.code === "OCR_NOT_FOUND",
+  `第三次=${t1Third.code || "ok"}`,
+);
+
+/* T2（v0.12.0 批 1）：宿主侧兜底超时不能比插件自己的上限紧
+   （旧值固定 30 分钟，与 maxTimeoutMinutes 默认 60 分钟不对齐）。 */
+const t2Timeout = tools.get("ocr_review").timeoutMs;
+check(
+  "T2：ocr_review 的宿主侧兜底超时 > 30 分钟（按启动时生效的 maxTimeoutMinutes + 60s 宽限算）",
+  typeof t2Timeout === "number" && t2Timeout >= 31 * 60 * 1000,
+  `${t2Timeout} ms ≈ ${Math.round(Number(t2Timeout) / 60000)} 分钟`,
+);
+
+/* R5（v0.12.0 批 1）：结果码一律走常量表，别在正文里手写字符串
+   （写错一个字符只有真机才看得见：v0.12.0 之前这里真有一处 OCR_REVIEWER_UNCERTAIN 字面量）。 */
+{
+  const r5IndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+  const r5Literals = r5IndexSource.match(/"(?:OCR_REVIEWER_|OCR_ALREADY_)[A-Z_]+"/g) ?? [];
+  check(
+    "R5：lib/index.js 里没有手写的结果码字符串（一律走 CODES / REVIEWER_CODES 常量）",
+    r5Literals.length === 0,
+    r5Literals.length === 0 ? "没有手写字面量" : `发现 ${r5Literals.join("、")}`,
+  );
+}
+
 /* v0.5.0 步骤 3：按需评审（按钮 + skill）的状态必须在 ocr_status 里可见；
    这个实例的宿主没有 skills 服务 → registered=false 且给出原因（真机核验时必须是 true）。 */
 check(
@@ -1399,8 +1444,11 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
 
 const codeKeys = Object.keys(review.CODES ?? {});
 check(
-  "结果码表：15 个稳定码齐全、都是 OCR_ 前缀、互不重复",
-  codeKeys.length === 15 && new Set(Object.values(review.CODES)).size === 15 && codeKeys.every((key) => String(review.CODES[key]).startsWith("OCR_")),
+  "结果码表：16 个稳定码齐全（T1 加了 OCR_ALREADY_RUNNING）、都是 OCR_ 前缀、互不重复",
+  codeKeys.length === 16 &&
+    new Set(Object.values(review.CODES)).size === 16 &&
+    codeKeys.includes("ALREADY_RUNNING") &&
+    codeKeys.every((key) => String(review.CODES[key]).startsWith("OCR_")),
   codeKeys.join(","),
 );
 

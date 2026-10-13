@@ -30,11 +30,21 @@ Fixed
   「未发现问题」` / `本次没有成功，没有结论`，后面接覆盖回执（`收录 7/12 个 hunk · 2/3 个文件片 · 丢弃 5 个
   hunk · diff 被截断`）与 `ocr 会话：…`。工具 schema 里 `partial` / `coverage` 的说明也指向这一行。
 
+- **T1（没有互斥）**：同一插件实例能同时跑多条评审流水线 —— 自动评审与手动点击撞在一起时，两条流水线抢同一份
+  配额、结论互相覆盖。现在加了**单飞闸**：第二次调用立刻拿到 `OCR_ALREADY_RUNNING`（带上「谁在跑、跑了多久」）
+  与下一步；闸门在 `finally` 里释放，跑完照常能再调。
+- **T2（超时不对齐）**：`ocr_review` 的宿主侧兜底超时曾固定 30 分钟，而 `maxTimeoutMinutes` 默认 60 分钟 ⇒ 用户
+  把上限调大后，先掐断的是宿主，拿到的是宿主级中断，而不是带 `nextStep` 的 `OCR_TIMEOUT` 结果。现在按启动时
+  生效的上限 + 60s 宽限算（默认 61 分钟）；改 `maxTimeoutMinutes` 与改 `llm.bridgePort` 一样要重启才生效。
+- **R5（常量收敛）**：`lib/index.js` 里曾有一处手写的结果码字符串 `OCR_REVIEWER_UNCERTAIN`（写错一个字符只有
+  真机才看得见），现在一律走 `REVIEWER_CODES`，并加了一条源码级守卫防止再写回来。
+
 Tests
-- `test/smoke.mjs` 291 → **300** 条：E1 三条（拒绝 / delegate 与 scan 不误伤 / 预估不再按 paths 少报规模）、
+- `test/smoke.mjs` 291 → **304** 条：E1 三条（拒绝 / delegate 与 scan 不误伤 / 预估不再按 paths 少报规模）、
   E2 一条（超大 diff 逼出规格截断 + 子 agent 说 clean → `partial=true`、摘要标 `⚠️ 部分结果`、不含
   「未发现问题」）、M6 三条（空改动 / 全被排除 / 真干净不误伤）、E3 两条（部分结果的可用性行 + 覆盖回执，
-  以及完整/失败两种口径）。
+  以及完整/失败两种口径）、T1 两条（并发第二次 → `OCR_ALREADY_RUNNING`；闸门在跑完后释放）、T2 一条
+  （宿主侧兜底超时 > 30 分钟）、R5 一条（`lib/index.js` 里没有手写结果码）；结果码表 15 → 16。
 - **CI 修复**：`v0.11.0：端口全被占` 这条用例在**离线档**（机器上没装 ocr）必然先报 `OCR_NOT_FOUND`，
   此前没分档 ⇒ GitHub Actions 六个 job 全 `FAIL Offline test suites`。现在按 `HAS_OCR` 分档断言
   （离线档断言「失败原因确实是找不到 ocr」——不静默跳过、也不把环境缺 ocr 误判成产品缺陷）。
