@@ -17,8 +17,20 @@ Fixed
   default model`、`empty = follow the current conversation`、`spawn`、`https://api.commandcode.ai/provider/v1`、
   `COMMANDCODE_API_KEY`）。
 
+**同日后来补上第二条同源缺陷（这条是「真机边界」走出来的）**：`engine=delegate` 撞上「规格里没有可审文件」时，
+返回的是**「成功（exit=0）」**—— 一个文件都没审，却很容易被读成「评审通过、没问题」。这与 v0.12.0 修的 M6（ocr
+档）与 E2（评审 agent 档）是同一个失败方向，只是发生在 delegate 档。
+
+- **`lib/index.js`（delegate 档）**：`targetFiles` 为空（既没点名 `paths`，`ocr delegate preview` 又给了空清单）
+  且不是 `preview: true` 时，走 `partial` 通道并写清原因（三种口径：「本次没有检测到任何代码改动（工作区是干净的）」／
+  「改动全都落在被排除的文件类型上（见已排除清单）」／「规格里没有可审文件」）—— 摘要因此变成
+  `⚠️ 部分结果（…）：委派模式：0 个可审文件…`，结论文本的「可用性」行写「只能作为部分结论」。与 M6、E2 同一口径。
+  真机复现（2026-10-14，干净工作区）：修前 `partial=false`、摘要只有「成功…0 个可审文件」。
+
 Tests
 
+- **`test/smoke.mjs`**：新增一条 —— delegate 档空清单必须 `partial=true`、摘要以 `⚠️ 部分结果` 开头、notes 里明说
+  「没有做出任何结论」。计数：`test/smoke.mjs` 319 → **320**。
 - **`test/client-smoke.mjs`**：新增一条守卫 —— `en` 词典必须覆盖 `zh` 词典的**每一个**键，失败时**直接列出
   缺的键名**（不是只说「不齐」）。这条守卫就是发现上面 5 条的原因，留着防止以后再漏。
   计数：`test/client-smoke.mjs` 213 → **214**。

@@ -1758,6 +1758,23 @@ check(
   `ok=${noReviewableRun.ok} partial=${noReviewableRun.partial} summary=${noReviewableRun.summary}`,
 );
 
+/* M6 同族（v0.12.1 · 真机 2026-10-14 边界 5）：delegate 档撞上「规格里没有可审文件」时同样是
+   「成功（exit=0）」，很容易被读成「评审通过、没问题」——但一个文件都没审。结论必须说清没有结论。 */
+const delegateEmptyCase = cannedHarness([
+  { exitCode: 0, stdout: JSON.stringify({ files: [], excluded: ["notes.txt"] }) },
+  { exitCode: 0, stdout: "" },
+]);
+const delegateEmptyRun = await delegateEmptyCase.call({ engine: "delegate" });
+check(
+  "v0.12.1：delegate 档可审文件为空时标 partial 并明说「没有做出任何结论」（别被读成「没问题」）",
+  delegateEmptyRun.ok === true &&
+    delegateEmptyRun.partial === true &&
+    /^⚠️ 部分结果/.test(String(delegateEmptyRun.summary)) &&
+    /没有做出任何结论/.test(delegateEmptyRun.summary) &&
+    (delegateEmptyRun.notes ?? []).some((n) => /没有做出任何结论/.test(n)),
+  `ok=${delegateEmptyRun.ok} partial=${delegateEmptyRun.partial} summary=${String(delegateEmptyRun.summary).slice(0, 120)}`,
+);
+
 const issueCase = cannedHarness([
   {
     exitCode: 0,
