@@ -59,7 +59,7 @@
     "docs/settings-advanced.png"
   ],
   "scripts": {
-    "test": "node test/smoke.mjs && node test/killswitch-smoke.mjs && node test/host-contract.mjs && node test/job-smoke.mjs && node test/reviewer-smoke.mjs && node test/bridge-smoke.mjs && node test/client-smoke.mjs && node test/cordis-inject.mjs",
+    "test": "node test/smoke.mjs && node test/killswitch-smoke.mjs && node test/host-contract.mjs && node test/job-smoke.mjs && node test/reviewer-smoke.mjs && node test/bridge-smoke.mjs && node test/client-smoke.mjs && node test/cordis-inject.mjs && node test/pack-check.mjs",
     "test:pack": "node test/pack-check.mjs"
   },
   "_comment_files": "files 只发 README 真正链到的文档与图；内部计划与自评（maturity-assessment / ROADMAP / *-plan-*.md）留在仓库里、靠 GitHub 绝对链接引用 —— 断言见 test/pack-check.mjs（npm run test:pack）。",

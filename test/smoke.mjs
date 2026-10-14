@@ -75,6 +75,10 @@ function log(message) {
 }
 
 function which(cmd) {
+  /* 本地复现「CI 等价环境（机器上没装 ocr）」：`OCR_TEST_FORCE_NO_OCR=1` 时，任何 ocr 可执行文件的
+     查找都返回空 —— **绝对路径也要挡**（工作区 config.json 常把 ocrPath 钉成绝对路径，只挡 PATH
+     查找是挡不住的；上一次就是因此没复现出来）。正则只匹配 ocr，免得连 git 一起挡掉（那会连锁 10 项）。 */
+  if (process.env.OCR_TEST_FORCE_NO_OCR === "1" && /ocr|opencodereview/i.test(cmd)) return "";
   if (isAbsolute(cmd)) return existsSync(cmd) ? cmd : "";
   const exts = (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";");
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
