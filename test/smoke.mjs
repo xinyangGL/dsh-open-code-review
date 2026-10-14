@@ -11,6 +11,22 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertToolContract, assertToolPayload, assertToolSchemas, losslessViolations, payloadViolations, schemaViolations, snapshotJsonValue } from "./schema-subset.mjs";
 
+/**
+ * 文件层隔离（D7：插件目录里的活 `config.json` 一直没有被测试隔离）。
+ *
+ * 这个 checkout 里的 `config.json` 是**活的** —— 作者本机可能写了 `llm.provider` 之类，
+ * 而路由相关的断言全都默认「文件层是空的」。不隔离的话，本机配置一改，测试就跟着红。
+ * 这里把文件层指到一个空 JSON；需要文件层的用例自己会临时覆盖这个环境变量再还原
+ * （见下文「配置文件解析顺序」那几条）。
+ */
+const HERMETIC_CONFIG = join(tmpdir(), `ocr-smoke-config-${process.pid}.json`);
+try {
+  writeFileSync(HERMETIC_CONFIG, "{}\n");
+} catch {
+  /* 写不进去就让环境变量指向它，效果一样：这个路径不存在 ⇒ 文件层为空 */
+}
+process.env.DSH_OPEN_CODE_REVIEW_CONFIG = HERMETIC_CONFIG;
+
 /** 夹具仓库的基线版本（已提交）。 */
 const FIXTURE_BASE = `export function add(a, b) {
   return a + b
@@ -1312,6 +1328,66 @@ check(
   `${settingsWin.llmRoute} | ${settingsWin.llmEndpoint}`,
 );
 for (const entry of sessionCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
+
+/* ---------- v0.12.3：provider 与 model 必须来自同一条路由（真机事故的回归守卫） ----------
+   事故现场（2026-10-14 桌面宿主）：设置里只写了模型名 deepseek/deepseek-v4-flash、provider 留空；
+   路由行记的是 commandcode（会话级来源给的），而桥是「每个请求」再解析一次 —— 那一刻会话级来源
+   刚好拿不到，于是拿 DSH 默认模型的 provider=ark-coding-plan 去配这个模型，6 次转发全失败。
+   桥的 stats 留下真因：`pi-ai provider "ark-coding-plan" has no configured model
+   "deepseek/deepseek-v4-flash"`，而 ocr 只报一句通用的「check your LLM configuration and API key」。 */
+const ACCIDENT_MODEL = "deepseek/deepseek-v4-flash";
+/** 目录替身：用来验证「只写了模型名时，去问哪个 provider 声明了它」。 */
+function catalogLlm({ providers, models }) {
+  const svc = fakeLlmService(() => [{ type: "finish", reason: { kind: "stop" } }]);
+  svc.listProviders = async () => providers;
+  svc.listModels = async (id) => (models && models[id]) || [];
+  return svc;
+}
+
+/* (1) 设置里只写模型名 + 会话级只给模型名（事故里的那一刻）+ 默认模型是另一条路由：
+       必须按模型目录找到 commandcode，绝不能拼成 ark-coding-plan + deepseek/deepseek-v4-flash。 */
+const accidentCtx = makeCtx({
+  llm: catalogLlm({
+    providers: [{ id: "commandcode", name: "Command Code" }, { id: "ark-coding-plan", name: "Ark" }],
+    models: { commandcode: [{ id: ACCIDENT_MODEL, name: ACCIDENT_MODEL }] },
+  }),
+  agents: { currentInitiator: () => ({ id: "sess-1" }) },
+  sessions: {
+    get: (id) => (id === "sess-1" ? { requestContext: () => ({ provider: "", model: ACCIDENT_MODEL }) } : undefined),
+  },
+  agentDefaultModel: { currentSelection: () => ({ provider: "ark-coding-plan", model: "deepseek-v4-flash" }) },
+});
+mod.apply(accidentCtx, mkConfig({ llmMode: "dsh", llmProvider: "", llmModel: ACCIDENT_MODEL }));
+const accStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "v0.12.3：设置里只写了模型名 → 按模型目录找它真正的 provider（不再借默认路由的 provider 拼）",
+  String(accStatus.llmEndpoint).includes(`commandcode/${ACCIDENT_MODEL}`) &&
+    String(accStatus.llmRoute).includes("DSH 模型目录") &&
+    !String(accStatus.llmEndpoint).includes("ark-coding-plan"),
+  `${accStatus.llmRoute} | ${accStatus.llmEndpoint}`,
+);
+check(
+  "v0.12.3：配对成功时子进程拿到的 OCR_LLM_MODEL 就是被选中的那个模型",
+  accStatus.llmEnv.includes(`OCR_LLM_MODEL=${ACCIDENT_MODEL}`),
+  JSON.stringify(accStatus.llmEnv),
+);
+for (const entry of accidentCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
+
+/* (2) 目录里也问不到：明确失败并说清缺哪一半，不许拼出一条假路由。 */
+const unmatchCtx = makeCtx({
+  llm: catalogLlm({ providers: [{ id: "ark-coding-plan" }], models: { "ark-coding-plan": [] } }),
+  agentDefaultModel: null,
+});
+mod.apply(unmatchCtx, mkConfig({ llmMode: "dsh", llmProvider: "", llmModel: ACCIDENT_MODEL }));
+const unmatchStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
+check(
+  "v0.12.3：只写了模型名又查不到它的 provider → 说清缺哪一半（不拼半条路由）",
+  String(unmatchStatus.llmRoute).includes("只写了模型名") &&
+    String(unmatchStatus.llmRoute).includes(ACCIDENT_MODEL) &&
+    !String(unmatchStatus.llmRoute).includes("ark-coding-plan"),
+  `${unmatchStatus.llmRoute} | ${unmatchStatus.llmEndpoint}`,
+);
+for (const entry of unmatchCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
 
 /* (3) dsh 桥不可用：明确失败，不回落静态端点、不起子进程。 */
 const noBridgeCanned = cannedSubprocess([
@@ -3459,7 +3535,12 @@ check(
     if (beforeExplicit === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
     else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = beforeExplicit;
   }
+  const beforeBack = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+  /* 这一段要断言的正是「env **没设**时」的回落，所以临时撤掉它本身（文件层的隔离见文件顶部）。 */
+  delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
   const back = cfgMod.resolveConfigFile();
+  if (beforeBack === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
+  else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = beforeBack;
   check(
     "M1：撤掉 env 后回到插件目录里的 config.json；reportPath 也报得出来（没有文件时报推荐位置）",
     (back.source === "plugin" || back.source === "none") && typeof back.path === "string" && back.path.length > 0,

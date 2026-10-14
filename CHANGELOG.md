@@ -3,6 +3,48 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.12.3] — 2026-10-14（provider 与 model 混搭 —— 这条会让评审在真机上全部失败）
+
+把 `llm.mode=dsh` 的评审在真机上跑通时撞出来的：`ocr_status` 报路由是
+`provider=commandcode · model=deepseek/deepseek-v4-flash`，而插件本机桥的统计里 6 次请求**全部失败**，
+最近错误是 `pi-ai provider "ark-coding-plan" has no configured model "deepseek/deepseek-v4-flash"` ——
+同一次评审里，provider 与 model 来自**两个不同的来源**。
+
+根因：`effectiveLlmRoute()` 用两条独立的 `||` 链分别取 provider 与 model（配置里没写 provider 时就去借
+「当前会话正在用的 provider」），而桥**每个请求**都重新解析一次路由；会话级来源时有时无（子 fiber 还没激活、
+宿主没给 session 上下文），于是同一个评审里出现两次不同的解析结果 —— 一次是
+`commandcode + deepseek/deepseek-v4-flash`（合法），下一次是 `ark-coding-plan + 同一条模型名`（不存在）。
+
+Fixed
+
+- **`lib/index.js`**：`effectiveLlmRoute()` 改成只接受**完整的一对**（插件设置 → 当前会话 → DSH 默认模型）。
+  配置里只写了一半（典型的：设置页只填了模型名、provider 留空）时，只有当别的来源给出**同一个模型**
+  （缺 provider）或**同一个 provider**（缺模型）才借另一半；配不上就返回空路由 + 原因，走既有的
+  `OCR_LLM_MISSING`，并明确提示「去设置页的模型下拉里重选一次（会同时写入 provider）」。
+- **`lib/index.js`**：新增 `resolveProviderForModel()` / `resolveRoutePair()` —— 只写了一半时问一次 DSH 模型目录
+  （`llm.listProviders()` + `llm.listModels()`，谁声明了这个模型就用谁），问到就用，
+  `source` 标成「插件设置 + DSH 模型目录」。
+- **`lib/index.js`**：新增 `bridgeRoutePin` —— 评审开始时解析出的那对路由会被桥**钉住**；桥只在请求体的
+  model 相同（或为空）时用它，不再随会话状态的抖动漂移。
+- **`lib/bridge.js`**：`target()` 现在接收请求体里的 model，用来判断「这次请求还属不属于被钉住的那对」。
+
+Tests
+
+- `test/smoke.mjs` +3：事故回归（目录里 `commandcode` 声明了那条模型 ⇒ 端点必须是 `commandcode/…`、
+  `source` 含「DSH 模型目录」、**不得**出现 `ark-coding-plan`）、`OCR_LLM_MODEL` 取值正确、目录查不到时
+  报错含「只写了模型名」。
+- `test/bridge-smoke.mjs` +1：`target` 收到请求体的 model；命中 `bridgeRoutePin` 时用被钉住的那对。
+- `test/smoke.mjs`（测试纪律，D7）：**文件层隔离** —— 把 `DSH_OPEN_CODE_REVIEW_CONFIG` 指到一个空 JSON，
+  路由类断言不再取决于「这个 checkout 里的活 `config.json` 写了什么」。这条是被本机的现网兜底逼出来的：
+  把 `llm.provider` 补进 `config.json` 之后，5 条路由断言跟着红了，正好证明测试一直没和文件层隔离。
+- smoke **324** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 / bridge **105** / client-smoke 214 / cordis-inject + 打包体检 4/4。
+
+Note
+
+- 已经踩到的现网配置（设置页只填了模型名、provider 留空）**不必等新版本**也能恢复：把 provider 补进
+  `config.json` 的 `llm.provider` 即可 —— 设置页里空着的 provider 不会遮住文件层的值
+  （`schemaOverrides()` 会跳过「无意义 / 等于默认值」的字段）。
+
 ## [0.12.2] — 2026-10-14（回合尾部入口的 fail-open 加固 —— 这条是脚本化回归走出来的）
 
 P0-C 12 用例回归里，「按钮正例」在**已鉴权的测试 GUI** 上撞出真问题：回合尾部压根没有入口。

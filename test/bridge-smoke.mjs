@@ -726,6 +726,36 @@ check(
   streamed.raw.slice(0, 200),
 );
 
+/* v0.12.3：桥把请求体里的模型名交给路由解析 —— 插件侧用它核对「这次评审钉住的那一对」
+   （事故见 lib/index.js 的 bridgeRoutePin：路由记 commandcode，桥却拿另一条路由的 provider 去配）。 */
+{
+  const seen = [];
+  const pinBridge = await startLlmBridge({
+    stream: happy.stream,
+    target: (requested) => {
+      seen.push(requested && typeof requested.model === "string" ? requested.model : null);
+      const want = requested && typeof requested.model === "string" && requested.model ? requested.model : "fallback";
+      return { provider: "pinned-provider", model: want };
+    },
+    logger,
+  });
+  await post(pinBridge.url, pinBridge.token, { model: "deepseek/deepseek-v4-flash", messages: [{ role: "user", content: "u" }] });
+  const afterFirst = pinBridge.describe();
+  await post(pinBridge.url, pinBridge.token, { messages: [{ role: "user", content: "u" }] });
+  const described = pinBridge.describe();
+  check(
+    "v0.12.3：桥把请求体的 model 交给路由解析（没有 model 时给空串，不瞎猜）",
+    seen.length === 2 &&
+      seen[0] === "deepseek/deepseek-v4-flash" &&
+      seen[1] === "" &&
+      afterFirst.lastProvider === "pinned-provider" &&
+      afterFirst.lastModel === "deepseek/deepseek-v4-flash" &&
+      described.lastModel === "fallback",
+    JSON.stringify({ seen, first: { p: afterFirst.lastProvider, m: afterFirst.lastModel }, second: described.lastModel }),
+  );
+  await pinBridge.close();
+}
+
 const describe = happyBridge.describe();
 check("桥：describe() 报请求数/最近路由，且不吐明文 token", describe.requests >= 1 && describe.lastProvider === "commandcode" && describe.tokenMasked !== happyBridge.token && describe.tokenMasked.includes("…"), text(describe));
 check(

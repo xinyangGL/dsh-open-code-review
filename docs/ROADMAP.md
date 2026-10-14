@@ -18,6 +18,8 @@
 | v0.11.2 | 盘点真机撞出的两个缺陷：按需评审 skill 的 `source`（**注册成功 ≠ 能加载**，`ocr_status` 那时报 `registered=true` 是假绿）＋「没有可审文件」不再说成「未发现问题」 | commit `2050561`；`CHANGELOG.md` 0.11.2；本文 §6 |
 | v0.12.0 | 按专家方案分三批收口（**只针对「代码审核」这条线，不加新功能**）：**批 1 结论可信** —— E2 agent 档不再丢掉 `partial`／E1 `scope` 配 `paths` 改成显式拒绝（`OCR_INVALID_ARGS`）／M6 工作区干净时不再说「未发现问题」／E3 结论新增「可用性」行与覆盖回执／T1 单飞闸 `OCR_ALREADY_RUNNING`／T2 工具超时与 `maxTimeoutMinutes` 对齐／R5 结果码常量收敛（15 → 16）／R6 覆盖回执写进 job 记录／R3 回合尾部按钮不再依赖 `jobs` 服务／R4 usage 的「假账」边界写进代码；**批 2 外观与可访问性** —— 令牌化 + 4px 刻度 + 圆角/字号收敛 + 对比度下限 + 删掉「猜背景色」（半透明菜单根因）+ 未知严重度＝「未分级」（不再当 minor）+ 按钮副行代价标签 + `role`/`aria`/`:focus-visible`；**批 3 发布面** —— `files` 收窄（内部评估文档不再进包）+ `npm run test:pack` 进 CI + 本地可复现 CI 离线档 + 上架版 README + 设置页截图重拍 | commit `575de1a`（tag `v0.12.0`）；[Release](https://github.com/xinyangGL/dsh-open-code-review/releases/tag/v0.12.0)；CI [run #27](https://github.com/xinyangGL/dsh-open-code-review/actions/runs/38495153246) |
 | v0.12.1 | 批 2 收尾 + 两条真机边界走出来的诚实缺陷：英文界面漏译的 5 条 `placeholder`（「加守卫」加出来的）＋ `engine=delegate` 撞上「规格里没有可审文件」时不再报「成功」；结论补上「规模」与「下一步」两层（**批 2 的结论六层齐了**） | commit `ccd444e` + `59c38c2` + `5e8a61b`；`CHANGELOG.md` 0.12.1 |
+| v0.12.2 | 回合尾部入口的 **fail-open 加固**：只有明确读到 `total=0` 才隐藏按钮（记录缺失 / 请求失败 / 路由不可用一律给入口）—— 这条是 P0-C 脚本化回归在真机 GUI 上走出来的 | commit `0e383e4`（tag `v0.12.2`）；`CHANGELOG.md` 0.12.2 |
+| v0.12.3 | 修 `llm.mode=dsh` 下 **provider 与 model 混搭**：设置页只填了模型名、provider 留空时，路由会去借「当前会话的 provider」，而桥每个请求都重解析一次 ⇒ 同一批评审里 6/6 请求被 provider 拒绝。改法＝只接受完整的一对 + 只写一半时按 DSH 模型目录补全 + 桥**钉住**本次评审那对路由 | 见 §6 变更记录；`CHANGELOG.md` 0.12.3 |
 
 **测试口径**（提交时实测，`npm test` `EXIT=0`）：smoke **286** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
@@ -31,6 +33,10 @@ bridge 104 / client-smoke 214 / cordis-inject 全部通过，另加**打包体�
 
 **v0.12.1 实测**（`npm test` `EXIT=0`）：smoke **321** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
 bridge 104 / client-smoke **214** / cordis-inject 全部通过，另加打包体检 4/4。
+
+**v0.12.2 + v0.12.3 实测**（`npm test` `EXIT=0`）：smoke **324** / killswitch 44 / host-contract 37 / job 51 /
+reviewer 45 / bridge **105** / client-smoke 214 / cordis-inject 全部通过，另加打包体检 4/4；
+`OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` 同数通过（离线档是等价替换，不是跳过）。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
 `RELEASING.md` 的「一个 tag 只带一个高风险改动」在这条线上已经被破坏过一次；要不要拆（重写历史）由作者决定。
