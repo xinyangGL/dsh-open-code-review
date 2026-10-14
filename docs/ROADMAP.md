@@ -21,6 +21,8 @@
 | v0.12.2 | 回合尾部入口的 **fail-open 加固**：只有明确读到 `total=0` 才隐藏按钮（记录缺失 / 请求失败 / 路由不可用一律给入口）—— 这条是 P0-C 脚本化回归在真机 GUI 上走出来的 | commit `0e383e4`（tag `v0.12.2`）；`CHANGELOG.md` 0.12.2 |
 | v0.12.3 | 修 `llm.mode=dsh` 下 **provider 与 model 混搭**：设置页只填了模型名、provider 留空时，路由会去借「当前会话的 provider」，而桥每个请求都重解析一次 ⇒ 同一批评审里 6/6 请求被 provider 拒绝。改法＝只接受完整的一对 + 只写一半时按 DSH 模型目录补全 + 桥**钉住**本次评审那对路由 | 见 §6 变更记录；`CHANGELOG.md` 0.12.3 |
 | v0.12.4 | UX 规范「必须改」里剩下的 7 条：按钮副行给出本回合改动文件数（M2）、失败文案带去处（M3）、设置页「三步开始用」引导（M4）、停止后果句写明用量不退（M7）、取消路径与超时同口径（M8）、就绪状态行只说人话＋内部字段挪进只读诊断区（M9）、三条长 hint 压到 ≤80 字（M10） | commit `554e761`（tag `v0.12.4`）；[Release](https://github.com/xinyangGL/dsh-open-code-review/releases/tag/v0.12.4)；CI [run #35](https://github.com/xinyangGL/dsh-open-code-review/actions/runs/38523171666)；`CHANGELOG.md` 0.12.4 |
+| v0.12.5 | 修**回合尾部按钮在真机上一个都看不见**（用户报的「尾部的审核按钮我没看到啊」）：入口调了没注入的 `jobs` 服务（`props.useJobs` / `watchRows`），cordis 在**调用时**才抛，组件在 render/commit 抛异常 ⇒ 宿主把整个 `conversation.chat.turnTail` 槽换成 `<div data-slot-error=…>`（第一方交付卡片一起消失）。改法＝入口彻底不碰 jobs（`busy` 只看自己的点击状态），进度/停止仍归进度行；同时把结论文本按交互规格 §5.2 重排（**第 1 行永远是结论行**，新增 `FAILURE_ONE_LINERS` 16 条「码 + 一句话」） | 见 §6 变更记录；`CHANGELOG.md` 0.12.5 |
+
 
 **测试口径**（提交时实测，`npm test` `EXIT=0`）：smoke **286** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
@@ -41,6 +43,11 @@ reviewer 45 / bridge **105** / client-smoke 214 / cordis-inject 全部通过，�
 
 **v0.12.4 实测**（`npm test` `EXIT=0`）：smoke **331** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
 bridge 105 / client-smoke **216** / cordis-inject 全部通过，另加打包体检 4/4。
+
+**v0.12.5 实测**（`npm test` `EXIT=0`）：smoke **333** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
+bridge 105 / client-smoke **216** / cordis-inject 全部通过，另加打包体检 4/4；真机复核（已鉴权 web 实例 + bsk）：
+`[data-slot-error]` = **0**、`[data-ocr-review-tail]` = **1**，按钮文字含「ocr 档：约 3~10 分钟/文件、按 tokens 计费」，
+`data-ocr-tail-count` 为空（`/api/changes.summary` 404 ⇒ 按「不知道」fail-open）。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
 `RELEASING.md` 的「一个 tag 只带一个高风险改动」在这条线上已经被破坏过一次；要不要拆（重写历史）由作者决定。
@@ -64,6 +71,8 @@ bridge 105 / client-smoke **216** / cordis-inject 全部通过，另加打包体
 | v0.12.0 桌面观感 | 重启桌面 DSH 后确认三件事：① 模型下拉能列出候选（含读不到时的「重试读取目录」）② 按钮只在真有改动的回合出现、副行写出代价量级 ③ 结论里能看到「可用性」行与覆盖回执 | 重启后即可确认（见 §3「两层加载面」） | CHANGELOG `0.12.0` |
 | v0.12.0 `llm.effort` 真机 | 跑一次 `engine=ocr`，确认思考强度确实改变了行为（`llm.effort` 只在文件层，默认留空 = 跟随 DSH/模型默认） | 待用户排期 | CHANGELOG `0.11.1`；§5 |
 | **P0-C 真人点击 12 用例** | ⬜ **仍未做** —— 这是 CPO 定的发布门（「未过不发布」），而 v0.12.0 事实上越过了它就发布了；见 §6 的 2026-10-14 条，别把它记成通过 | 未排期 | CPO 专家方案；§4 |
+| v0.12.5 回合尾部按钮**真机**正例 | ✅ **2026-10-14 在已鉴权 web 实例里量化确认**：修前 `[data-slot-error="conversation.chat.turnTail"]` = 1、`[data-ocr-review-tail]` = 0（第一方交付卡片一起消失）；修后 `[data-slot-error]` = **0**、`[data-ocr-review-tail]` = **1**，按钮文字「启动代码审核 ocr 档：约 3~10 分钟/文件、按 tokens 计费 · 跑前会先给预估」。⬜ 仍缺：用户在**自己的桌面 GUI** 里看到它（需要整页刷新/重启宿主才拿到本版前端代码，见 §3「两层加载面」） | 真机 DOM 计数 + 按钮文字（bsk session `ivqi`） | CHANGELOG `0.12.5`；本文 §6 |
+| 交互规格一致性审计（用户 m08998 要求） | ⬜ 逐条对照 `docs/interaction-spec-2026-10-13.md`：**已修** D-1 结论行不是第 1 行、D-2 出处层夹在结论与问题之间、D-5 失败态缺「码 + 一句话」（v0.12.5）；**待核对/待修** D-6 按钮旁失败文案要含安装指引、D-8 §7.1 越过预估下限的文案变化、D-9 停止武装态措辞与附录 A 对齐、D-13 §6.3「指定 paths 没匹配到」、D-14 §1.2 busy 态引导去进度行停止 | 本轮内完成并留档 | 用户 m08998；`docs/interaction-spec-2026-10-13.md` |
 
 ## 3. 发行门（`RELEASING.md`）
 
@@ -290,3 +299,22 @@ bridge 105 / client-smoke **216** / cordis-inject 全部通过，另加打包体
   - **踩坑记录**：M9 的改动一开始让 client-smoke 的 7 条老断言转红（它们读的是状态行里的内部字段）——
     正确做法不是把断言删掉，而是把内部字段搬进诊断区、并为 M9 补两条新断言；另有 1 条老断言（「高级项「模型名」
     默认收起」）被 M4 的三步引导文案里出现的字面标签带红，改成「在「高级设置 → 模型路由」里点开模型下拉」后恢复。
+- **2026-10-14（回合尾部按钮在真机上一个都看不见 + 结论文本按规格重排 · v0.12.5）**：
+  - 起因：用户 m08998 逐字「尾部的审核按钮我没看到啊」。
+  - **走过的弯路（记下来省下次）**：我先用 `document.scripts` 过滤 `open-code` 得到 0，就断定「本插件 client bundle
+    根本没加载」—— **错的**。`dsh web` 的客户端模块是运行时表（`window.__DSH_BOOT__.entries`），不在 `<script>` 里；
+    真实情况是插件在、设置页能开、模型候选能列（4 个），只是**回合尾部那一块**坏了。
+  - **真因（二分到自己的代码）**：宿主把整个槽换成了 `<div data-slot-error="conversation.chat.turnTail">`。
+    把插件开关关掉 ⇒ 错误消失，确认是本插件入口抛的。二分：组件整体 `return null` ⇒ 无错；hooks 跑完再 return ⇒ 有错；
+    替身化 `useSnapshot` 无效；把 `watchRows` 与 `props.useJobs`（来自注入的 `hooks: { jobs: jobsState }`）一起替身化 ⇒ 无错。
+    机制：v0.12.2 的 R3 只把入口 fiber 的 `inject` 里的 `"jobs"` 去掉了，**调用**还在，
+    而 cordis 对未注入的服务是「访问拿到壳、调用时抛 `inactive context`」。
+  - 修：入口**彻底不碰 jobs**（只解构 `{ sessionId, runReview, cfgCtx }`；`busy` 只看自己的点击状态；
+    进度/停止仍归进度行那条真的注入了 `jobs` 的 fiber）。同版按交互规格 §5.2 重排结论文本：
+    第 1 行＝结论行，新增 `FAILURE_ONE_LINERS`（16 个失败码 → 一句人话），出处层与附录层归位。
+  - 真机复核（已鉴权 web 实例 + bsk）：`[data-slot-error]` 1 → **0**、`[data-ocr-review-tail]` 0 → **1**，
+    按钮文字含「ocr 档：约 3~10 分钟/文件、按 tokens 计费」。**注意**：离屏断言全程全绿 —— 这条只有真机 DOM 看得见。
+  - 测试纪律：`v0.7.2：制动拒绝的表头不谎报引擎` 那条守卫原先钉的是「第 1 行以 `阿里 OpenCodeReview` 开头」，
+    层级重排后它与 §5.2 冲突 ⇒ 改成「第 1 行是结论行（含 `OCR_DISABLED`）」+「全文里的头行必须是 `engine=未执行`」：
+    既保持原意（不谎报引擎），又不再把旧层级钉回去。
+

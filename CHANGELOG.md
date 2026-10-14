@@ -3,6 +3,47 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.12.5] — 2026-10-14（回合尾部按钮在真机上一个都看不见：入口调了没注入的 jobs 服务，把整个槽打成错误占位符）
+
+用户报「尾部的审核按钮我没看到啊」。在已鉴权的 web 实例（web profile `link:` 装 + `dsh web --port 19388`
++ bsk 驱动 Edge）里复现并二分到根因**在我们自己身上**：宿主把整个 `conversation.chat.turnTail` 槽换成了
+`<div data-slot-error="conversation.chat.turnTail">` —— 不止我们的按钮，第一方的交付卡片也一起消失了。
+
+Fixed
+
+- **`lib/client.js`（回合尾部入口不再碰 `jobs`）**：v0.12.2 的 R3 只做了一半 —— 入口 fiber 的
+  `inject` 里去掉了 `"jobs"`，但组件仍在 `render` 里调 `props.useJobs(...)`（来自注入的
+  `hooks: { jobs: jobsState }`），提交期还调 `watchRows(...)`。cordis 对**未注入**的服务是「属性访问
+  拿到壳、**调用时**才抛 `inactive context`」，于是组件在 render/commit 抛异常，宿主用错误占位符顶掉
+  整个槽位。现在：入口只解构 `{ sessionId, runReview, cfgCtx }`，不订阅、不跟进行、不看 jobs；
+  `busy` 只看本组件自己的点击状态。「谁在跑、跑了多久、怎么停」仍由输入框上方的进度行负责 ——
+  那条 fiber 是真的 `ctx.inject(["jobs"], …)`，它的降级路径照旧。
+- **`lib/review.js`（结论文本按交互规格 §5.2 重排）**：新增 `FAILURE_ONE_LINERS`（16 个失败码 → 一句
+  人话），**第 1 行永远是结论行**：失败 `❌ 评审没有完成：<码>（<一句话>）。`／有问题
+  `⚠️ 发现 N 条问题（涉及 M 个文件）`／部分 `⚠️ 部分结果：…`／delegate 成功
+  `📋 已生成审查规格 · 可审 N 个文件…`（不调 LLM，不说「未发现问题」）／干净
+  `✅ 未发现问题 · 已审查 N 个文件（<scope> · <engine>）`。机读头行（`阿里 OpenCodeReview · engine=…`）
+  降到**第 2 层**之后，出处（命令 / 仓库 / 清单）挪到问题与下一步之后，附录**永久最后**。
+  §9.3 判定线明写「结论行不是结果文本的第 1 行」＝未达标，这条此前一直是欠账。
+
+Tests
+
+- `test/smoke.mjs` +2：①四态（干净 / 有问题 / delegate / 失败）的**第 1 行**分别是哪个结论行，并断言
+  机读头行出现在「规模：」之后、可审文件清单出现在「下一步：」之后；②尾部入口**一个 jobs 调用都不留**
+  （`props.useJobs` / `watchRows` / `hooks.jobs` / `jobsState` / `jobsApi` 全清，判据只统计代码行、避开注释）。
+  另给 `remainingText` 那条老守卫补上「越过下限必须带动作」的断言（交互规格 §7.1）。
+- `test/client-smoke.mjs`：三条断言改成新契约 —— 注入面恰好是 `{cfgCtx, runReview, t, changesFeedReady}`
+  （**不再有** jobs hooks / watchRows）、入口渲染时不订阅任务行、「别人的任务在跑」不再把按钮变灰
+  （防重复交给宿主侧单飞闸 `OCR_ALREADY_RUNNING`）。
+- `test/killswitch-smoke.mjs`：v0.7.2 那条「制动拒绝不谎报引擎」改成「第 1 行是结论行（含
+  `OCR_DISABLED`）」+「全文里的头行必须是 `engine=未执行`」—— 既不谎报引擎，也不把层级顺序钉回旧版。
+- smoke **333** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 / bridge 105 / client-smoke 216 / cordis-inject + 打包体检 4/4。
+
+Note
+
+- 这条缺陷是真机 UI 回归（P0-C 用例 1「回合尾部按钮」）抓出来的：离屏断言全程全绿，因为**槽位被顶掉**
+  这件事只有真机 DOM 看得见（`[data-slot-error]` = 1）。留档见 `docs/p0c-12cases-2026-10-14.md`。
+
 ## [0.12.4] — 2026-10-14（UX 规范里还欠的那几条：副行代价、后果句、三步引导、状态行只说人话）
 
 一位 UX 架构师把设置页与回合尾部按钮逐条挑过（M1–M10「必须改」）。到这一版为止，M1（`scope`+`paths`

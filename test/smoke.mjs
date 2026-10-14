@@ -938,7 +938,10 @@ check(
   `${review.coverageSummary(r6Coverage)} || 空=${JSON.stringify(review.coverageSummary({}))}`,
 );
 
-/* R3（v0.12.0 批 1）：回合尾部按钮不再要求 jobs —— 入口不该因为宿主没有 jobs 服务整块消失。 */
+/* R3（v0.12.0 批 1）+ v0.12.5：回合尾部按钮不仅「不要求」jobs，而且**完全不碰**它 ——
+   v0.12.5 的真机事故是：inject 里去掉了 jobs，组件却仍在调 props.useJobs / watchRows，
+   cordis 对未注入的服务是「调用时抛」⇒ 组件在 render/commit 抛 ⇒ 宿主把整个 turnTail 槽
+   换成 <div data-slot-error=…>，按钮与第一方交付卡片一起消失。 */
 {
   const r3ClientSource = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
   check(
@@ -952,6 +955,29 @@ check(
       `新依赖=${/ctx\.inject\(\["configForms", "remote", "remote\.commands"\]/.test(r3ClientSource)}`,
       `进度行仍要 jobs=${/ctx\.inject\(\["jobs"\]/.test(r3ClientSource)}`,
       `按钮守门=${/if \(!props\.sessionId\) return null;/.test(r3ClientSource)}`,
+    ].join(" · "),
+  );
+  /* 注释里会出现这些名字（说明「为什么不再这么做」），所以判据只统计**代码行**。 */
+  const r3CodeOnly = r3ClientSource
+    .split("\n")
+    .filter((line) => {
+      const s = line.trim();
+      return !s.startsWith("*") && !s.startsWith("/*") && !s.startsWith("//");
+    })
+    .join("\n");
+  check(
+    "v0.12.5：尾部入口一个 jobs 调用都不留（props.useJobs / watchRows / hooks.jobs / jobsState 全清）",
+    !/props\.useJobs/.test(r3CodeOnly)
+      && !/watchRows: jobsWatch/.test(r3CodeOnly)
+      && !/hooks: \{ jobs: jobsState \}/.test(r3CodeOnly)
+      && !/noJobsState/.test(r3CodeOnly)
+      && !/jobsApi/.test(r3CodeOnly),
+    [
+      `props.useJobs=${/props\.useJobs/.test(r3CodeOnly)}`,
+      `watchRows: jobsWatch=${/watchRows: jobsWatch/.test(r3CodeOnly)}`,
+      `hooks.jobs=${/hooks: \{ jobs: jobsState \}/.test(r3CodeOnly)}`,
+      `noJobsState=${/noJobsState/.test(r3CodeOnly)}`,
+      `jobsApi=${/jobsApi/.test(r3CodeOnly)}`,
     ].join(" · "),
   );
 }
@@ -2030,6 +2056,37 @@ check(
     layerText.indexOf("规模：") < layerText.indexOf("下一步："),
   layerText.split("\n").filter((l) => l.startsWith("规模：") || l.startsWith("下一步：")).join(" / "),
 );
+/* 交互规格 §5.2 第 1 层 + §9.3 判定线：结论行必须是结果文本的第 1 行（机读头行不能占第 1 行）。
+   判定线原文：出现「结论行不是结果文本的第 1 行」即视为未达标。 */
+{
+  const firstLine = (text) => String(text).split("\n")[0];
+  const cleanText = review.valueToText(
+    { ok: true, engine: "ocr", scope: "workspace", exitCode: 0, durationMs: 9000, reviewableFiles: [{ path: "a.js", insertions: 3, deletions: 1 }], coverage: { totalHunks: 4, keptHunks: 4, totalFiles: 1, slices: 1, droppedHunks: 0 }, summary: "没问题。" },
+    {},
+  );
+  const issuesText = review.valueToText(
+    { ok: true, engine: "ocr", scope: "workspace", exitCode: 0, durationMs: 9000, issues: [{ file: "a.js", line: 3, severity: "major", message: "x" }] },
+    {},
+  );
+  const delegateText = review.valueToText({ ok: true, engine: "delegate", scope: "workspace", exitCode: 0, durationMs: 300, reviewableFiles: [{ path: "a.js", insertions: 1, deletions: 0 }] }, {});
+  const failText = review.valueToText({ ok: false, engine: "ocr", scope: "workspace", exitCode: 1, durationMs: 10, code: "OCR_RUN_FAILED", nextStep: "先 ocr llm test", stderr: "boom" }, {});
+  const issuesFirst = firstLine(issuesText);
+  const cleanFirst = firstLine(cleanText);
+  const delegateFirst = firstLine(delegateText);
+  const failFirst = firstLine(failText);
+  check(
+    "交互规格 M5/§5.2-1：结论行永远是结果文本第 1 行（机读头行降级到第 2 层；失败给「码 + 一句话」；delegate 不许说「未发现问题」）",
+    cleanFirst.startsWith("✅ 未发现问题 · 已审查 1 个文件") &&
+      issuesFirst.startsWith("⚠️ 发现 1 条问题（涉及 1 个文件）") &&
+      delegateFirst.startsWith("📋 已生成审查规格") &&
+      failFirst.startsWith("❌ 评审没有完成：OCR_RUN_FAILED（") &&
+      cleanText.indexOf("阿里 OpenCodeReview") > 0 &&
+      cleanText.split("\n")[1].startsWith("可用性：") &&
+      cleanText.indexOf("阿里 OpenCodeReview") > cleanText.indexOf("规模：") &&
+      cleanText.indexOf("可审文件 1 个：") > cleanText.indexOf("下一步："),
+    [cleanFirst, issuesFirst, delegateFirst, failFirst].map((l) => l.slice(0, 28)).join(" | "),
+  );
+}
 check(
   "批 2：严重程度按 高/中/低 展示，认不出来的一律「未分级」（未知档不当低）",
   review.severityLabel("critical").label === "高" &&
@@ -2157,6 +2214,8 @@ check(
     "v0.11.0：remainingText 三段话术（未到下限 / 过下限 / 过上限），无预估时闭嘴",
     /预计还需 6 分钟起/.test(review.remainingText(0, { reviewable: 2 })) &&
       /已过预估下限 6 分钟/.test(review.remainingText(10 * 60000, { reviewable: 2 })) &&
+      /* v0.12.5（交互规格 §7.1 / 附录 A）：越过下限时不只是让秒数跳 —— 同一行里要给动作。 */
+      /停止后换 delegate/.test(review.remainingText(10 * 60000, { reviewable: 2 })) &&
       /已过预估上限 20 分钟/.test(review.remainingText(25 * 60000, { reviewable: 2 })) &&
       review.remainingText(60000, null) === "",
     review.remainingText(10 * 60000, { reviewable: 2 }),

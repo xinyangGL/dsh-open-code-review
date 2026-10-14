@@ -1194,12 +1194,13 @@ check(
 );
 const tailInjected = tailReg && typeof tailReg.options.inject === "function" ? tailReg.options.inject() : {};
 check(
-  "注入面齐全（cfgCtx / jobs hooks / watchRows / runReview / t）",
+  "注入面恰好是 {cfgCtx / runReview / t / changesFeedReady}：**不再给 jobs hooks / watchRows**（v0.12.5）",
   Boolean(tailInjected.cfgCtx)
-    && Boolean(tailInjected.hooks && tailInjected.hooks.jobs)
-    && typeof tailInjected.watchRows === "function"
     && typeof tailInjected.runReview === "function"
-    && typeof tailInjected.t === "function",
+    && typeof tailInjected.t === "function"
+    && typeof tailInjected.changesFeedReady === "function"
+    && tailInjected.hooks === undefined
+    && tailInjected.watchRows === undefined,
   JSON.stringify(Object.keys(tailInjected)),
 );
 const tailProps = (rows, props = {}) => ({
@@ -1239,7 +1240,11 @@ check(
 
 const idleTree = renderTail([]);
 check("默认（总开关/按需评审都开）显示「启动代码审核」", textOf(idleTree).includes("启动代码审核"), textOf(idleTree));
-check("按钮订阅了本会话的任务行", tailWatched.includes("s1"), JSON.stringify(tailWatched));
+check(
+  "v0.12.5：尾部入口渲染时不订阅任务行（订阅＝调用未注入的 jobs ⇒ 真机上整个槽变错误占位符）",
+  textOf(idleTree).includes("启动代码审核") && tailWatched.length === 0,
+  JSON.stringify(tailWatched),
+);
 
 tailButton(idleTree).props.onClick();
 await tick();
@@ -1255,11 +1260,13 @@ check(
 const doneText = textOf(renderTail([]));
 check("成功后把命令返回的文本显示出来", doneText.includes("审查 2 个文件"), doneText);
 
-/* 同一会话已有 running 的评审：按钮禁用 + 显示「正在评审…」（数据源同进度行，天然防重复点击） */
+/* v0.12.5：入口不再看 jobs，所以「别人的任务在跑」不会把按钮变灰。
+   防重复执行由插件侧单飞闸（OCR_ALREADY_RUNNING）兜底 —— 让入口去依赖一个宿主可能没有的服务，
+   代价是「服务缺失时整个 turnTail 槽被错误占位符顶掉」（真机已复现）。 */
 const runningTree = renderTail([liveJob]);
 check(
-  "同会话已有 running 的评审时禁用并显示「正在评审…」",
-  textOf(runningTree).includes("正在评审…") && tailButton(runningTree).props.disabled === true,
+  "v0.12.5：同会话有 running 的评审时入口照常可点（不看 jobs；防重复由 OCR_ALREADY_RUNNING 兜底）",
+  textOf(runningTree).includes("启动代码审核") && tailButton(runningTree).props.disabled !== true,
   textOf(runningTree),
 );
 
