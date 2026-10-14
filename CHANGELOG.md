@@ -96,7 +96,7 @@ Changed（批 3 第一步：打包与 CI —— 「陌生人装到的是什么�
   `OCR_TEST_FORCE_NO_OCR=1` —— 置位后任何 ocr 可执行文件的查找都返回空。两个坑写在注释里：
   **绝对路径也要挡**（工作区 `config.json` 常把 `ocrPath` 钉成绝对路径，只挡 PATH 查找挡不住 —— 上一次
   就是因此「复现不出来」），**正则只匹配 ocr**（否则连 `git` 一起挡掉，连锁出 10 项假失败）。
-  实测 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **318 项全过** ⇒ 「CI 等价环境」从「没做过」
+  实测 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **319 项全过**（与装了 ocr 时**同数**：离线档是把真机断言换成等价断言，不是跳过） ⇒ 「CI 等价环境」从「没做过」
   变成「做过一次、有命令可复现」。
 - `npm test` 末尾接上 `npm run test:pack`：本地一条命令 = 八套离线套件 + 打包体检。
 

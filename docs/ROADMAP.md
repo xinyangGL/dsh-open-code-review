@@ -26,7 +26,7 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
 
 **v0.12.0 实测**（`npm test` `EXIT=0`）：smoke **319** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
 bridge 104 / client-smoke 213 / cordis-inject 全部通过，另加**打包体检 4/4**（`npm run test:pack`，已进 CI）；
-`OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **318 项全过**（CI 的离线档第一次能在本机复现，见 §3）。
+`OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **319 项全过**（CI 的离线档第一次能在本机复现，见 §3）。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
 `RELEASING.md` 的「一个 tag 只带一个高风险改动」在这条线上已经被破坏过一次；要不要拆（重写历史）由作者决定。
@@ -88,7 +88,7 @@ bridge 104 / client-smoke 213 / cordis-inject 全部通过，另加**打包体�
 - ✅ 「CI 等价环境（藏掉 `ocr`）smoke 也全绿」**2026-10-14 变成可复现**：`test/smoke.mjs` 的 `which()` 认一个
   开关 `OCR_TEST_FORCE_NO_OCR=1` —— 置位后任何 ocr 可执行文件（**绝对路径也算**，因为工作区 `config.json`
   常把 `ocrPath` 钉成绝对路径）的查找都返回空，且**只挡 ocr**（正则只匹配 `ocr|opencodereview`，否则连 `git`
-  一起挡掉会连锁出 10 项假失败）。实测 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **318 项全过**。
+  一起挡掉会连锁出 10 项假失败）。实测 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **319 项全过**。
   CI 的离线档由此从「只能指望 CI」变成「本地一条命令可复现」。
 
 ## 4. ✋ 明确不做（带复活条件）
