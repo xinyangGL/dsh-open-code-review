@@ -17,6 +17,7 @@
 | v0.11.1 | 修「高级设置里的模型名不能选」：模型目录读取风暴（生成的 namespace 每读一次就是新函数，却进了 `useEffect` 依赖）＋8 秒超时与「重试读取目录」按钮；新增模型思考强度 `llm.effort`（仅文件层，转发为 DSH `GenerateOptions.reasoningEffort`） | commit `bd0c9f3` + `a35480b`；`CHANGELOG.md` |
 | v0.11.2 | 盘点真机撞出的两个缺陷：按需评审 skill 的 `source`（**注册成功 ≠ 能加载**，`ocr_status` 那时报 `registered=true` 是假绿）＋「没有可审文件」不再说成「未发现问题」 | commit `2050561`；`CHANGELOG.md` 0.11.2；本文 §6 |
 | v0.12.0 | 按专家方案分三批收口（**只针对「代码审核」这条线，不加新功能**）：**批 1 结论可信** —— E2 agent 档不再丢掉 `partial`／E1 `scope` 配 `paths` 改成显式拒绝（`OCR_INVALID_ARGS`）／M6 工作区干净时不再说「未发现问题」／E3 结论新增「可用性」行与覆盖回执／T1 单飞闸 `OCR_ALREADY_RUNNING`／T2 工具超时与 `maxTimeoutMinutes` 对齐／R5 结果码常量收敛（15 → 16）／R6 覆盖回执写进 job 记录／R3 回合尾部按钮不再依赖 `jobs` 服务／R4 usage 的「假账」边界写进代码；**批 2 外观与可访问性** —— 令牌化 + 4px 刻度 + 圆角/字号收敛 + 对比度下限 + 删掉「猜背景色」（半透明菜单根因）+ 未知严重度＝「未分级」（不再当 minor）+ 按钮副行代价标签 + `role`/`aria`/`:focus-visible`；**批 3 发布面** —— `files` 收窄（内部评估文档不再进包）+ `npm run test:pack` 进 CI + 本地可复现 CI 离线档 + 上架版 README + 设置页截图重拍 | commit `575de1a`（tag `v0.12.0`）；[Release](https://github.com/xinyangGL/dsh-open-code-review/releases/tag/v0.12.0)；CI [run #27](https://github.com/xinyangGL/dsh-open-code-review/actions/runs/38495153246) |
+| v0.12.1 | 批 2 收尾 + 两条真机边界走出来的诚实缺陷：英文界面漏译的 5 条 `placeholder`（「加守卫」加出来的）＋ `engine=delegate` 撞上「规格里没有可审文件」时不再报「成功」；结论补上「规模」与「下一步」两层（**批 2 的结论六层齐了**） | commit `ccd444e` + `59c38c2` + `5e8a61b`；`CHANGELOG.md` 0.12.1 |
 
 **测试口径**（提交时实测，`npm test` `EXIT=0`）：smoke **286** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
@@ -27,6 +28,9 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
 **v0.12.0 实测**（`npm test` `EXIT=0`）：smoke **319** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
 bridge 104 / client-smoke 214 / cordis-inject 全部通过，另加**打包体检 4/4**（`npm run test:pack`，已进 CI）；
 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **319 项全过**（CI 的离线档第一次能在本机复现，见 §3）。
+
+**v0.12.1 实测**（`npm test` `EXIT=0`）：smoke **321** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
+bridge 104 / client-smoke **214** / cordis-inject 全部通过，另加打包体检 4/4。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
 `RELEASING.md` 的「一个 tag 只带一个高风险改动」在这条线上已经被破坏过一次；要不要拆（重写历史）由作者决定。
@@ -221,3 +225,18 @@ bridge 104 / client-smoke 214 / cordis-inject 全部通过，另加**打包体�
   - **清理**：验证用的 `rc-v012` profile 已删；web profile 早已回到只有 `@deepseek-ai/dsh-base` +
     `@deepseek-ai/dsh-web-app`；仓库工作区干净；`.graphflow-cache/` 与 `.trae/`、`.claude/`、`AGENTS.md`、
     `config.json` 等仍是 `.gitignore` 里的本机产物。
+- **2026-10-14（批 2 收尾 · v0.12.1）**：
+  - 结论六层补齐第 2 层「规模」与第 4 层「下一步」（`lib/review.js` 的 `valueToText()`：`下一步：` 不再只在
+    失败时出现；成功也按「有问题 / 只有部分结论 / 干净」各给一句），`test/smoke.mjs` 加一条守卫（规模层内容 +
+    下一步层固定存在且排在其后）⇒ smoke **320 → 321**；提交 `5e8a61b`。
+  - 同一批还有 `ccd444e`（英文界面 5 条 `placeholder` 漏译，由新加的「`en` 必须覆盖 `zh` 每个键」守卫点名）
+    与 `59c38c2`（`engine=delegate` 撞上「规格里没有可审文件」时走 `partial` 通道，不再报成功）。
+  - **诚实记录**：`5e8a61b` 的改动第一次落盘时把 `lib/review.js` 里
+    `if (v.reviewer && typeof v.reviewer === "object") {` **整行覆盖掉了**，`node --check lib/review.js` 报
+    `SyntaxError: Illegal return statement`；按原样恢复该行后重跑，语法与八套测试才全绿。
+    教训：改 `valueToText()` 这种长函数，**先 `node --check`，再跑测试**。
+  - **推送状态（未完成）**：本地 `main` = `5e8a61b`，远端 `refs/heads/main` 仍停在 `ccd444e`。
+    2026-10-14 10:4x~10:5x 连续 6 次 `git push`（含 5 次自动重试）都是
+    `Recv failure: Connection was reset` / `Failed to connect to github.com port 443 after 21s`；
+    同一时段 `Test-NetConnection github.com -Port 443` 却报过 True ⇒ 抽风式中断，等网络好转补推。
+  - **`v0.12.1` 未打 tag、未建 Release**：单独发一版还是并入下一次，等用户一句话。

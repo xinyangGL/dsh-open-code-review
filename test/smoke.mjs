@@ -1836,6 +1836,43 @@ check(
     review.valueToText({ ok: false, engine: "ocr", scope: "workspace", exitCode: 1, durationMs: 10, code: "OCR_RUN_FAILED", stderr: "boom" }, {}).includes("附录：stderr（见下）"),
   review.valueToText({ ok: true, engine: "delegate", scope: "workspace", exitCode: 0, durationMs: 10 }, {}).split("\n").slice(-2).join(" / "),
 );
+const layerText = review.valueToText(
+  {
+    ok: true,
+    engine: "ocr",
+    scope: "workspace",
+    exitCode: 0,
+    durationMs: 10,
+    reviewableFiles: [
+      { path: "lib/a.js", status: "modified", insertions: 3, deletions: 1 },
+      { path: "lib/b.js", status: "modified", insertions: 4, deletions: 2 },
+    ],
+    excludedFiles: ["notes.txt"],
+    coverage: { totalFiles: 2, totalHunks: 9, keptHunks: 9, droppedHunks: 0, slices: 2, truncated: false },
+  },
+  {},
+);
+const layerFail = review.valueToText(
+  {
+    ok: false,
+    engine: "ocr",
+    scope: "workspace",
+    exitCode: 1,
+    durationMs: 10,
+    code: "OCR_RUN_FAILED",
+    nextStep: "先 ocr llm test",
+    stderr: "boom",
+  },
+  {},
+);
+check(
+  "批 2：结论的「规模」层与「下一步」层固定存在（规模给总数+增删；成功也有一句下一步，失败仍用宿主给的 nextStep）",
+  layerText.includes("规模：可审 2 个文件（+7 -3） · 排除 1 个 · 改动 9 个 hunk") &&
+    layerText.includes("\n下一步：") &&
+    layerFail.includes("\n下一步：先 ocr llm test") &&
+    layerText.indexOf("规模：") < layerText.indexOf("下一步："),
+  layerText.split("\n").filter((l) => l.startsWith("规模：") || l.startsWith("下一步：")).join(" / "),
+);
 check(
   "批 2：严重程度按 高/中/低 展示，认不出来的一律「未分级」（未知档不当低）",
   review.severityLabel("critical").label === "高" &&
