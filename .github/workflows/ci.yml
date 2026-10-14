@@ -40,6 +40,13 @@ jobs:
           node test/bridge-smoke.mjs
           node test/client-smoke.mjs
 
+      # 打包体检（批 3）：`npm pack --dry-run` 到底会把什么发到社区 —— 版本三处一致 / 必需文件在 /
+      # 活配置、日志、测试、内部计划与自评不在 / README（中英）里链到的 docs 引用打得开。
+      # 这一条与「代码对不对」无关，但它直接决定陌生人 `dsh plugin add github:…` 装到的是个什么东西。
+      - name: Pack audit (npm pack --dry-run)
+        shell: bash
+        run: npm run test:pack
+
       # cordis-inject 需要 DSH 自带的 cordis（asar 里取不出来，仓库不 vendor 它）。
       # 以前这里容忍 exit 2 = 「跳过」，等于这套回归在 CI 上从没跑过（S6/D3 的缺口）。
       # 现在临时装一份上游 cordis + cosmokit（--no-save：不进 package.json、不进 lock），

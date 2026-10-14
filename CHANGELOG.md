@@ -3,7 +3,7 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
-## [0.12.0] — 2026-10-13（批 1 / 进行中）
+## [0.12.0] — 2026-10-13（批 1 + 批 2 + 打包体检）
 
 **只针对「代码审核」这条线的不足盘点（不加新功能，但已有的内容必须好用）：先修最危险的三条 —— 结论会在不该干净的时候说干净。**
 
@@ -68,7 +68,20 @@ Changed（外观与可访问性 · 批 2 第一步）
   （作用域限定插件自己的 `data-ocr-*` 容器，幂等，拿不到 `document` 时静默跳过）。
 - 菜单高度改为 `min(264px, 42vh)`（小窗口里不再顶到屏幕外）。
 
-Changed（批 2 第二步：结论可读性与「点前看到代价」）
+Changed（批 3 第一步：打包与 CI —— 「陌生人装到的是什么」）
+- **包只发该发的**：`files` 从整个 `docs/` 收窄到 README 真正链到的那几份
+  （`docs/host-contract.md`、`docs/pretest-gate-safety-design.md`、两张设置页截图）；
+  内部自评（`maturity-assessment`，里面写着「还不成熟」）、`ROADMAP.md`、`*-plan-*.md` **不再进包**，
+  README.zh 里对它们的引用改成 **GitHub 绝对链接**（并把「内部文档，不随包发布」写明）。
+- **`npm run test:pack`（新增 `test/pack-check.mjs`）**：跑一次 `npm pack --dry-run` 并断言四件事 ——
+  ① 版本号三处一致（package.json / npm 打出来的包 / CHANGELOG 最新一节）；② 必需文件都在包里
+  （插件主体 + 两份 README + 示例配置 + README 里链到的图与文档）；③ 活配置 `config.json`、日志、
+  `test/`、内部计划与自评、`.git`/`node_modules`、GraphFlow 产物都没进包；④ README（中英）里每个
+  `docs/…` 引用**要么就在包里、要么写成了 GitHub 绝对链接**。这条断言当场就抓出 3 处读者点不开的引用。
+- **CI 加一步**：`npm run test:pack` 进 `.github/workflows/ci.yml`（离线套件之后、cordis 之前）。
+  原来 CI 只回答「代码对不对」，不回答「发出去的是个什么东西」。
+
+
 - **严重程度不再有「未知 = 低」**：结论里的档位统一按 高/中/低 展示，**认不出来的一律「未分级」**。
   改动落在两处：`lib/reviewer.js` 的 `parseFindings()` 把不认识的 severity 归一成 `unknown`（原来是
   `minor`，注释里就写着「未知值统一归 minor」——那等于替模型低估一个问题），`SEVERITY_RANK` 把

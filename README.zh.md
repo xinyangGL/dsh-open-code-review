@@ -457,7 +457,7 @@ OCR_LLM_TOKEN    = <COMMANDCODE_API_KEY>
 
 ### 加固（v0.11.0：设置页不再问用户不关心的问题、按钮只在有改动时出现、`ocr` 档把「跑前就知道」补齐）
 
-这一版没有新引擎、没有新能力，改的全是「第一次打开时撞上的东西」。判定线与回看日写在 `docs/usability-plan-2026-10-12.md`。
+这一版没有新引擎、没有新能力，改的全是「第一次打开时撞上的东西」。判定线与回看日写在 [docs/usability-plan-2026-10-12.md](https://github.com/xinyangGL/dsh-open-code-review/blob/main/docs/usability-plan-2026-10-12.md)（内部工作计划，不随包发布）。
 
 | 问题 | 现在 |
 | --- | --- |
@@ -484,7 +484,7 @@ v0.8.0 把默认从 `auto` 挪到 `delegate`，理由是「最贵的那档不该
 | 文档把入口的待认领窗口写成「60 秒」，代码里一直是 10 分钟 | 改文档不改代码：10 分钟是有意的（模型可能隔几轮才真的调用工具，理由写在 `lib/index.js` 的 `ENTRY_PENDING_TTL_MS` 旁），60 秒反而会让「按钮到底有没有人点」这个判据失真 |
 | `autoEngine` 出厂是 `delegate`，于是「我设了 `ocr`，回合尾自动评审却拿到 `delegate`」 | 出厂留空 = **跟随 `engine`**：自动评审的结论来源与手调一致（自动评审本身仍出厂 `off`） |
 
-断言数：`test/smoke.mjs` 243 → **261**（W1/W2/W3/W4 四个工作包的判定线与回看日见 `docs/review-quality-plan-2026-10-12.md`）；新增用例全部走罐头子进程，不需要真机 `ocr`。另有一次真机验收：`engine=ocr` 审一个单文件提交（`4507de6`，9.9s、1141 tokens、0 条问题、留了 `session_id`），跑前成本预估按提交范围给出「1 个文件 → 约 3~10 分钟」；收尾的 `partial` 判定当场改成读 ocr 自己的 `manifest.coverage`（那次验收发现：只认顶层 `partial` 字段会漏报「选中 8 项、只完成 5 项」这种真机情形）。
+断言数：`test/smoke.mjs` 243 → **261**（W1/W2/W3/W4 四个工作包的判定线与回看日见 [docs/review-quality-plan-2026-10-12.md](https://github.com/xinyangGL/dsh-open-code-review/blob/main/docs/review-quality-plan-2026-10-12.md)，内部工作计划，不随包发布）；新增用例全部走罐头子进程，不需要真机 `ocr`。另有一次真机验收：`engine=ocr` 审一个单文件提交（`4507de6`，9.9s、1141 tokens、0 条问题、留了 `session_id`），跑前成本预估按提交范围给出「1 个文件 → 约 3~10 分钟」；收尾的 `partial` 判定当场改成读 ocr 自己的 `manifest.coverage`（那次验收发现：只认顶层 `partial` 字段会漏报「选中 8 项、只完成 5 项」这种真机情形）。
 
 ### 加固（v0.9.0：把「按钮到底有没有人点」变成一个可核对的数）
 
@@ -518,7 +518,7 @@ v0.8.0 把默认从 `auto` 挪到 `delegate`，理由是「最贵的那档不该
 
 ### 加固（v0.8.0：把默认改成不花钱的那档 —— 成本、心跳与「下一步」都摆到台面上）
 
-这一版来自那份成熟度评估（`docs/maturity-assessment-2026-10-10.md`），不是来自事故。只改了一个默认值，外加三处「别再让用户猜」。
+这一版来自那份成熟度评估（[docs/maturity-assessment-2026-10-10.md](https://github.com/xinyangGL/dsh-open-code-review/blob/main/docs/maturity-assessment-2026-10-10.md)，内部自评，不随包发布），不是来自事故。只改了一个默认值，外加三处「别再让用户猜」。
 
 | 问题 | 现在 |
 | --- | --- |
