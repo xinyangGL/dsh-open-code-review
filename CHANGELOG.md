@@ -3,6 +3,38 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.12.6] — 2026-10-14（一次真的委派模式评审抓到的两条：干跑被写成「未发现问题」、以及一处死代码）
+
+这一版来自**用户点了回合尾部的「启动代码审核」**之后跑的那次委派模式评审（工作区干净，所以换成
+`scope=commit` 审 `8b05c9b` 这一笔：`engine=delegate` 拿规则 + 逐片回填，由当前模型按规格自查）。
+按 OCR 规则逐片回填后报出两条可定位的问题，都已修。
+
+Fixed
+
+- **`lib/review.js`（必须修）：干跑（`preview: true`）被渲染成「✅ 未发现问题 · 已审查 N 个文件」**。
+  `plan.preview` 时 `lib/index.js` 的 `emptyReview` / `nothingReviewable` 两支都不生效（两支都带 `!plan.preview`），
+  于是 `ok=true` + 0 条问题 + 0 个文件会一路滑进 v0.12.5 新加的 clean 分支 —— 而 preview 根本没调 LLM、
+  什么都没审（真机例：`preview: true, scope=workspace` 本该说「只列了 0 个文件」，旧渲染会说「未发现问题」）。
+  修法：结论行新增 `v.preview === true` 分支（`📋 干跑：只列出了将审查的 N 个文件，没有出结论（preview 不调 LLM）`），
+  可用性行同步写「只是干跑（preview）：范围清单，没有结论」。
+- **`lib/client.js`（建议修）：死代码 + 两处过期注释**。v0.12.5 删掉了入口对 `jobs` 的调用之后，
+  `NO_ROWS_HOOK`（原先的 `useJobs` 兜底）就再没人引用；`ReviewTailButton` 与 inject 上方那两处注释
+  仍在描述「没有 jobs 时给一个恒 undefined 的选择器」这类**已经删掉**的实现（规则：Dead Code / Code Comments）。
+  现在：常量删除，两处注释改成描述**现在**的行为 —— 入口完全不碰 jobs。
+- **顺同一条规则收掉一处嵌套三元**：`lib/review.js` 的「可用性」行原来是三层嵌套三元（OCR 规则明令禁止），
+  改成 `if / else if` 链（加 preview 那一支时一起收干净）。
+
+Tests
+
+- `test/smoke.mjs` +1：干跑必须落在「📋 干跑」结论行、可用性行写「没有结论」、**全文不许出现「未发现问题」**。
+- R3 那条源码级守卫补上 `NO_ROWS_HOOK` —— 这次它正是从这个缺口漏过去的。
+- smoke **334** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 / bridge 105 / client-smoke 216 / cordis-inject + 打包体检 4/4。
+
+Note
+
+- 这次评审本身有留档价值：**离屏断言全绿、代码也「看起来对」，但干跑那一条只有把 `preview: true` 当输入
+  真的渲染一次才看得见** —— 所以这条守卫直接以「带 `preview: true` 的结果对象」为输入。
+
 ## [0.12.5] — 2026-10-14（回合尾部按钮在真机上一个都看不见：入口调了没注入的 jobs 服务，把整个槽打成错误占位符）
 
 用户报「尾部的审核按钮我没看到啊」。在已鉴权的 web 实例（web profile `link:` 装 + `dsh web --port 19388`

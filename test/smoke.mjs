@@ -966,17 +966,19 @@ check(
     })
     .join("\n");
   check(
-    "v0.12.5：尾部入口一个 jobs 调用都不留（props.useJobs / watchRows / hooks.jobs / jobsState 全清）",
+    "v0.12.5：尾部入口一个 jobs 调用都不留（props.useJobs / watchRows / hooks.jobs / jobsState / NO_ROWS_HOOK 全清）",
     !/props\.useJobs/.test(r3CodeOnly)
       && !/watchRows: jobsWatch/.test(r3CodeOnly)
       && !/hooks: \{ jobs: jobsState \}/.test(r3CodeOnly)
       && !/noJobsState/.test(r3CodeOnly)
+      && !/NO_ROWS_HOOK/.test(r3CodeOnly)
       && !/jobsApi/.test(r3CodeOnly),
     [
       `props.useJobs=${/props\.useJobs/.test(r3CodeOnly)}`,
       `watchRows: jobsWatch=${/watchRows: jobsWatch/.test(r3CodeOnly)}`,
       `hooks.jobs=${/hooks: \{ jobs: jobsState \}/.test(r3CodeOnly)}`,
       `noJobsState=${/noJobsState/.test(r3CodeOnly)}`,
+      `NO_ROWS_HOOK=${/NO_ROWS_HOOK/.test(r3CodeOnly)}`,
       `jobsApi=${/jobsApi/.test(r3CodeOnly)}`,
     ].join(" · "),
   );
@@ -2070,10 +2072,18 @@ check(
   );
   const delegateText = review.valueToText({ ok: true, engine: "delegate", scope: "workspace", exitCode: 0, durationMs: 300, reviewableFiles: [{ path: "a.js", insertions: 1, deletions: 0 }] }, {});
   const failText = review.valueToText({ ok: false, engine: "ocr", scope: "workspace", exitCode: 1, durationMs: 10, code: "OCR_RUN_FAILED", nextStep: "先 ocr llm test", stderr: "boom" }, {});
+  /* v0.12.6：干跑（preview）不调 LLM、也没审任何东西 —— 它绝不能落到「✅ 未发现问题」。
+     plan.preview 时 lib/index.js 的 emptyReview / nothingReviewable 两支都不生效（都带 !plan.preview），
+     所以 ok=true + 0 条问题 + 0 个文件会一路滑到 clean 分支（v0.12.5 的委派模式自查抓到的）。 */
+  const previewText = review.valueToText(
+    { ok: true, preview: true, engine: "ocr", scope: "workspace", exitCode: 0, durationMs: 400, reviewableFiles: [], issues: [], excludedFiles: ["notes.txt"] },
+    {},
+  );
   const issuesFirst = firstLine(issuesText);
   const cleanFirst = firstLine(cleanText);
   const delegateFirst = firstLine(delegateText);
   const failFirst = firstLine(failText);
+  const previewFirst = firstLine(previewText);
   check(
     "交互规格 M5/§5.2-1：结论行永远是结果文本第 1 行（机读头行降级到第 2 层；失败给「码 + 一句话」；delegate 不许说「未发现问题」）",
     cleanFirst.startsWith("✅ 未发现问题 · 已审查 1 个文件") &&
@@ -2085,6 +2095,13 @@ check(
       cleanText.indexOf("阿里 OpenCodeReview") > cleanText.indexOf("规模：") &&
       cleanText.indexOf("可审文件 1 个：") > cleanText.indexOf("下一步："),
     [cleanFirst, issuesFirst, delegateFirst, failFirst].map((l) => l.slice(0, 28)).join(" | "),
+  );
+  check(
+    "v0.12.6：干跑（preview）不说「未发现问题」—— 第 1 行是「📋 干跑」，可用性行写「没有结论」",
+    previewFirst.startsWith("📋 干跑：只列出了将审查的") &&
+      !previewText.includes("未发现问题") &&
+      previewText.split("\n")[1].startsWith("可用性：只是干跑（preview）"),
+    [previewFirst, previewText.split("\n")[1], `含未发现问题=${previewText.includes("未发现问题")}`].join(" | "),
   );
 }
 check(
