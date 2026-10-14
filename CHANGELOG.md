@@ -3,6 +3,40 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.12.4] — 2026-10-14（UX 规范里还欠的那几条：副行代价、后果句、三步引导、状态行只说人话）
+
+一位 UX 架构师把设置页与回合尾部按钮逐条挑过（M1–M10「必须改」）。到这一版为止，M1（`scope`+`paths`
+拒绝）、M5（结论六层）、M6（干净空态）早已落地；这一版补的是剩下的 M2/M3/M4/M7/M8/M9/M10。
+
+Changed
+
+- **`lib/client.js`（M2）**：回合尾部按钮的副行不再只有「档位代价」，还带**本回合改动文件数**
+  （`data-ocr-tail-count`）。数字来自已经开始用的那次 `workspace/changes` 快照（`data.total`）——原先它被
+  压成布尔值丢掉。`null` 表示「不知道」，照旧 fail-open 显示按钮；只有明确读到 `0` 才隐藏。
+- **`lib/client.js`（M3）**：按钮启动失败时不再只写「评审没能启动。」——补上去处（先看标题栏的「后台任务」，
+  再跑 `ocr_status` 看接入状态）。
+- **`lib/client.js`（M4）**：设置页基础区新增「三步开始用」静态引导（装 ocr → 在模型路由里选一个候选 →
+  回合尾部点按钮／说「评审一下」／用 `/ocr-review`）。
+- **`lib/client.js`（M7）**：停止按钮的武装态后果句补上「已经产生的用量照常计费，不会因为取消而退还」。
+- **`lib/client.js`（M9）**：就绪状态行只说人话（「插件已就绪 · 配置改动立即生效 · 评审用 DSH 的模型与额度 ·
+  LLM 走 DSH 本机桥」），不再把 `entry id / state / mode / writable` 拼在脸上；这四个宿主内部字段挪进
+  **只读诊断区**（排查时仍查得到），loading / unavailable / 只读这些异常态照旧全量显示。
+- **`lib/client.js`（M10）**：高级区三条长 hint（engine / reviewerAgent / preTest）压到一句人话（≤80 字），
+  细节交给 README。
+
+Fixed
+
+- **`lib/index.js`（M8）**：取消路径（`run.aborted`）与超时路径同一口径 —— 也说明「已经产生的用量不因取消而
+  退还」，不再出现「超时说了用量、取消没说」的不一致。
+
+Tests
+
+- `test/smoke.mjs` +7：M2（副行改动文件数 + fail-open 语义）、M3（失败文案带去处）、M4（三步引导存在）、
+  M7（后果句含用量）、M8（取消与超时同口径）、M9（就绪状态行不含内部字段、内部字段在诊断区）、
+  M10（三条 hint ≤80 字）。
+- `test/client-smoke.mjs` +2：M9 的两面 —— 就绪状态行只说人话、内部字段在诊断区。
+- smoke **331** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 / bridge 105 / client-smoke **216** / cordis-inject + 打包体检 4/4。
+
 ## [0.12.3] — 2026-10-14（provider 与 model 混搭 —— 这条会让评审在真机上全部失败）
 
 把 `llm.mode=dsh` 的评审在真机上跑通时撞出来的：`ocr_status` 报路由是

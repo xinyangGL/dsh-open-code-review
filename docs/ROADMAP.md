@@ -20,6 +20,7 @@
 | v0.12.1 | 批 2 收尾 + 两条真机边界走出来的诚实缺陷：英文界面漏译的 5 条 `placeholder`（「加守卫」加出来的）＋ `engine=delegate` 撞上「规格里没有可审文件」时不再报「成功」；结论补上「规模」与「下一步」两层（**批 2 的结论六层齐了**） | commit `ccd444e` + `59c38c2` + `5e8a61b`；`CHANGELOG.md` 0.12.1 |
 | v0.12.2 | 回合尾部入口的 **fail-open 加固**：只有明确读到 `total=0` 才隐藏按钮（记录缺失 / 请求失败 / 路由不可用一律给入口）—— 这条是 P0-C 脚本化回归在真机 GUI 上走出来的 | commit `0e383e4`（tag `v0.12.2`）；`CHANGELOG.md` 0.12.2 |
 | v0.12.3 | 修 `llm.mode=dsh` 下 **provider 与 model 混搭**：设置页只填了模型名、provider 留空时，路由会去借「当前会话的 provider」，而桥每个请求都重解析一次 ⇒ 同一批评审里 6/6 请求被 provider 拒绝。改法＝只接受完整的一对 + 只写一半时按 DSH 模型目录补全 + 桥**钉住**本次评审那对路由 | 见 §6 变更记录；`CHANGELOG.md` 0.12.3 |
+| v0.12.4 | UX 规范「必须改」里剩下的 7 条：按钮副行给出本回合改动文件数（M2）、失败文案带去处（M3）、设置页「三步开始用」引导（M4）、停止后果句写明用量不退（M7）、取消路径与超时同口径（M8）、就绪状态行只说人话＋内部字段挪进只读诊断区（M9）、三条长 hint 压到 ≤80 字（M10） | 见 §6 变更记录；`CHANGELOG.md` 0.12.4 |
 
 **测试口径**（提交时实测，`npm test` `EXIT=0`）：smoke **286** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
@@ -37,6 +38,9 @@ bridge 104 / client-smoke **214** / cordis-inject 全部通过，另加打包体
 **v0.12.2 + v0.12.3 实测**（`npm test` `EXIT=0`）：smoke **324** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge **105** / client-smoke 214 / cordis-inject 全部通过，另加打包体检 4/4；
 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` 同数通过（离线档是等价替换，不是跳过）。
+
+**v0.12.4 实测**（`npm test` `EXIT=0`）：smoke **331** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
+bridge 105 / client-smoke **216** / cordis-inject 全部通过，另加打包体检 4/4。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
 `RELEASING.md` 的「一个 tag 只带一个高风险改动」在这条线上已经被破坏过一次；要不要拆（重写历史）由作者决定。
@@ -271,3 +275,15 @@ reviewer 45 / bridge **105** / client-smoke 214 / cordis-inject 全部通过，�
     随后 `ocr_status(checkLlm:true)` 报连通性**可用**、tool-call 往返通过，桥的失败计数不再增长。
   - **测试纪律 D7 一并修掉**：`test/smoke.mjs` 顶部把 `DSH_OPEN_CODE_REVIEW_CONFIG` 指到一个空 JSON ——
     这 5 条路由断言过去会随本机 `config.json` 的内容变色（本机补上 provider 后它们集体转红，正好暴露耦合）。
+- **2026-10-14（UX 规范「必须改」收尾 · v0.12.4）**：
+  - 起因：用户问「所以你的事情都做完了吗」→ 逐条核对 UX 架构师的 M1–M10 与本文 §2/§3，如实回答**没有全做完**，
+    列出仍欠的 7 条（M2/M3/M4/M7/M8/M9/M10），随后补齐。
+  - 改动面（`lib/client.js` 六处 + `lib/index.js` 一处）：按钮副行加「本回合 N 个文件改动」（M2，数字取自
+    已经读到的 `workspace/changes` 快照，`null`＝不知道、照旧 fail-open）；失败文案补去处（M3）；设置页加
+    「三步开始用」（M4）；停止后果句写明用量不退（M7）；取消路径与超时路径同口径（M8）；就绪状态行只说人话，
+    `entry id / state / mode / writable` 挪进只读诊断区（M9）；三条长 hint 压到 ≤80 字（M10）。
+  - 测试：`test/smoke.mjs` +7（七条各自一条源码级守卫，其中 M10 直接量三条 hint 的字数）、
+    `test/client-smoke.mjs` +2（M9 的两面）⇒ smoke **331** / client-smoke **216**，全套 `EXIT=0` + 打包体检 4/4。
+  - **踩坑记录**：M9 的改动一开始让 client-smoke 的 7 条老断言转红（它们读的是状态行里的内部字段）——
+    正确做法不是把断言删掉，而是把内部字段搬进诊断区、并为 M9 补两条新断言；另有 1 条老断言（「高级项「模型名」
+    默认收起」）被 M4 的三步引导文案里出现的字面标签带红，改成「在「高级设置 → 模型路由」里点开模型下拉」后恢复。

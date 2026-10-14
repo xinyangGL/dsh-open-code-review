@@ -1570,6 +1570,87 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
     pickerSource.includes('"data-ocr-stop-armed"') && /progress\.stopConsequence/.test(pickerSource),
     "缺少武装态后果句",
   );
+
+  /* ------------------------------- v0.12.4：UX「必须改」里剩下的 M2/M3/M4/M7/M8/M9/M10 ------------------------------- */
+  {
+    const m8Source = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
+
+    /* M7：后果句必须把「用量不退」说清楚 —— 取消不等于不计费。 */
+    check(
+      "v0.12.4（M7）：停止武装态的后果句写明用量照常计费",
+      /"progress\.stopConsequence": "[^"]*用量[^"]*计费/.test(pickerSource),
+      "后果句没提用量",
+    );
+
+    /* M8：取消路径与超时路径同一口径（同一句「不因…而退还」）。 */
+    check(
+      "v0.12.4（M8）：取消路径也说明用量不退（与超时路径同口径）",
+      /不因终止而退还/.test(m8Source) && /不因取消而退还/.test(m8Source),
+      "取消路径没接上用量说明",
+    );
+
+    /* M2：按钮副行给出「本回合 N 个文件改动」，数字来自已经读到的那次请求（不新增宿主通道）。 */
+    check(
+      "v0.12.4（M2）：按钮副行用上本回合改动文件数（data.total 不再被压成布尔值丢掉）",
+      pickerSource.includes('"data-ocr-tail-count"') &&
+        /setChangeCount\(data && Number\.isSafeInteger\(data\.total\)/.test(pickerSource) &&
+        /tail\.changes/.test(pickerSource),
+      "副行没有改动文件数，或数字来源被丢掉",
+    );
+
+    /* M3：按钮失败文案必须有去处 —— 不许只显示「评审没能启动。」 */
+    check(
+      "v0.12.4（M3）：按钮失败文案带去处（后台任务 / ocr_status），不是零信息的一句",
+      /"tail\.failed": "[^"]*ocr_status/.test(pickerSource) && /"tail\.failed": "[^"]*后台任务/.test(pickerSource),
+      "失败文案没有去处",
+    );
+
+    /* M4：首次使用的落点 —— 设置页 basic 区的三步引导。 */
+    check(
+      "v0.12.4（M4）：设置页有「三步开始用」静态引导",
+      pickerSource.includes('"data-ocr-getting-started"') &&
+        /gettingStarted\.step1/.test(pickerSource) &&
+        /gettingStarted\.step3/.test(pickerSource),
+      "设置页没有三步引导",
+    );
+
+    /* M9：就绪态只说人话；内部字段（entry id / state / mode / writable）只在异常态出现。 */
+    {
+      const readyAt = pickerSource.indexOf("status.readyDsh");
+      const statusAt = pickerSource.indexOf("const statusLine = () => {");
+      const body = statusAt >= 0 ? pickerSource.slice(statusAt, pickerSource.indexOf("\n      };", statusAt)) : "";
+      check(
+        "v0.12.4（M9）：就绪态只说人话（内部字段 entry/state/mode/writable 只在异常态出现）",
+        readyAt > 0 &&
+          /snap\.status === "ready" && snap\.writable !== false/.test(body) &&
+          body.indexOf('"data-ocr-status-ready"') > 0 &&
+          body.indexOf('parts.push(fmt(t("status.entry")') > body.indexOf('"data-ocr-status-ready"'),
+        "就绪态仍外露宿主内部字段，或缺少就绪态分支",
+      );
+    }
+
+    /* M10：高级区三条长 hint 压到一句人话（≤80 字），细节交给 README。 */
+    {
+      const hintOf = (key) => {
+        const at = pickerSource.indexOf(`{ key: "${key}"`);
+        if (at < 0) return "";
+        const line = pickerSource.slice(at, pickerSource.indexOf("\n", at));
+        const m = line.match(/hint:\s*"([^"]*)"/);
+        return m ? m[1] : "";
+      };
+      const tooLong = ["engine", "reviewerAgent", "preTest"].filter((k) => {
+        const h = hintOf(k);
+        return h.length === 0 || h.length > 80;
+      });
+      check(
+        "v0.12.4（M10）：高级区三条长 hint 已压到 ≤80 字（细节移进 README）",
+        tooLong.length === 0,
+        tooLong.length === 0
+          ? "engine/reviewerAgent/preTest 都 ≤80 字"
+          : `仍过长或取不到：${tooLong.map((k) => `${k}=${hintOf(k).length}字`).join("、")}`,
+      );
+    }
+  }
   /* 批 2（UI 规范）：容器底色只许用 layer-1/2/3 令牌 —— 不许自造 α<0.95 的叠层色当容器底。 */
   {
     const semiTransparent = [...styleBlock.matchAll(/background:\s*"(rgba\([^)]*\)|[^"]*?)"/g)]

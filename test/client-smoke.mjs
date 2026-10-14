@@ -397,6 +397,24 @@ for (const label of HIDDEN_LABELS) {
 }
 check("带出条目 id", html.includes("include:dsh-open-code-review"));
 check("状态行含 ready/可写", html.includes("状态 ready") && html.includes("可写"));
+/* v0.12.4（M9）：上面两条现在指向**只读诊断区**；就绪状态行本身只说人话。 */
+const readyStatusNode = hosts(tree).find((n) => n.props && n.props["data-ocr-status"] === "ready");
+const diagBlockNode = hosts(tree).find((n) => n.props && n.props["data-ocr-diagnostics"] === "1");
+const readyStatusText = readyStatusNode ? textOf(readyStatusNode) : "";
+const diagBlockText = diagBlockNode ? textOf(diagBlockNode) : "";
+check(
+  "v0.12.4（M9）：就绪状态行只说人话（entry id / state / mode / writable 都不在状态行里）",
+  readyStatusText.includes("已就绪") &&
+    !readyStatusText.includes("include:") &&
+    !readyStatusText.includes("状态 ready") &&
+    !readyStatusText.includes("可写"),
+  readyStatusText || "没有就绪状态行",
+);
+check(
+  "v0.12.4（M9）：宿主内部字段挪进只读诊断区（排查时仍查得到）",
+  diagBlockText.includes("include:dsh-open-code-review") && diagBlockText.includes("可写"),
+  diagBlockText.slice(0, 120) || "没有诊断区",
+);
 check("收起时高级区没有任何控件行", controlRows(tree).filter((r) => ADVANCED_KEYS.includes(r.key)).length === 0, `n=${controlRows(tree).length}`);
 check("已改字段有标记", html.includes("已改"));
 check("enabled 勾选", hosts(tree).some((n) => n.tag === "input" && n.props.type === "checkbox" && n.props.checked === true));
