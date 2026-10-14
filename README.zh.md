@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml/badge.svg)](https://github.com/xinyangGL/dsh-open-code-review/actions/workflows/ci.yml)
 
-> 各版本（v0.3.0 → v0.9.0）的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)。
+> 各版本的逐版加固明细与失败码见 [CHANGELOG.md](CHANGELOG.md)（当前 **v0.12.0**）。
 
 把 **阿里 OpenCodeReview（`ocr`，npm 包 `@alibaba-group/open-code-review`）** 接入 DeepSeek Harness 的第三方插件。
 
@@ -62,6 +62,16 @@
 | 花钱之前先看到：`engine = ocr` 的评审在第一条备注里给出本次规模与时间量级，跑不跑你说了算 | 第一条 note 的 `本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟`；拿不到预估时只缺这半句，评审照跑 |
 
 **不承诺**（这些话说出来就是过度承诺）：更准、更强、发现所有 bug、CI 级、安全审计、全仓扫描。三档引擎的差别不是「能力档位」，而是**成本与责任方的切换**：`ocr` 把覆盖与误报收敛交给流水线，`delegate` 把责任交给当前会话的模型，第三档交给一个独立上下文的只读评审 agent。
+
+### 第一次点「启动代码审核」会看到什么
+
+陌生人打开这个插件的第一分钟，界面上就能看到这几件事（v0.12.0 起）：
+
+1. **按钮只在真有改动时出现** —— 本回合没写文件就没有按钮；宿主不给「本回合有改动」这个信号时会退回「总是显示」，宁可按不到，也不假装知道。
+2. **点之前，按钮副行写着代价** —— 按当前引擎给一句话：`ocr` 档「跑 OCR 流水线，按 tokens 计费、每文件分钟级」，`delegate` 档「不调 LLM，几秒出规格」。这是**量级**提醒，不是报价（报价是跑起来后第一条备注里的规模与时间预估）。
+3. **点下去等于往会话里放一条指令**（不是黑盒调用）：模型先 `ocr_status` 摸接入状态，再 `ocr_review`。会话里会出现「评审进度」行（阶段 + 已用时），Jobs 面板里是同一个任务。
+4. **结论固定六层**：结论行 / 本次代价与规模 / 问题清单（按 `[高] [中] [低] [未分级]` 分档，并给分组计数）/ 下一步 / 出处 / 附录（审查规格、备注、被截断的输出、原始 JSON 都在附录里，这一层**永远存在**）。
+5. **跑不成不会说「没问题」**：失败给稳定结果码 + 一句「下一步」；覆盖不全给 `⚠️ 部分结论` + 覆盖回执（收录了多少 hunk、丢了几个、哪一片被截断）。
 
 ## 安装
 
@@ -785,7 +795,7 @@ dsh-open-code-review/
 │  ├─ ocr-cli.js         # 可执行文件探测、受管子进程（含实时输出回调）、LLM 环境变量映射（本机桥或静态端点）、git diff
 │  └─ review.js          # 参数规范化、命令行拼装、JSON 解析、文本渲染
 └─ test/
-   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 286 项；缺 ocr 时同一套会跳过真机用例、换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿（条数随之减少）；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host）、v0.8.0/v0.10.0 默认引擎与成本/心跳（默认 ocr、autoEngine 留空跟随 engine、pickEngine 三例、成本预估三例、规格分片与覆盖回执、hunk 级截断与单一上限、partial 三来源、绝不传 `--max-tokens-budget`、每个失败码都有可执行的 nextStep、costHint 对 delegate 静默、心跳区分「还没输出」与「刚有输出」、nextStep 进 schema、心跳接线源码级断言）、v0.11.0 路由与 ocr 档体验（currentInitiator→Session.requestContext 跟随当前会话、设置页优先、桥不可用即 `OCR_LLM_MISSING` 且不落子进程、`llm.bridgePort` 顺延与占满十连、`requestedPort`/`portShifted`、实测规模进开跑行、超时下限开跑前告警、预计剩余三段话术、`reviewSessionId` 与会话回看提示、TIMEOUT/ABORTED 的「保住了什么」、partial 首行置顶、bridgePort 不进设置页的两条守卫））：node test/smoke.mjs
+   ├─ smoke.mjs          # 离线冒烟（假 ctx + 罐头/真 ocr，装了 ocr 318 项；缺 ocr 时同一套会跳过真机用例、换成验「定位失败」的诊断路径，所以裸 clone 的 CI 也全绿（条数随之减少）；含工具 schema 子集 + 返回值校验、结果码、fail-closed（7 种坏形状）、取消（abort 前不 spawn / 跑到一半必 terminate）、生命周期收尾、独立评审 agent 全路径、评审进度与 job 归属（owner 透传到 start/wait）、逐条列问题与 0 文件口径、配置分层与默认值单一来源、三层配置先深合并再归一 + 上下界/枚举收敛、超时同源与上限夹取、桥就绪等待、清单/图标/locale/DSH 默认模型校验、评审先于测试 preTest（测试命令识别含误报反例 / 三档 / 只走 pre-execute 一条机制 / 闸门异常 fail-open 计数与 lastDecision / 覆盖状态随评审与写文件变化 / 源码级断言不再注册全局 tools.guard / 文件层指纹与启停同步）、v0.7.0 紧急制动与爆炸半径（armHook 白名单内外、注册抛错不冒泡、no ctx.on 记账、源码级认定无裸 ctx.on 且 armHook 出现 7 次、ocr_status.hooks 四件套、schema 声明 disabled/disabledBy/hooks/host）、v0.8.0/v0.10.0 默认引擎与成本/心跳（默认 ocr、autoEngine 留空跟随 engine、pickEngine 三例、成本预估三例、规格分片与覆盖回执、hunk 级截断与单一上限、partial 三来源、绝不传 `--max-tokens-budget`、每个失败码都有可执行的 nextStep、costHint 对 delegate 静默、心跳区分「还没输出」与「刚有输出」、nextStep 进 schema、心跳接线源码级断言）、v0.11.0 路由与 ocr 档体验（currentInitiator→Session.requestContext 跟随当前会话、设置页优先、桥不可用即 `OCR_LLM_MISSING` 且不落子进程、`llm.bridgePort` 顺延与占满十连、`requestedPort`/`portShifted`、实测规模进开跑行、超时下限开跑前告警、预计剩余三段话术、`reviewSessionId` 与会话回看提示、TIMEOUT/ABORTED 的「保住了什么」、partial 首行置顶、bridgePort 不进设置页的两条守卫））：node test/smoke.mjs
    ├─ schema-subset.mjs  # 宿主 schema 子集与返回值的校验器（smoke.mjs 共用；register 时查 schema、调用时查 execute 的返回值 —— 这两处都曾让真机炸过）
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
@@ -801,13 +811,21 @@ dsh-open-code-review/
                           #   E2E_SCOPE=scan E2E_PATHS=lib/bridge.js 可在工作区干净时也真审出问题
 ```
 
+`npm test` 末尾还接上 `node test/pack-check.mjs`（打包体检四项：版本号在 `package.json` / 打出来的包 / CHANGELOG 最新一节三处一致；必需文件在包里；活配置、日志、测试与内部计划不在包里；两份 README 里每个 `docs/…` 引用要么进包、要么是 GitHub 绝对链接）。
+
+想在本地复现 CI 的**离线档**（机器上没装 `ocr`）：`OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` —— 置位后任何 `ocr` 可执行文件的查找都返回空，**绝对路径也一样**（工作区 `config.json` 常把 `ocrPath` 钉成绝对路径，只挡 PATH 查找是挡不住的；正则只匹配 ocr，免得把 `git` 一起挡掉）。
+
 ## 已知限制
 
 - 自动评审依赖 `agent/turn-stopping` 事件；若宿主未加载提供该事件的插件则自动档不触发（工具与命令不受影响）。
 - `ocr review` 的 JSON 结构在不同版本间可能变化，插件对 `issues[]` 做了宽松提取，但**永远保留 `rawJson`** 供核对。
 - 自动评审与「模型自己调用 `ocr_review`」可能重复；签名判重只针对自动档。
 - 非 git 仓库 / 空仓库下 `workspace` 范围没有可审改动（`preview` 会给出 0 个文件）。
-- `dsh` 路由要求宿主加载了提供 `llm` 服务的插件（本机是 `llm-commandcode` / `llm-pi-ai` 之类）；缺它时自动回落 `endpoint` 路由，行为与老版本一致。
+- `dsh` 路由要求宿主加载了提供 `llm` 服务的插件（本机是 `llm-commandcode` / `llm-pi-ai` 之类）；缺它时**不再静默回落** `endpoint`（v0.11.0 起）：结果是 `OCR_LLM_MISSING`，`nextStep` 给三种解法（补上提供 `llm` 的插件 / 显式填 `endpoint` / 改用 `engine = delegate`）。
+- `scope = workspace` **不接受 `paths`**（v0.12.0 起显式拒绝，结果码 `OCR_INVALID_ARGS`）：`ocr review` 没有 `--path`，给了只会被静默忽略。要按文件/目录审用 `scope = scan`；只想把返回的规格过滤到这些路径，用 `engine = delegate`。
+- 同一时间**只跑一次评审**（v0.12.0 单飞闸）：第二次调用立刻以 `OCR_ALREADY_RUNNING` 返回，不排队、也不重复烧 tokens。
+- 进度是**阶段级**的、不是逐文件百分比：`ocr` 不吐增量输出，长评审期间只有心跳与已用时。
+- 停止按钮长在「评审进度」行里，走宿主的 `jobs` 服务；宿主没加载提供 `jobs` 的插件时，按钮仍能启动评审，但**没有可视化停止入口**（v0.12.0 起不再因此把按钮藏掉）。
 - 本机桥是明文 HTTP + Bearer 随机 token，只绑定 `127.0.0.1`、只活在本进程内，token 通过子进程环境变量交给 `ocr`（同机信任模型，不做 TLS/签名；断言见 `test/smoke.mjs` 的「只监听 127.0.0.1」与 `test/bridge-smoke.mjs`）。
 - `ocr` 退出码 0 **不等于**评审通过：输出 JSON 里缺少可识别的问题清单字段（或不是 JSON / 是空串）时结果算失败（`OCR_OUTPUT_UNPARSABLE` / `OCR_OUTPUT_SHAPE_UNKNOWN`），免得「评审其实没跑成」被当成「没问题」。
 - 插件卸载/重载会先 abort 在飞的评审（子进程 `terminate()`，结果标 `OCR_ABORTED`）并等它们 settle，所以 `dispose` 可能要等子进程收尾。
