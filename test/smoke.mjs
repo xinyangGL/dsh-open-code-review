@@ -1483,6 +1483,13 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
       !/\$\s?\d/.test(pickerSource),
     "按钮没有代价副行，或档位分支/兜底文案缺失",
   );
+
+  /* 武装态：点过一次停止后，必须写出「再点一次会发生什么」（保留部分结论 / 没跑完的没有结论）。 */
+  check(
+    "批 2：进度卡的武装态会写出后果句（不是只有一个「再点一次停止」的按钮）",
+    pickerSource.includes('"data-ocr-stop-armed"') && /progress\.stopConsequence/.test(pickerSource),
+    "缺少武装态后果句",
+  );
   /* 批 2（UI 规范）：容器底色只许用 layer-1/2/3 令牌 —— 不许自造 α<0.95 的叠层色当容器底。 */
   {
     const semiTransparent = [...styleBlock.matchAll(/background:\s*"(rgba\([^)]*\)|[^"]*?)"/g)]
@@ -1802,6 +1809,12 @@ check(
   listText.split("\n").slice(-5).join(" / "),
 );
 const listJobText = (listJobs.records.get("ocr-review-1")?.output ?? []).map((o) => o.text).join("");
+check(
+  "批 2：结论的附录行固定存在（有材料就列出材料，没有就明写「无附加输出」）",
+  review.valueToText({ ok: true, engine: "delegate", scope: "workspace", exitCode: 0, durationMs: 10 }, {}).includes("附录：无附加输出") &&
+    review.valueToText({ ok: false, engine: "ocr", scope: "workspace", exitCode: 1, durationMs: 10, code: "OCR_RUN_FAILED", stderr: "boom" }, {}).includes("附录：stderr（见下）"),
+  review.valueToText({ ok: true, engine: "delegate", scope: "workspace", exitCode: 0, durationMs: 10 }, {}).split("\n").slice(-2).join(" / "),
+);
 check(
   "批 2：严重程度按 高/中/低 展示，认不出来的一律「未分级」（未知档不当低）",
   review.severityLabel("critical").label === "高" &&
