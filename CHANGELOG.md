@@ -3,6 +3,24 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.12.2] — 2026-10-14（回合尾部入口的 fail-open 加固 —— 这条是脚本化回归走出来的）
+
+P0-C 12 用例回归里，「按钮正例」在**已鉴权的测试 GUI** 上撞出真问题：回合尾部压根没有入口。
+定位到 `lib/client.js` 的 turnTail 入口把「宿主有改动服务、但这一回合没留下改动记录」当成
+「本回合没改动」，直接 `return null` —— 与同一段代码顶部注释承诺的 fail-open（读不到就退回
+「总是显示」）相反。旁证：宿主改动服务不可用时，按钮整块静默消失（功能在，入口没了）。
+
+Fixed
+
+- **`lib/client.js`**：`if (feedReady && (changesSeq === null || hasChanges !== true)) return null;`
+  → `if (feedReady && hasChanges === false) return null;` —— 只有明确读到 `total=0` 才隐藏；
+  记录缺失、请求失败、路由不可用一律给出入口。
+
+Tests
+
+- `test/client-smoke.mjs`：「本回合没有改动记录」的断言从「按钮不出现」改成「按钮出现（按不知道处理）」，
+  注释里写明取舍来由。smoke **321** / client-smoke **214**，其余同 v0.12.1。
+
 ## [0.12.1] — 2026-10-14（英文界面的 placeholder 补齐 —— 这条缺陷是「加守卫」加出来的）
 
 **v0.12.0 发布后我补了一条「`en` 词典必须覆盖 `zh` 词典的每一个键」的源码级守卫，它当场点名 5 条** ——

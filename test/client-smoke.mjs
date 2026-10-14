@@ -1272,7 +1272,9 @@ snapshot = snapshotKept;
 
 /* v0.11.0：按钮只在「本回合确实动了工作区」时出现。
    改动记录由插件注册的 conversation 定义发布（只发布数据、不发布视图节点）；事件体只有 {turn}，
-   所以真正的文件清单要按 seq 去宿主那里取 api/changes.summary。宿主没有这一支时退回「总是显示」。 */
+   所以真正的文件清单要按 seq 去宿主那里取 api/changes.summary。宿主没有这一支时退回「总是显示」。
+   v0.12.2 收紧为「只有明确读到 total=0 才隐藏」：记录缺失、请求失败、路由不可用一律显示 ——
+   真机上遇到过宿主改动服务不可用，按钮整块静默消失（功能在，入口没了）。 */
 const turnWithChanges = (seq) => ({
   data: { get: (kind) => (kind === "ocrTurnChanges" ? { turn: 1, changesSeq: seq } : undefined) },
 });
@@ -1294,7 +1296,11 @@ check("宿主给了改动记录、本回合确实改了文件：按钮出现", B
 const cleanTree = await renderTailReady([], { fetchChanges: fetchSummary(0) });
 check("本回合没有改动（total=0）：按钮不出现", tailButton(cleanTree) === undefined, cleanTree === null ? "null" : textOf(cleanTree));
 const noRecordTree = await renderTailReady([], { turn: { data: { get: () => undefined } } });
-check("本回合没有改动记录：按钮不出现", tailButton(noRecordTree) === undefined, noRecordTree === null ? "null" : textOf(noRecordTree));
+check(
+  "本回合没有留下改动记录（宿主没发 workspace/changes，或这一回合是在页面刷新前完成的）：按「不知道」处理，仍给出入口 —— 真机上出现过宿主改动服务不可用、按钮整块静默消失",
+  Boolean(tailButton(noRecordTree)),
+  noRecordTree === null ? "null" : textOf(noRecordTree),
+);
 const offlineTree = await renderTailReady([], { fetchChanges: async () => { throw new Error("离线"); } });
 check("取不到改动清单时退回「总是显示」（fail-open：别在刚改完代码时把入口藏掉）", Boolean(tailButton(offlineTree)), textOf(offlineTree));
 const noRouteTree = await renderTailReady([], { fetchChanges: async () => ({ ok: false, status: 404, json: async () => ({}) }) });
