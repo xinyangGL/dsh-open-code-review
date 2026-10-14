@@ -16,12 +16,17 @@
 | v0.11.0 | 设置页三分法（首屏 4 项 / 高级 3 组 / 只读诊断区列 15 个被移出的键）；按钮只在「本回合有改动」时出现（fail-open）；本机桥固定端口 `llm.bridgePort`（默认 18800）；dsh 路由不再静默回落 `endpoint`（`OCR_LLM_MISSING` + `nextStep`）；路由顺序加入「当前会话正在用的模型」；`ocr` 档体验六项 | commit `cfc31eb`；[usability-plan-2026-10-12.md](usability-plan-2026-10-12.md) §7 |
 | v0.11.1 | 修「高级设置里的模型名不能选」：模型目录读取风暴（生成的 namespace 每读一次就是新函数，却进了 `useEffect` 依赖）＋8 秒超时与「重试读取目录」按钮；新增模型思考强度 `llm.effort`（仅文件层，转发为 DSH `GenerateOptions.reasoningEffort`） | commit `bd0c9f3` + `a35480b`；`CHANGELOG.md` |
 | v0.11.2 | 盘点真机撞出的两个缺陷：按需评审 skill 的 `source`（**注册成功 ≠ 能加载**，`ocr_status` 那时报 `registered=true` 是假绿）＋「没有可审文件」不再说成「未发现问题」 | commit `2050561`；`CHANGELOG.md` 0.11.2；本文 §6 |
+| v0.12.0 | 按专家方案分三批收口（**只针对「代码审核」这条线，不加新功能**）：**批 1 结论可信** —— E2 agent 档不再丢掉 `partial`／E1 `scope` 配 `paths` 改成显式拒绝（`OCR_INVALID_ARGS`）／M6 工作区干净时不再说「未发现问题」／E3 结论新增「可用性」行与覆盖回执／T1 单飞闸 `OCR_ALREADY_RUNNING`／T2 工具超时与 `maxTimeoutMinutes` 对齐／R5 结果码常量收敛（15 → 16）／R6 覆盖回执写进 job 记录／R3 回合尾部按钮不再依赖 `jobs` 服务／R4 usage 的「假账」边界写进代码；**批 2 外观与可访问性** —— 令牌化 + 4px 刻度 + 圆角/字号收敛 + 对比度下限 + 删掉「猜背景色」（半透明菜单根因）+ 未知严重度＝「未分级」（不再当 minor）+ 按钮副行代价标签 + `role`/`aria`/`:focus-visible`；**批 3 发布面** —— `files` 收窄（内部评估文档不再进包）+ `npm run test:pack` 进 CI + 本地可复现 CI 离线档 + 上架版 README + 设置页截图重拍 | commit `575de1a`（tag `v0.12.0`）；[Release](https://github.com/xinyangGL/dsh-open-code-review/releases/tag/v0.12.0)；CI [run #27](https://github.com/xinyangGL/dsh-open-code-review/actions/runs/38495153246) |
 
 **测试口径**（提交时实测，`npm test` `EXIT=0`）：smoke **286** / killswitch 44 / host-contract 37 / job 51 /
 reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
 
 **v0.11.1 实测**（commit `a35480b`，`npm test` `EXIT=0`）：smoke **287** / killswitch 44 / host-contract 37 /
 job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部通过。
+
+**v0.12.0 实测**（`npm test` `EXIT=0`）：smoke **319** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
+bridge 104 / client-smoke 213 / cordis-inject 全部通过，另加**打包体检 4/4**（`npm run test:pack`，已进 CI）；
+`OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **318 项全过**（CI 的离线档第一次能在本机复现，见 §3）。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
 `RELEASING.md` 的「一个 tag 只带一个高风险改动」在这条线上已经被破坏过一次；要不要拆（重写历史）由作者决定。
@@ -41,10 +46,22 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
 | v0.11.1 模型候选：下拉能看见 | ✅ **2026-10-13 用 bsk 在真机页面上量化确认**：修前菜单 rect `[556, 854, 800, 231]`（设置面板 `[556, 50, 800, 800]` + `overflow:hidden`）⇒ 菜单在屏幕外被裁掉；修后 `[981, 583, 335, 231]` ⇒ 在输入框正下方、面板内，截图可见 4 条候选，点一条写回 `deepseek-flash`。⬜ 仍缺：用户在自己那台桌面 GUI 里刷新一次页面后看到候选（用户的窗口需要整页刷新，见 §3 的两层加载面） | 真机几何 + 截图（`C:\Users\吴礼凯\AppData\Local\Temp\ocr-ui-menu-opaque.png`） | 2026-10-13 bsk 复核；CHANGELOG `0.11.1` |
 | v0.11.2 skill 可加载 | 重启桌面 DSH 后 `skill ocr-on-demand-review` 返回技能正文（不再是 `source must be a string`）；「没有可审文件」的情形在界面上显示为部分结果而不是「未发现问题」 | 重启后即可确认 | 2026-10-13 headless 已验证；桌面进程仍跑旧代码 |
 | v0.11.2 没有可审文件不说「未发现问题」 | ✅ **2026-10-13 已用 `test/smoke.mjs` 的守卫钉住**（`partial=true` + 「本次没有可审的代码改动」+ 不许出现「未发现问题」） | 已完成 | CHANGELOG `0.11.2` |
+| v0.12.0 包内容 | ✅ **2026-10-14 全新 profile 装卸验收通过**：`dsh plugin --profile rc-v012 add github:xinyangGL/dsh-open-code-review` → 装到 **version 0.12.0**；包内 `docs/` 只剩 `host-contract.md`、`pretest-gate-safety-design.md`、两张截图；`config.json` / `ROADMAP.md` / `maturity-assessment-*` / `review-quality-plan-*` / `interaction-spec-*` / `test/` **都不在包里** | 已完成（验证用的 `rc-v012` profile 已删） | `test/pack-check.mjs`；2026-10-14 实测 |
+| v0.12.0 桌面观感 | 重启桌面 DSH 后确认三件事：① 模型下拉能列出候选（含读不到时的「重试读取目录」）② 按钮只在真有改动的回合出现、副行写出代价量级 ③ 结论里能看到「可用性」行与覆盖回执 | 重启后即可确认（见 §3「两层加载面」） | CHANGELOG `0.12.0` |
+| v0.12.0 `llm.effort` 真机 | 跑一次 `engine=ocr`，确认思考强度确实改变了行为（`llm.effort` 只在文件层，默认留空 = 跟随 DSH/模型默认） | 待用户排期 | CHANGELOG `0.11.1`；§5 |
+| **P0-C 真人点击 12 用例** | ⬜ **仍未做** —— 这是 CPO 定的发布门（「未过不发布」），而 v0.12.0 事实上越过了它就发布了；见 §6 的 2026-10-14 条，别把它记成通过 | 未排期 | CPO 专家方案；§4 |
 
-## 3. 发行门（`RELEASING.md`，尚未做）
+## 3. 发行门（`RELEASING.md`）
 
-- ⬜ **push → tag `v0.11.1` → GitHub Release → CI 六 job 全绿**（`tmp-ci-watch.mjs <sha>`）。
+- ✅ **2026-10-14 已发行 `v0.12.0`**：`push origin main`（远端 `refs/heads/main` = `575de1a`）→ annotated tag
+  `v0.12.0`（tag 对象 `48ac77d` → 提交 `575de1a`，已 push）→ GitHub Release 已建（API `201`；此前 22 个
+  release 最新只到 `v0.9.0`）→ CI [run #27](https://github.com/xinyangGL/dsh-open-code-review/actions/runs/38495153246)
+  六个 job 全 `success`（node 20 / 22 / 24 × windows-latest / ubuntu-latest）。
+  手法上的坑记在 §6：**GitHub API 一律走 `node:https` 直发**（PowerShell 的引号/编码会把 `curl` 与
+  `Invoke-RestMethod` 这条路毁掉），盯 CI 用 `tmp-ci-watch.mjs <sha>`。
+- ⚠️ **24h soak 这一条事实上没有遵守**：门槛算到 `2026-10-14 14:10:34`，实际发版发生在 `2026-10-14 09:2x`
+  —— 用户 2026-10-13 明确说过「不用卡这个 24h 门槛」。也就是说 launch 前只走了约 **19 小时**。
+  这不是「达成」，是**用户知情下的例外**；记在这里，免得下回被当成先例。
 - ⬜ **挂新扩展点的版本先在作者 profile 真机跑满 24 小时**：v0.11.0/v0.11.1 挂了新的客户端扩展点
   （conversation event definition）。**2026-10-13 更正**：本文件先前写「当前进程加载本版的时间 = 2026-10-12 15:52」
   是错的 —— DSH 主机进程（`DeepSeek Harness.exe` PID 59072，本机桥 18800 的占用者）**启动于 2026-10-13 13:17:30**，
@@ -64,17 +81,22 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
   ⇒ **24h 计时以 2026-10-13 14:10:34 起算，门槛 = 2026-10-14 14:10:34**；用户在 15:52 前选择了
   「重启 → 我做完真机验收 → 从重启起算满 24h 再打 tag」这条路。
   **所以本次只提交、没打标签。**
-- ⬜ 全新 profile 装卸验收：`dsh plugin --profile <tmp> add github:xinyangGL/dsh-open-code-review`，
-  核对包内 `version` 与内容（**不含** `config.json`），然后 `remove`。
-- ⚠️ 清单里「CI 等价环境（藏掉 `ocr`）smoke 也全绿」目前**没有可复现的做法**：
-  `HAS_OCR` 走的是配置里的 `ocr` 路径，不只看 `PATH`（试过把 Volta 目录从 `PATH` 剔掉，仍然 286 项全绿）。
-  要真正验证得给测试加一个钩子；登记为待做。
+- ✅ 全新 profile 装卸验收（**2026-10-14 对 `v0.12.0` 真做了一次**）：`dsh plugin --profile rc-v012 add
+  github:xinyangGL/dsh-open-code-review` → EXIT=0、**装到 `version 0.12.0`**；包内 `docs/` 只有
+  `host-contract.md`、`pretest-gate-safety-design.md` 与两张设置页截图，`config.json`／内部评估文档／`test/`
+  都不在包里（断言在 `test/pack-check.mjs`，已进 CI）。验证完 `remove` 并删掉 `rc-v012` profile。
+- ✅ 「CI 等价环境（藏掉 `ocr`）smoke 也全绿」**2026-10-14 变成可复现**：`test/smoke.mjs` 的 `which()` 认一个
+  开关 `OCR_TEST_FORCE_NO_OCR=1` —— 置位后任何 ocr 可执行文件（**绝对路径也算**，因为工作区 `config.json`
+  常把 `ocrPath` 钉成绝对路径）的查找都返回空，且**只挡 ocr**（正则只匹配 `ocr|opencodereview`，否则连 `git`
+  一起挡掉会连锁出 10 项假失败）。实测 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **318 项全过**。
+  CI 的离线档由此从「只能指望 CI」变成「本地一条命令可复现」。
 
 ## 4. ✋ 明确不做（带复活条件）
 
 来源：review-quality-plan §5、usability-plan §5。**这些不是「忘了做」，是有意不做。**
 
-- **P0-1 真人点击 12 用例**、**市场上架**、**14 天观测埋点扩展**：属「入口与分发」，与「结论可信」正交。
+- **P0-1 真人点击 12 用例**（CPO 把它排成 P0-C「未过不发布」，**至今仍未做** —— v0.12.0 在这个门前就发了，见 §2 与 §6）、
+  **市场上架**（已发 issue `#7328` 问重名政策，PR 等答复）、**14 天观测埋点扩展**：属「入口与分发」，与「结论可信」正交。
 - **`-b/--background`、`--resume`、`ocr session compare` 工作流**：留给「长跑 / CI」批次。
   复活条件 = 单次评审被硬超时打断 ≥2 次，或要接 CI。
 - **不把默认改回 `auto`**；**不新增重试 / 换模型容错**。
@@ -176,3 +198,26 @@ job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部�
     `scope=scan`（整文件扫描，语义不同）；这正是用户 m02608–m02611 提的「更灵活的评审范围」；
     ⓑ 按钮按 config 里的 engine 走**连点的时候**才给成本/耗时（预估出现在点下去之后），点之前看不到「这一下大概多久、会不会花钱」；
     ⓒ 结果展示仍是「模型汇报 + 原始 JSON」，没有 Cursor/Trae 那种面板（属 §5 已记录的方向）。
+- **2026-10-14（发行日）**：
+  - **`v0.12.0` 已发行**（详见 §3）：tag 对象 `48ac77d` → 提交 `575de1a`，远端 main 与 tag 都到位，
+    GitHub Release 已建，CI [run #27](https://github.com/xinyangGL/dsh-open-code-review/actions/runs/38495153246)
+    六个 job 全绿。本地最近六个提交：`575de1a` 截图 → `9cc0dc4` 上架自查（三处「文档副本 vs 代码」的假绿）
+    → `3468997` 上架版 README → `1e72c92` 批 3 第二步（离线档可复现）→ `36f44c3` 批 3 第一步（打包体检）
+    → `552f46e` 批 2 第三步。
+  - **市场重名**：`https://awesome-dsh-plugin.com/plugins.json` 里已有 `mocilukalbj/dsh-open-code-review`
+    （`name` 与 npm 包名都相同，2026-10-09 收录）。**没有先提 PR**，而是发 issue
+    [awesome-dsh-plugin#7328](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/issues/7328)
+    问策展人「同名不同 owner 是否接受 / 要不要改名」—— 等答复再提 PR，避免把重名条目直接推进目录。
+  - **诚实留档（都不写成「通过」）**：CPO 的 P0-C「真人点击 12 用例（未过不发布）」**没有做**，
+    `v0.12.0` 越过了这道自设的门；24h soak 也只走了约 **19 小时**（用户 2026-10-13 明确豁免）。
+  - **工具经验**（写给下一次的自己）：① GitHub API 一律用 `node:https` 直发、本地文件按 UTF-8 读，
+    绕开 PowerShell 的引号/编码；本机的 `curl` 对 `api.github.com` 多次返回 0 字节。② 这台机器的
+    PowerShell 5.1 控制台**打印不了 UTF-8 中文**（输出会变乱码），`ConvertFrom-Json` 读含中文的
+    `package.json` 直接报「传入的对象无效」——**读文件内容用 read 工具，不要用 pwsh 打印**。
+    ③ `git push` 会把正常输出经 `NativeCommandError` 报成「错误」，判断成败用 `git ls-remote`；
+    也不要把 `git` 输出接 `Select-Object -First N`（会断管道，表现为 exit -1）。
+  - **待用户定的遗留**：`docs/interaction-spec-2026-10-13.md`（UX 架构师在 plan mode 下越界写的 454 行交互规格）
+    目前**是跟踪状态、也随 `v0.12.0` 发布了**；保留还是删掉，等一句话。
+  - **清理**：验证用的 `rc-v012` profile 已删；web profile 早已回到只有 `@deepseek-ai/dsh-base` +
+    `@deepseek-ai/dsh-web-app`；仓库工作区干净；`.graphflow-cache/` 与 `.trae/`、`.claude/`、`AGENTS.md`、
+    `config.json` 等仍是 `.gitignore` 里的本机产物。
