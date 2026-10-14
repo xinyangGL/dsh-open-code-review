@@ -1463,10 +1463,108 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
     "S.menu 不是 absolute + top:100%",
   );
   check(
-    "模型下拉：背景只认真正不透明的祖先（半透明叠层不算），拿不到时有 Canvas 兜底",
-    /a >= 0\.95/.test(pickerSource) && pickerSource.includes("var(--dsw-alias-bg-layer-2, Canvas)"),
-    "guessBg 仍可能把半透明叠层当背景，或没有兜底色",
+    "批 2：菜单与抬头的底色用 bg-layer-3 令牌（不再沿 DOM 猜祖先底色），且 guessBg 已删干净",
+    /(?:^|\s)menu:\s*\{[^}]*background:\s*"var\(--dsw-alias-bg-layer-3, Canvas\)"/.test(styleBlock)
+      && /(?:^|\s)menuHead:\s*\{[^}]*background:\s*"var\(--dsw-alias-bg-layer-3, Canvas\)"/.test(styleBlock)
+      && !/(?:const|function)\s+guessBg\s*[(=]/.test(pickerSource)
+      && !/(?:const|function)\s+isOpaque\s*[(=]/.test(pickerSource),
+    "菜单/抬头没走 bg-layer-3 令牌，或还留着猜底色的旧机制",
   );
+  /* 批 2（UI 规范）：容器底色只许用 layer-1/2/3 令牌 —— 不许自造 α<0.95 的叠层色当容器底。 */
+  {
+    const semiTransparent = [...styleBlock.matchAll(/background:\s*"(rgba\([^)]*\)|[^"]*?)"/g)]
+      .map((m) => m[1])
+      .filter((v) => /^rgba?\(/.test(v) && !/^rgb\(/.test(v) && (() => {
+        const parts = v.replace(/^rgba?\(|\)$/g, "").split(",").map((s) => s.trim());
+        const a = parts.length === 4 ? Number(parts[3]) : 1;
+        return !(Number.isFinite(a) && a >= 0.95);
+      })());
+    check(
+      "批 2：样式表里没有半透明叠层色当容器背景（容器底色只用 layer 令牌）",
+      semiTransparent.length === 0,
+      semiTransparent.length === 0 ? "没有半透明背景" : `发现 ${semiTransparent.join("、")}`,
+    );
+  }
+
+  /* 批 2（UI 规范）：样式表自身的纪律 —— 键唯一、间距在 4px 刻度上、圆角与字号收敛。
+     覆盖 S / P / T 三张表（S 是设置页，P 是进度卡，T 是回合尾部按钮）。 */
+  {
+    const blockOf = (head) => {
+      const start = pickerSource.indexOf(head);
+      const end = start >= 0 ? pickerSource.indexOf("\n    };", start) : -1;
+      return start >= 0 && end > start ? pickerSource.slice(start, end) : "";
+    };
+    const stylesAll = [blockOf("const S = {"), blockOf("const P = {"), blockOf("const T = {")].join("\n");
+    check(
+      "批 2：三张样式表都取到了（守卫本身不能静默变成空跑）",
+      stylesAll.includes("menu:") && stylesAll.includes("btnBusy:") && stylesAll.includes("stop:"),
+      `长度=${stylesAll.length}`,
+    );
+
+    /* 键唯一必须**逐表**看：S/P/T 三张表里有同名键（wrap/row/btn…）是正常的，
+       只有在同一张表里写两遍才会静默覆盖（combo 事故就是这样来的）。 */
+    const dup = [];
+    let keyCount = 0;
+    for (const head of ["const S = {", "const P = {", "const T = {"]) {
+      const keys = [...blockOf(head).matchAll(/^\s{6}([A-Za-z][A-Za-z0-9]*)\s*:/gm)].map((m) => m[1]);
+      keyCount += keys.length;
+      for (const k of new Set(keys.filter((k, i) => keys.indexOf(k) !== i))) dup.push(`${head.split(" ")[1]}.${k}`);
+    }
+    check(
+      "批 2：同一张样式表里没有重复的样式键（combo 事故：后一个键会静默覆盖前一个）",
+      dup.length === 0,
+      dup.length === 0 ? `共 ${keyCount} 个键，逐表无重复` : `重复键：${dup.join("、")}`,
+    );
+
+    const spacing = [];
+    for (const m of stylesAll.matchAll(/(?:padding|margin|gap)(?:Top|Bottom|Left|Right)?:\s*"?([^",}\n]+)"?/g)) {
+      for (const n of String(m[1]).matchAll(/(-?\d+(?:\.\d+)?)px/g)) spacing.push(Number(n[1]));
+    }
+    /* 1/2px 是紧凑控件（按钮、进度卡抬头）的例外，见 UI 规范；其余必须落在 4px 刻度上。 */
+    const allowedSpacing = new Set([0, 1, 2, 4, 8, 12, 16, 20, 24, 32]);
+    const offScale = [...new Set(spacing.filter((v) => !allowedSpacing.has(v)))];
+    check(
+      "批 2：间距落在 4px 刻度上（1/2px 仅限紧凑控件）",
+      offScale.length === 0,
+      offScale.length === 0 ? `检查了 ${spacing.length} 个值` : `不在刻度上：${offScale.join("、")}`,
+    );
+
+    const radii = [...stylesAll.matchAll(/borderRadius:\s*"?(\d+)/g)].map((m) => Number(m[1]));
+    const badRadii = [...new Set(radii.filter((v) => ![4, 6, 8, 999].includes(v)))];
+    check(
+      "批 2：圆角只用 4 / 6 / 8 / 999",
+      badRadii.length === 0,
+      badRadii.length === 0 ? `圆角取值 ${[...new Set(radii)].join(" / ")}` : `越界：${badRadii.join("、")}`,
+    );
+
+    const fonts = [...stylesAll.matchAll(/fontSize:\s*"?([\d.]+)/g)].map((m) => Number(m[1]));
+    const badFonts = [...new Set(fonts.filter((v) => ![10.5, 11, 12, 13, 15].includes(v)))];
+    check(
+      "批 2：字号收敛成 5 档（10.5 / 11 / 12 / 13 / 15，去掉 11.5 与 12.5）",
+      badFonts.length === 0,
+      badFonts.length === 0 ? `字号 ${[...new Set(fonts)].sort((a, b) => a - b).join(" / ")}` : `越界：${badFonts.join("、")}`,
+    );
+
+    check(
+      "批 2：可访问性 —— 菜单/输入框有 listbox+combobox 角色，进度卡是 role=status 且耗时 aria-hidden",
+      /role:\s*"listbox"/.test(pickerSource)
+        && /role:\s*"combobox"/.test(pickerSource)
+        && /role:\s*"option"/.test(pickerSource)
+        && /"aria-activedescendant"/.test(pickerSource)
+        && /role:\s*"status",\s*"aria-live":\s*"polite"/.test(pickerSource)
+        && /style:\s*P\.time,\s*"aria-hidden":\s*"true"/.test(pickerSource),
+      "菜单/输入框/进度卡的角色或 aria 属性缺失",
+    );
+
+    check(
+      "批 2：焦点环样式表注入（行内样式表达不了 :focus-visible）",
+      /function ensureFocusRing\(\)/.test(pickerSource)
+        && /ocr-plugin-focus-style/.test(pickerSource)
+        && /:focus-visible \{/.test(pickerSource)
+        && /\n\s+ensureFocusRing\(\);/.test(pickerSource),
+      "没有注入焦点环样式表，或 apply 里没有调用",
+    );
+  }
 }
 
 /* --------------------------- 结果码与 fail-closed（罐头子进程，不依赖真 ocr） --------- */

@@ -51,8 +51,30 @@ Fixed
   `coverageSummary()` 是**唯一一份文案**，结论的可用性行与 `finishReviewJob()` 共用它；job 的完成明细后面会带上
   ` · 覆盖：收录 3/5 个 hunk · 2/3 个文件片`。
 
+Changed（外观与可访问性 · 批 2 第一步）
+- **令牌化**：容器的底色只用 `--dsw-alias-bg-layer-1/2/3`（浮层固定 `bg-layer-3`），边框统一
+  `--dsw-alias-border-l1` —— 不再自造 `rgba(127,127,135,0.0x)` 这种半透明叠层色当容器底。**删掉了
+  `guessBg()`/`isOpaque()`**：它们沿 DOM 往上猜祖先底色，猜到的常常是 α<0.95 的叠层色（菜单半透明、
+  文字穿透的根因）；现在菜单写死令牌 + `Canvas` 兜底，抬头也给了不透明底色（sticky 滚动时不再透字）。
+- **刻度收敛**：间距回到 4px 刻度（`5px→4px`、`7px→8px`、`9px→8px`、`14px→12px`、`gap 6→8`），
+  圆角只用 4/6/8/999（`5px→6px`），字号收成 5 档（10.5/11/12/13/15，去掉 11.5 与 12.5）。
+- **对比度**：二级文本按「layer-1/2 上 ≥50%、layer-3 上 ≥55%」重算 —— `progress.hint` 0.45→0.58、
+  `menuItemGroup` 0.5→0.58、`menuItemSub` 0.55→0.58、`progress.time` 0.5→0.55；`btnBusy` 的整块
+  `opacity: 0.6` 去掉（容器整体降透明度会把对比度压到下限以下）。
+- **可访问性**：模型候选菜单 `role=listbox` + 每项 `role=option`/`aria-selected`、输入框
+  `role=combobox` + `aria-expanded`/`aria-controls`/`aria-activedescendant`、展开按钮补
+  `aria-label`/`aria-haspopup`；进度卡 `role=status` + `aria-live=polite`、耗时 `aria-hidden`（秒数
+  每秒都变，不该反复读屏）。行内样式表达不了 `:focus-visible`，所以注入一张只含一条规则的样式表
+  （作用域限定插件自己的 `data-ocr-*` 容器，幂等，拿不到 `document` 时静默跳过）。
+- 菜单高度改为 `min(264px, 42vh)`（小窗口里不再顶到屏幕外）。
+
 Tests
-- `test/smoke.mjs` 291 → **306** 条：E1 三条（拒绝 / delegate 与 scan 不误伤 / 预估不再按 paths 少报规模）、
+- **批 2**：`test/smoke.mjs` 306 → **314** 条（八条源码级守卫）：三张样式表都取到（守卫不能空跑）、同一张表里
+  没有重复键、间距在 4px 刻度上（1/2px 仅限紧凑控件）、圆角只用 4/6/8/999、字号只有 5 档、没有半透明叠层色
+  当容器背景、菜单与抬头走 `bg-layer-3` 且 `guessBg`/`isOpaque` 已删、可访问性角色与焦点环注入在位。
+  （这些是排版层事实，mini-DOM 没有排版引擎量不出来；真机复核仍走 bsk 的 aria 快照 + 元素几何。）
+  同时删掉了旧守卫「背景只认真正不透明的祖先」—— 它锁的正是这次要删掉的机制。
+- **批 1**：`test/smoke.mjs` 291 → **306** 条：E1 三条（拒绝 / delegate 与 scan 不误伤 / 预估不再按 paths 少报规模）、
   E2 一条（超大 diff 逼出规格截断 + 子 agent 说 clean → `partial=true`、摘要标 `⚠️ 部分结果`、不含
   「未发现问题」）、M6 三条（空改动 / 全被排除 / 真干净不误伤）、E3 两条（部分结果的可用性行 + 覆盖回执，
   以及完整/失败两种口径）、T1 两条（并发第二次 → `OCR_ALREADY_RUNNING`；闸门在跑完后释放）、T2 一条
