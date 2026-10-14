@@ -211,10 +211,10 @@ function canned(options = {}) {
     ],
   });
   check(
-    "parseFindings：缺 file/message 的条目丢弃并记 notes；未知 severity 归 minor；line 支持字符串",
+    "parseFindings：缺 file/message 的条目丢弃并记 notes；未知 severity 归「未分级」而不是 minor；line 支持字符串",
     messy.ok === true &&
       messy.findings.length === 2 &&
-      messy.findings[0].severity === "minor" &&
+      messy.findings[0].severity === "unknown" &&
       messy.findings[1].line === 9 &&
       messy.findings[1].stillOpen === true &&
       messy.notes.some((n) => n.includes("严重程度")) &&

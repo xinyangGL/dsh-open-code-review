@@ -1470,6 +1470,19 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
       && !/(?:const|function)\s+isOpaque\s*[(=]/.test(pickerSource),
     "菜单/抬头没走 bg-layer-3 令牌，或还留着猜底色的旧机制",
   );
+
+  /* P0-G「点前看到代价」：按钮副行按档位给不同文案，档位来自**已有**的配置快照（不新增宿主通道），
+     认不出档位时只承诺「点下后会先给预估」—— 不编一个没人验证过的金额。 */
+  check(
+    "批 2：回合尾按钮带副行代价标签（档位取自已有配置快照；认不出档位时不编数字）",
+    pickerSource.includes('"data-ocr-tail-cost"') &&
+      /if \(key === "delegate"\)/.test(pickerSource) &&
+      /if \(key === "ocr"\)/.test(pickerSource) &&
+      /if \(key === "auto"\)/.test(pickerSource) &&
+      /return t\("tail\.costUnknown"/.test(pickerSource) &&
+      !/\$\s?\d/.test(pickerSource),
+    "按钮没有代价副行，或档位分支/兜底文案缺失",
+  );
   /* 批 2（UI 规范）：容器底色只许用 layer-1/2/3 令牌 —— 不许自造 α<0.95 的叠层色当容器底。 */
   {
     const semiTransparent = [...styleBlock.matchAll(/background:\s*"(rgba\([^)]*\)|[^"]*?)"/g)]
@@ -1783,15 +1796,29 @@ check(
   listText.includes("发现问题 3 条（涉及 2 个文件）：") &&
     listText.includes("\n  lib/a.js") &&
     listText.includes("\n  lib/b.js") &&
-    listText.indexOf("- 7 [medium]") < listText.indexOf("- 12-14 [high]") &&
-    listText.includes("- 12-14 [high] 空指针风险（null-check）"),
+    listText.indexOf("- 7 [中]") < listText.indexOf("- 12-14 [高]") &&
+    listText.includes("- 12-14 [高] 空指针风险（null-check）") &&
+    listText.includes("高 1 · 中 1 · 低 1 · 未分级 0"),
   listText.split("\n").slice(-5).join(" / "),
 );
 const listJobText = (listJobs.records.get("ocr-review-1")?.output ?? []).map((o) => o.text).join("");
 check(
+  "批 2：严重程度按 高/中/低 展示，认不出来的一律「未分级」（未知档不当低）",
+  review.severityLabel("critical").label === "高" &&
+    review.severityLabel("MAJOR").label === "高" &&
+    review.severityLabel("moderate").label === "中" &&
+    review.severityLabel("P2").label === "中" &&
+    review.severityLabel("nit").label === "低" &&
+    review.severityLabel("建议").label === "低" &&
+    review.severityLabel("unheard-of").label === "未分级" &&
+    review.severityLabel("").label === "未分级" &&
+    review.severityLabel(7).label === "未分级",
+  ["critical", "moderate", "nit", "unheard-of", ""].map((s) => `${JSON.stringify(s)}→${review.severityLabel(s).label}`).join(" · "),
+);
+check(
   "job 行也逐条列出问题（文件 → 行 [severity] 问题）",
   listJobText.includes("lib/a.js") &&
-    listJobText.includes("- 12-14 [high] 空指针风险（null-check）") &&
+    listJobText.includes("- 12-14 [高] 空指针风险（null-check）") &&
     listJobText.includes("lib/b.js") &&
     listJobText.includes("2 个文件 · 3 条问题"),
   listJobText.split("\n").slice(-6).join(" / "),
@@ -2777,7 +2804,7 @@ check(
   autoSink.length === 1 &&
     revAutoText.includes("【独立评审 agent · 第 1/3 轮】") &&
     revAutoText.includes("lib/a.js") &&
-    revAutoText.includes("- 12 [major]") &&
+    revAutoText.includes("- 12 [高]") &&
     revAutoText.includes("请逐条修复或说明理由"),
   autoSink.length + " 条 | " + revAutoText.slice(0, 200).replace(/\n/g, " / "),
 );
