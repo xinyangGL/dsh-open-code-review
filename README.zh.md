@@ -800,7 +800,7 @@ dsh-open-code-review/
    ├─ job-smoke.mjs      # 评审进度冒烟（假 jobs registry，51 项断言：登记/进度行/输出流/停止→取消/结算幂等/轮次上限也会结算/没有 jobs 时降级）：node test/job-smoke.mjs
    ├─ reviewer-smoke.mjs # 评审 agent 纯逻辑冒烟（罐头 subagents，45 项断言：提示词/结构化解析/线程轮次/失败与超时/超时会 abort 掉在飞的子 agent）：node test/reviewer-smoke.mjs
    ├─ bridge-smoke.mjs   # 本机桥冒烟（假 llm 流 + 真 ocr 子进程，104 项断言，含「assistant 消息必须带 model source」「tool 消息必须带 tool_call_id」「客户端断连要中止上游且不再写死 socket」「上游流被截断要自动重试一次且不重复写内容」「静默截断判失败」「半截正文也算截断」「桥自己的超时会给客户端交代并计入统计」「畸形请求体 → 400 invalid_body」「抛出的瞬时错误也要重试」这些真机/自审回归，以及 token 只报总数时的 partial 计数、v0.6.1 的 rejected/lastReject 与 retrySkipReason 逐请求重置、v0.6.2 的无 index 工具调用合并与 reasoning_content）：node test/bridge-smoke.mjs
-   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，213 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、v0.11.0 的按钮脏检查（total=0 隐藏 / 读不到 turn 记录隐藏 / 请求抛错与 404 照旧显示 / 宿主没有该能力照旧显示 + 事件定义的 6 条契约）、设置页三分法（首屏 4 项、折叠态无输入控件、15 个被移出的键与只读诊断区）、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
+   ├─ client-smoke.mjs   # 浏览器半侧冒烟（迷你 React + 假 configForms/remote/locale，214 项断言，含会话内进度行、回合尾部「启动代码审核」按钮与它的四种失败/禁用路径、v0.11.0 的按钮脏检查（total=0 隐藏 / 读不到 turn 记录隐藏 / 请求抛错与 404 照旧显示 / 宿主没有该能力照旧显示 + 事件定义的 6 条契约）、设置页三分法（首屏 4 项、折叠态无输入控件、15 个被移出的键与只读诊断区）、下拉主题 token 与档位预设、preTest 三档下拉）：node test/client-smoke.mjs
    ├─ cordis-inject.mjs  # 真 cordis 回归（26 项断言，守住「服务齐全（含 jobs）/只差 remote.session/完全没有 remote」三种宿主形态）：node test/cordis-inject.mjs
    │                     #   取不到 cordis 就跳过：不打印"全部通过"、退出码 2（跳过 ≠ 通过）；OCR_TEST_CORDIS 可指 main 文件或目录
    │                     #   CI 里不再容忍这个跳过：工作流临时装上游 cordis + cosmokit（--no-save）并把 OCR_TEST_CORDIS 指到真 main 文件，跳过即失败

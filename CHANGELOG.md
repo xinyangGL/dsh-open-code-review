@@ -3,6 +3,26 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [0.12.1] — 2026-10-14（英文界面的 placeholder 补齐 —— 这条缺陷是「加守卫」加出来的）
+
+**v0.12.0 发布后我补了一条「`en` 词典必须覆盖 `zh` 词典的每一个键」的源码级守卫，它当场点名 5 条** ——
+全是 `placeholder`：`field.llmModel.placeholder`、`field.llmProvider.placeholder`、
+`field.reviewerProvider.placeholder`、`field.llmBaseUrl.placeholder`、`field.llmApiKeyRef.placeholder`。
+`makeT()` 在词典里找不到键时会退回**内联中文原文**，所以界面语言是英文时，这 5 个输入框的灰字提示一直是中文
+（其余字段的 placeholder 都有 en 条目，只有这几条漏了）。
+
+Fixed
+
+- **`lib/client.js`**：补上这 5 条英文 placeholder（`empty = follow the current conversation / the DSH
+  default model`、`empty = follow the current conversation`、`spawn`、`https://api.commandcode.ai/provider/v1`、
+  `COMMANDCODE_API_KEY`）。
+
+Tests
+
+- **`test/client-smoke.mjs`**：新增一条守卫 —— `en` 词典必须覆盖 `zh` 词典的**每一个**键，失败时**直接列出
+  缺的键名**（不是只说「不齐」）。这条守卫就是发现上面 5 条的原因，留着防止以后再漏。
+  计数：`test/client-smoke.mjs` 213 → **214**。
+
 ## [0.12.0] — 2026-10-13（批 1 + 批 2 + 打包体检）
 
 **只针对「代码审核」这条线的不足盘点（不加新功能，但已有的内容必须好用）：先修最危险的三条 —— 结论会在不该干净的时候说干净。**

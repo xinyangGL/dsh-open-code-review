@@ -293,6 +293,14 @@ check(
   JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.route"], zhDict["group.reviewer"], zhDict["group.timing"]]),
 );
 check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
+/* 批 2（UI 规范·文案双语）：en 词典必须覆盖 zh 词典的**每一个**键 —— 缺一条，`makeT` 就退回内联中文
+   原文，于是「界面语言是英文」在那一处失效。这条守卫要能直接点出是哪几条（不是只说「不齐」）。 */
+const missingEn = Object.keys(zhDict).filter((key) => !(key in enDict)).sort();
+check(
+  "v0.12.0 批 2：en 词典覆盖 zh 词典的每一个键（缺一条就会退回中文原文）",
+  missingEn.length === 0,
+  missingEn.length ? `缺 ${missingEn.length} 条：${missingEn.slice(0, 10).join(" · ")}` : `zh ${Object.keys(zhDict).length} 条全部有 en`,
+);
 check("四个 cell 都声明了 locale 命名空间", registrations.every((r) => r.options.locale === "dsh-open-code-review"), JSON.stringify(registrations.map((r) => r.options)));
 const reg = registrations.find((r) => r.options.name === "plugins.bundle.config") || { options: {}, component: () => null };
 const sectionReg = registrations.find((r) => r.options.name === "settings.section") || { options: {}, component: () => null };

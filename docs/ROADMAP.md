@@ -25,7 +25,7 @@ reviewer 45 / bridge 103 / client-smoke **208** / cordis-inject 全部通过。
 job 51 / reviewer 45 / bridge **104** / client-smoke 213 / cordis-inject 全部通过。
 
 **v0.12.0 实测**（`npm test` `EXIT=0`）：smoke **319** / killswitch 44 / host-contract 37 / job 51 / reviewer 45 /
-bridge 104 / client-smoke 213 / cordis-inject 全部通过，另加**打包体检 4/4**（`npm run test:pack`，已进 CI）；
+bridge 104 / client-smoke 214 / cordis-inject 全部通过，另加**打包体检 4/4**（`npm run test:pack`，已进 CI）；
 `OCR_TEST_FORCE_NO_OCR=1 node test/smoke.mjs` → **319 项全过**（CI 的离线档第一次能在本机复现，见 §3）。
 
 **这一条必须记下来**：v0.10.0 与 v0.11.0 合成了同一个提交 `cfc31eb` —— 因为 v0.10.0 当时从未提交（HEAD 停在 `v0.9.0`）。
