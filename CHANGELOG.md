@@ -68,6 +68,18 @@ Changed（外观与可访问性 · 批 2 第一步）
   （作用域限定插件自己的 `data-ocr-*` 容器，幂等，拿不到 `document` 时静默跳过）。
 - 菜单高度改为 `min(264px, 42vh)`（小窗口里不再顶到屏幕外）。
 
+Fixed（上架前自查：文档副本与代码对不上的三处）
+- **`config.example.json` 的 `engine` 写的是 `"auto"`**（出厂默认自 v0.10.0 起是 `"ocr"`）—— 模板是给新用户
+  **直接复制**的，复制粘贴即悄悄回到 v0.10.0 之前的行为，还与 README 的「Choosing an engine」自相矛盾。
+  改成 `"ocr"`，并加一条断言：模板里写明了值的那 9 个键（enabled / engine / auto / onDemand / audience /
+  timeoutMinutes / maxTimeoutMinutes / llm.mode / reviewer.agent）必须与 `DEFAULTS` 一致。
+- **README 的两条可信性承诺里引用了不存在的字段 `engineSource`**（`lib/` 下根本没有这个字段）—— 改成
+  `ocr_status` 真正返回的 `engine`，并指明用 `configSource` / `fileValues` 回答「这个值来自文件层还是设置页」。
+- **`docs/host-contract.md` 手抄的 `dsh.host.capabilities` 只有 6 条**，真身是 14 条（`package.json` 原文）——
+  改成真身，并写明「别再另抄一份」；那份文档的 `ocr` 实测版本也补成 `1.12.12 / 1.12.13`。
+- 顺带把「只在文件层生效的键」在双语 README 里补全（`llm.bridgePort`、`llm.effort`、`includeDiffMaxBytes`、
+  `maxIssuesInText` 之前被一句 `and the other file only keys` 糊过去）。
+
 Changed（批 3 第一步：打包与 CI —— 「陌生人装到的是什么」）
 - **包只发该发的**：`files` 从整个 `docs/` 收窄到 README 真正链到的那几份
   （`docs/host-contract.md`、`docs/pretest-gate-safety-design.md`、两张设置页截图）；
@@ -111,6 +123,8 @@ Changed（批 3 第一步：打包与 CI —— 「陌生人装到的是什么�
   用户得自己猜再点一次会发生什么。
 
 Tests
+- **上架前自查**：`test/smoke.mjs` 318 → **319** 条 —— 新增「`config.example.json` 里写明了值的 9 个键必须与
+  `DEFAULTS` 一致」（模板是给新用户复制粘贴的，与默认相反就等于改默认）。
 - **批 2**：`test/smoke.mjs` 306 → **318** 条（十二条源码级 / 结论结构守卫）：三张样式表都取到（守卫不能空跑）、同一张表里
   没有重复键、间距在 4px 刻度上（1/2px 仅限紧凑控件）、圆角只用 4/6/8/999、字号只有 5 档、没有半透明叠层色
   当容器背景、菜单与抬头走 `bg-layer-3` 且 `guessBg`/`isOpaque` 已删、可访问性角色与焦点环注入在位、

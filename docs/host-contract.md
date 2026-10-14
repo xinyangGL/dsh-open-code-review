@@ -88,14 +88,21 @@ v0.5.7~v0.5.9 出过一次事故：插件把 `ctx.tools.guard()` 的语义理解
 | --- | --- |
 | 宿主 | DSH `0.2.0-rc.2` 桌面版（2026-10-10 实测：本机 LLM 桥、`tools/pre-execute`、`jobs`、`skills`、`subagents` 均在） |
 | Node | `>= 20`（CI 跑 20 / 22 / 24；本机实测 24.19.0） |
-| `ocr` | Alibaba OpenCodeReview CLI `1.12.12`（必须单独安装；Windows 要原生 exe） |
+| `ocr` | Alibaba OpenCodeReview CLI `1.12.12 / 1.12.13`（必须单独安装；Windows 要原生 exe） |
 
 `package.json` 里声明了：
 
 ```json
-"dsh": { "host": { "dsh": ">=0.2.0", "testedWith": { "dsh": "0.2.0-rc.2 (desktop)", "node": "20 / 22 / 24", "ocr": "1.12.12" },
-                    "capabilities": ["tools.register", "tools/pre-execute", "jobs", "llm", "slots", "remote.commands"] } }
+"dsh": { "host": { "dsh": ">=0.2.0", "testedWith": { "dsh": "0.2.0-rc.2 (desktop)", "node": "20 / 22 / 24", "ocr": "1.12.12 / 1.12.13" },
+                    "capabilities": ["tools.register", "subprocess.spawn", "subprocess.resolveExecutable", "commands.register",
+                                     "credentials.resolve", "events.tools/result", "events.agent/turn-stopping",
+                                     "events.tools/pre-execute", "events.loader/volatile-update", "inject.llm",
+                                     "inject.jobs", "inject.skills", "inject.subagents", "client.slots"] } }
 ```
+
+> 上面这段就是 `package.json` 里的真身（14 条能力），**别再另抄一份**：`test/host-contract.mjs`
+> 有一条断言要求「`lib/index.js` 用到的扩展点」与 `dsh.host.capabilities` 是同一个集合；这段文档
+> 曾经只抄了 6 条、与真身不一致（v0.12.0 更正）。
 
 **诚实说明**：宿主的插件清单只读 `dsh.bundle` / `dsh.profile`，以及 `dsh.client`（在 `@deepseek-ai/dsh-plugin-manager` 里核实过：只有 `manifest.dsh?.bundle` / `manifest.dsh?.profile` 被读取，没有对 `dsh` 下未知键的校验或拒绝）。所以 `dsh.host` 是**我们自己给人（和将来的市场）看的声明**，宿主不会因为版本不匹配拒绝加载 —— 这一点是故意的：
 

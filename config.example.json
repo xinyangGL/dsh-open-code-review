@@ -15,7 +15,7 @@
     "紧急制动（v0.7.0，不在本文件里配）：把标记文件 <DSH_HOME>/dsh-open-code-review.disabled（或插件目录下的 .disabled）放进去，或用 DSH_OPEN_CODE_REVIEW_DISABLE=1 启动 DSH，插件就只注册 ocr_review / ocr_status 两个工具、不挂任何钩子、不起本机桥、不花钱；ocr_status 会报 disabled/disabledBy 与标记路径。删掉标记/环境变量并重启即恢复。"
   ],
   "enabled": true,
-  "engine": "auto",
+  "engine": "ocr",
   "autoEngine": "",
   "audience": "agent",
   "ocrPath": "",

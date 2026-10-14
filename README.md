@@ -45,7 +45,7 @@ The value here is not that the reviewer is smarter; it is that **you know where 
 
 | Promise | How to check it |
 | --- | --- |
-| Three timings (on demand, the turn-tail button / `/ocr-review`, automatic) and three engines, with the source of the conclusion and its cost in the open | `ocr_status`: `engine` / `engineSource` / `stats.byEntry` / `llm` |
+| Three timings (on demand, the turn-tail button / `/ocr-review`, automatic) and three engines, with the source of the conclusion and its cost in the open | `ocr_status`: `engine` (plus `configSource` / `fileValues`, which say whether a value came from the config file or from the settings page) / `stats.byEntry` / `llm` |
 | **It never fakes “nothing found”**: only exit code 0 **plus** an empty findings collection counts as clean; unparsable output, unknown field names, a truncated budget or an unfinished run produce `ok: false` or `partial` | codes `OCR_OUTPUT_UNPARSABLE` / `OCR_OUTPUT_SHAPE_UNKNOWN` / `OCR_LLM_MISSING` / `OCR_TIMEOUT` / `OCR_ABORTED`, plus the `partial` / `partialReasons` / `coverage` fields |
 | Coverage is auditable: a `delegate` spec arrives in slices with a coverage-receipt rule, and the slice/drop counts are reported; on the `ocr` side only the partial-result signals it states explicitly are trusted | the `[片 i/n · path · 本文件 hunk a-b/c · bytes]` headers and `coverage.{totalFiles,totalHunks,keptHunks,droppedHunks,slices,truncated,partial}` |
 | You see the price before paying: an `ocr` run names this run's scale and time order in its first note, and the choice stays yours | first note: `本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟`; when the probe fails only that sentence is missing |
@@ -442,7 +442,7 @@ The paid end-to-end check is separate, because it needs a real credential and th
 - `ocr` must be installed separately; the plugin never installs or upgrades it.
 - Windows script shims (`.cmd`/`.bat`/`.ps1`) cannot be spawned directly — use the native executable.
 - `timeoutMinutes` in the settings page is capped at the factory value (60); larger values only via the file layer, up to the 24 h hard bound.
-- `reviewer.persona`, `ocrCandidates`, `extraArgs`, `env`, `llm.apiKey`, `maxTimeoutMinutes` and the other `file only` keys have no settings-page row.
+- These keys live **only** in the config file (the settings page has no row for them): `ocrCandidates`, `autoEngine`, `maxTimeoutMinutes`, `extraArgs`, `env`, `llm.apiKey`, `llm.bridgePort`, `llm.effort`, `includeDiffMaxBytes`, `maxIssuesInText`, `reviewer.persona`. The read-only diagnostics block at the bottom of the settings page names the same set.
 - With `llmMode = dsh`, a host that does not provide the `llm` service is **no longer silently re-routed** to the `endpoint` route (0.11.0): you get `OCR_LLM_MISSING` plus three concrete next steps (add an `llm` provider / fill `endpoint` explicitly / switch to `engine = delegate`).
 - `scope = workspace` **does not accept `paths`** (explicitly rejected since 0.12.0 with `OCR_INVALID_ARGS`): `ocr review` has no `--path`, so passing paths would only be silently ignored. Use `scope = scan` to review specific files/directories, or `engine = delegate` to filter the returned spec to those paths.
 - **One review at a time** (single-flight since 0.12.0): a second call returns `OCR_ALREADY_RUNNING` immediately — it does not queue, and it does not burn tokens twice.

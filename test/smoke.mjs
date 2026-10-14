@@ -3291,6 +3291,39 @@ check(
   `len=${hrDocsText.length}`,
 );
 
+/* v0.12.0（后端架构师自审 D1）：模板是给新用户**直接复制**的，所以它写了值的键必须与出厂默认一致 ——
+   `config.example.json` 曾经写 `"engine": "auto"`（而 DEFAULTS.engine 是 `"ocr"`），复制粘贴即悄悄回到
+   v0.10.0 之前的行为。这里只比一份显式清单（模板有权省略键、也有权写示例值，但绝不能与默认相反）。 */
+const exampleCfg = JSON.parse(readFileSync(new URL("../config.example.json", import.meta.url), "utf8"));
+const exampleDefaultPairs = [
+  ["enabled", cfgMod.DEFAULTS.enabled],
+  ["engine", cfgMod.DEFAULTS.engine],
+  ["auto", cfgMod.DEFAULTS.auto],
+  ["onDemand", cfgMod.DEFAULTS.onDemand],
+  ["audience", cfgMod.DEFAULTS.audience],
+  ["timeoutMinutes", cfgMod.DEFAULTS.timeoutMinutes],
+  ["maxTimeoutMinutes", cfgMod.DEFAULTS.maxTimeoutMinutes],
+  ["llm.mode", cfgMod.DEFAULTS.llm.mode],
+  ["reviewer.agent", cfgMod.DEFAULTS.reviewer.agent],
+];
+const exampleDrift = exampleDefaultPairs
+  .filter(([key]) => {
+    const got = key.includes(".") ? exampleCfg[key.split(".")[0]]?.[key.split(".")[1]] : exampleCfg[key];
+    const want = key.includes(".") ? cfgMod.DEFAULTS[key.split(".")[0]]?.[key.split(".")[1]] : cfgMod.DEFAULTS[key];
+    return got !== undefined && JSON.stringify(got) !== JSON.stringify(want);
+  })
+  .map(([key]) => {
+    const got = key.includes(".") ? exampleCfg[key.split(".")[0]]?.[key.split(".")[1]] : exampleCfg[key];
+    const want = key.includes(".") ? cfgMod.DEFAULTS[key.split(".")[0]]?.[key.split(".")[1]] : cfgMod.DEFAULTS[key];
+    return `${key}=${JSON.stringify(got)}≠${JSON.stringify(want)}`;
+  });
+check(
+  "v0.12.0：config.example.json 里写明了值的键必须与出厂默认一致（模板被复制即生效）",
+  exampleDrift.length === 0,
+  exampleDrift.length === 0 ? `比了 ${exampleDefaultPairs.length} 个键，全部一致` : exampleDrift.join(" · "),
+);
+
+
 /* P2：from/to/commit 原样进 git 命令（在 -- 之前），以 - 开头会被 git 当选项。 */
 const hrRefCase = cannedHarness([{ exitCode: 0, stdout: "{}" }]);
 const hrRefRun = await hrRefCase.call({ scope: "range", from: "--output=C:/tmp/x", to: "HEAD" });

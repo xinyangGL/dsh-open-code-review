@@ -56,7 +56,7 @@
 
 | 承诺 | 怎么核对 |
 | --- | --- |
-| 三个时机都能审（显式调用、回合尾按钮 / `/ocr-review`、自动评审），三档引擎的结论来源与代价都摆在明处 | `ocr_status` 的 `engine` / `engineSource` / `stats.byEntry` / `llm` 段 |
+| 三个时机都能审（显式调用、回合尾按钮 / `/ocr-review`、自动评审），三档引擎的结论来源与代价都摆在明处 | `ocr_status` 的 `engine`（外加 `configSource` / `fileValues`，用来判断某个值来自文件层还是设置页）/ `stats.byEntry` / `llm` 段 |
 | **不谎报「未发现问题」**：只有「退出码 0 **且**确有空的 problem 清单字段」才算干净；解析不出、字段名不认识、被预算截断、没跑完，一律 `ok: false` 或 `partial` | 结果码 `OCR_OUTPUT_UNPARSABLE` / `OCR_OUTPUT_SHAPE_UNKNOWN` / `OCR_LLM_MISSING` / `OCR_TIMEOUT` / `OCR_ABORTED`，以及 `partial` / `partialReasons` / `coverage` 字段 |
 | 覆盖范围可核对：`delegate` 的规格按片交付并附「覆盖回执」硬规则，片数与丢弃数写在规格和 `coverage` 里；`ocr` 侧只认它明写的部分结果信号 | 规格里的 `[片 i/n · 路径 · 本文件 hunk a-b/c · 字节数]` 与 `coverage.{totalFiles,totalHunks,keptHunks,droppedHunks,slices,truncated,partial}` |
 | 花钱之前先看到：`engine = ocr` 的评审在第一条备注里给出本次规模与时间量级，跑不跑你说了算 | 第一条 note 的 `本次实测可审 N 个文件（另排除 M 个） → 按真机历史约 lo~hi 分钟`；拿不到预估时只缺这半句，评审照跑 |
@@ -149,7 +149,7 @@ dsh plugin --profile <profile> remove dsh-open-code-review
 | 层 | 位置 | 适合放什么 | 生效方式 |
 | --- | --- | --- | --- |
 | ① 设置页 | profile 的 patch YAML（由设置表单写入） | 表单里有的键（开关、引擎、LLM 端点/模型/凭据引用、自动评审参数…） | **立即生效**（宿主把新值写进 `volatile` 引用并广播 `loader/volatile-update`） |
-| ② 配置文件 | 只读**一个**，取第一个存在的（`resolveConfigFile()`）：`DSH_OPEN_CODE_REVIEW_CONFIG` 指定的文件 → `<DSH_HOME>\dsh-open-code-review.json`（**推荐**，`DSH_HOME` 默认 `~\.dsh`）→ `<插件目录>\config.json`（只在源码/本地安装有意义：GitHub（git）安装的包目录在 `node_modules` 里，升级会被覆盖） | 表单没有的键：`ocrCandidates`、`autoEngine`、`maxTimeoutMinutes`、`extraArgs`、`env`、字面密钥 `llm.apiKey`、`reviewer.persona`… | **立即生效**（按 mtime 热读） |
+| ② 配置文件 | 只读**一个**，取第一个存在的（`resolveConfigFile()`）：`DSH_OPEN_CODE_REVIEW_CONFIG` 指定的文件 → `<DSH_HOME>\dsh-open-code-review.json`（**推荐**，`DSH_HOME` 默认 `~\.dsh`）→ `<插件目录>\config.json`（只在源码/本地安装有意义：GitHub（git）安装的包目录在 `node_modules` 里，升级会被覆盖） | 只在文件层生效的键（表单没有这一行）：`ocrCandidates`、`autoEngine`、`maxTimeoutMinutes`、`extraArgs`、`env`、字面密钥 `llm.apiKey`、`llm.bridgePort`、`llm.effort`、`includeDiffMaxBytes`、`maxIssuesInText`、`reviewer.persona` | **立即生效**（按 mtime 热读） |
 | ③ 内置默认值 | `lib/config.js` 的 `DEFAULTS` | 出厂值（全部字段都有默认值，所以 ①② 不存在也能用） | 改代码后需重启 DSH |
 
 字段一览（`位置` 列 = 该键在设置页里的位置；`仅文件层` = 表单里没有这一行，只能写配置文件）：
