@@ -246,3 +246,28 @@ reviewer 45 / bridge **105** / client-smoke 214 / cordis-inject 全部通过，�
     `Recv failure: Connection was reset` / `Failed to connect to github.com port 443 after 21s`；
     同一时段 `Test-NetConnection github.com -Port 443` 却报过 True ⇒ 抽风式中断，等网络好转补推。
   - **`v0.12.1` 未打 tag、未建 Release**：单独发一版还是并入下一次，等用户一句话。
+- **2026-10-14（P0-C 脚本化回归 · v0.12.2）**：
+  - 用户批准「现在用脚本化 bsk 跑一遍并留档」⇒ 12 用例逐条跑完，记进
+    [p0c-12cases-2026-10-14.md](p0c-12cases-2026-10-14.md)。其中「按钮正例」在真机 GUI 上撞出真缺陷：
+    回合尾部入口把「宿主有改动服务、但这一回合没留下改动记录」当成没改动，静默 `return null` ——
+    与同一段注释承诺的 fail-open 相反（宿主改动服务不可用时，按钮整块消失，功能在、入口没了）。
+  - 修：`lib/client.js` 改成「只有明确读到 `total=0` 才隐藏」；`test/client-smoke.mjs` 的断言随之改成
+    「按不知道处理」⇒ client-smoke 保持 **214**；提交 `0e383e4`（tag `v0.12.2`）+ `4bdc1fb`（P0-C 用例 10
+    的真机尝试留档）；CI 六个 job 全绿；Release 已建（tag `v0.12.2`）。
+  - **诚实记录**：用例 12（同一回合里两次工具调用）在真机上**没触发** `OCR_ALREADY_RUNNING` ——
+    宿主把同一回合的两次工具调用串行化了，这条只能由单测守住，真机结论写成「未复现」。
+- **2026-10-14（provider / model 混搭 · v0.12.3）**：
+  - 真机把 `llm.mode=dsh` 的评审跑通时撞出的**最严重一条**：`ocr_status` 报
+    `provider=commandcode · model=deepseek/deepseek-v4-flash`，而本机桥 6 次请求**全部失败**，最近错误是
+    `pi-ai provider "ark-coding-plan" has no configured model "deepseek/deepseek-v4-flash"` ——
+    同一次评审里 provider 与 model 来自两个不同来源（`effectiveLlmRoute()` 两条独立 `||` 链，
+    而桥每个请求都会重新解析一次；会话级来源时有时无 ⇒ 漂移）。
+  - 修：只接受**完整的一对** + 只写一半时按 DSH 模型目录（`llm.listProviders()` / `llm.listModels()`）补全 +
+    `bridgeRoutePin` 钉住本次评审解析出的那对路由；`lib/bridge.js` 的 `target()` 接收请求体里的 model
+    做归属判断。提交 `27c791a`（7 files +276/−22）；`npm test` `EXIT=0`
+    （smoke **324** / bridge **105** / client-smoke 214 + 打包体检 4/4）。
+  - **现网兜底（不进版本库）**：把 `llm.provider` 补进插件目录的 `config.json` 就能立刻恢复 ——
+    设置页里空着的 provider 不会遮住文件层的值（`schemaOverrides()` 会跳过「无意义 / 等于默认值」的字段）。
+    随后 `ocr_status(checkLlm:true)` 报连通性**可用**、tool-call 往返通过，桥的失败计数不再增长。
+  - **测试纪律 D7 一并修掉**：`test/smoke.mjs` 顶部把 `DSH_OPEN_CODE_REVIEW_CONFIG` 指到一个空 JSON ——
+    这 5 条路由断言过去会随本机 `config.json` 的内容变色（本机补上 provider 后它们集体转红，正好暴露耦合）。
