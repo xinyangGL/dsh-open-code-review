@@ -461,9 +461,9 @@ check(
 );
 check(
   "schemaOverrides（v0.5.8）：取值恰好等于出厂默认的字段不算覆盖项（否则 schema 默认值会把 config.json 整层遮住）",
-  cfgMod.schemaOverrides({ preTest: ref("off"), timeoutMinutes: ref(15), enabled: ref(true), onDemand: ref(true) }) === null &&
-    cfgMod.schemaOverrides({ preTest: ref("gate") })?.preTest === "gate",
-  `${JSON.stringify(cfgMod.schemaOverrides({ preTest: ref("off"), timeoutMinutes: ref(15), enabled: ref(true), onDemand: ref(true) }))} / ${JSON.stringify(cfgMod.schemaOverrides({ preTest: ref("gate") }))}`,
+  cfgMod.schemaOverrides({ timeoutMinutes: ref(15), enabled: ref(true), onDemand: ref(true) }) === null &&
+    cfgMod.schemaOverrides({ timeoutMinutes: ref(20) })?.timeoutMinutes === 20,
+  `${JSON.stringify(cfgMod.schemaOverrides({ timeoutMinutes: ref(15), enabled: ref(true), onDemand: ref(true) }))} / ${JSON.stringify(cfgMod.schemaOverrides({ timeoutMinutes: ref(20) }))}`,
 );
 
 const synthetic = {
@@ -994,22 +994,6 @@ check(
     String(status.skill?.reason).includes("skills 服务") &&
     status.notes.some((n) => n.includes("按需评审")),
   `onDemand=${status.onDemand} skill=${JSON.stringify(status.skill)}`,
-);
-check(
-  "ocr_status（v0.5.7/v0.6.0）：报出 preTest 的 mode / mechanism / 累计次数 / fail-open 与最后一次判定",
-  status.preTest !== null &&
-    typeof status.preTest === "object" &&
-    ["off", "remind", "gate"].includes(status.preTest.mode) &&
-    ["pre-execute", "none"].includes(status.preTest.mechanism) &&
-    Number.isFinite(status.preTest.denials) &&
-    Number.isFinite(status.preTest.reminders) &&
-    Number.isFinite(status.preTest.failOpen) &&
-    typeof status.preTest.lastError === "string" &&
-    typeof status.preTest.lastDecision === "object" &&
-    typeof status.preTest.lastDecision.tool === "string" &&
-    typeof status.preTest.lastDecision.kind === "string" &&
-    Number.isFinite(status.preTest.lastDecision.at),
-  JSON.stringify(status.preTest),
 );
 
 /* ------------------------------------------------------------- 端到端：按需 / 自动 */
@@ -1666,15 +1650,15 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
         const m = line.match(/hint:\s*"([^"]*)"/);
         return m ? m[1] : "";
       };
-      const tooLong = ["engine", "reviewerAgent", "preTest"].filter((k) => {
+      const tooLong = ["engine", "reviewerAgent"].filter((k) => {
         const h = hintOf(k);
         return h.length === 0 || h.length > 80;
       });
       check(
-        "v0.12.4（M10）：高级区三条长 hint 已压到 ≤80 字（细节移进 README）",
+        "v0.12.4（M10）：高级区两条长 hint 已压到 ≤80 字（细节移进 README）",
         tooLong.length === 0,
         tooLong.length === 0
-          ? "engine/reviewerAgent/preTest 都 ≤80 字"
+          ? "engine/reviewerAgent 都 ≤80 字"
           : `仍过长或取不到：${tooLong.map((k) => `${k}=${hintOf(k).length}字`).join("、")}`,
       );
     }
@@ -3450,7 +3434,6 @@ if (HAS_SCHEMA) {
     ["autoMinIntervalMs", cfgMod.DEFAULTS.autoMinIntervalMs],
     ["autoSkipSubagents", cfgMod.DEFAULTS.autoSkipSubagents],
     ["autoIncludeDiff", cfgMod.DEFAULTS.autoIncludeDiff],
-    ["preTest", cfgMod.DEFAULTS.preTest],
     ["timeoutMinutes", cfgMod.DEFAULTS.timeoutMinutes],
     ["progress", cfgMod.DEFAULTS.progress],
     ["verbose", cfgMod.DEFAULTS.verbose],
@@ -3885,293 +3868,41 @@ check(
       (statusSchema?.required ?? []).includes("skill"),
     `${JSON.stringify(statusSchema?.properties?.skill).slice(0, 160)} | required=${(statusSchema?.required ?? []).join(",")}`,
   );
-  check(
-    "v0.5.7/v0.6.0：ocr_status 的 schema 声明了 preTest（含 failOpen/lastError/lastDecision）并进 required",
-    statusSchema?.properties?.preTest?.type === "object" &&
-      (statusSchema?.properties?.preTest?.properties?.mode?.enum ?? []).join(",") === "off,remind,gate" &&
-      (statusSchema?.properties?.preTest?.required ?? []).join(",") === "mode,mechanism,denials,reminders,failOpen,lastError,lastDecision" &&
-      (statusSchema?.properties?.preTest?.properties?.lastDecision?.required ?? []).join(",") === "tool,kind,at" &&
-      (statusSchema?.required ?? []).includes("preTest"),
-    `${JSON.stringify(statusSchema?.properties?.preTest ?? null).slice(0, 200)}`,
-  );
 }
 
-/* v0.6.0：preTest 只有 tools/pre-execute 一条注册路径（不再注册全局单调 guard ——
-   0.5.7~0.5.9 那次事故就是它：放行返回 "" 被宿主当成拒绝理由，所有工具都变成 Error: ）。
-   这里按宿主的 waterfall 语义驱动：有决定权就返回 {kind:"deny",reason}，否则必须 next()。 */
-const preExecute = (listeners) => {
-  const handlers = listeners.get("tools/pre-execute") ?? [];
-  return {
-    handlers,
-    ask: (exec) => {
-      let nexted = false;
-      let out = null;
-      for (const handler of handlers) {
-        out = handler(exec, () => {
-          nexted = true;
-          return { kind: "allow" };
-        });
-        if (out && out.kind === "deny") return { kind: "deny", reason: String(out.reason ?? ""), nexted };
-        if (nexted) break;
-      }
-      return { kind: nexted ? "allow" : "none", reason: "", nexted };
-    },
-  };
-};
-
-/* v0.5.7：评审先于测试（preTest）—— gate 档挡住没评审就开跑的测试命令，
-   remind 档放行但回来提醒；覆盖状态由成功的 ocr_review 置位、成功的写工具清位。 */
+/* v0.6.0 事故回归（源码级）：0.5.7~0.5.9 的全局 guard 是「放行返回 "" 被宿主当成拒绝
+   理由 ⇒ 所有工具变成 Error: 」的直接来源。防线是**压根不注册**它，所以这里直接检查
+   源码里不再有 tools.guard 调用（比行为断言更难绕过：无论配置是什么都不该出现）。 */
 {
-  check(
-    "preTest：出厂默认 off，且三档归一（GATE → gate，不认识的写法回落默认）——只看出厂默认与归一，这样本机 config.json 写什么都不影响这条",
-    cfgMod.DEFAULTS.preTest === "off" &&
-      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: undefined }).preTest === "off" &&
-      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: " GATE " }).preTest === "gate" &&
-      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: "nope" }).preTest === "off" &&
-      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: "Remind" }).preTest === "remind",
-    `${cfgMod.DEFAULTS.preTest} / ${cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: " GATE " }).preTest} / ${
-      cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, preTest: "nope" }).preTest
-    }`,
-  );
-  const exec = (command, name = "pwsh") => ({ name, arguments: { command }, agent: makeAgent() });
-  check(
-    "preTest：只认 shell 类工具里**命令开头**的测试入口（read/write 里出现 test 字样不算，只是提了一嘴的普通命令也不算）",
-    mod.isTestCommand(exec("pnpm test")) === true &&
-      mod.isTestCommand(exec("node --test test/smoke.mjs")) === true &&
-      mod.isTestCommand(exec("npx vitest run")) === true &&
-      mod.isTestCommand(exec("python -m pytest -q")) === true &&
-      mod.isTestCommand(exec("cargo test")) === true &&
-      mod.isTestCommand(exec("cd lib && npm test")) === true &&
-      mod.isTestCommand(exec("ls -la")) === false &&
-      mod.isTestCommand(exec('git commit -m "fix jest tests"')) === false &&
-      mod.isTestCommand(exec("grep -r pytest src/")) === false &&
-      mod.isTestCommand(exec("cat vitest.config.js")) === false &&
-      mod.isTestCommand(exec("pnpm test", "read")) === false &&
-      mod.isTestCommand({ name: "pwsh", arguments: {} }) === false,
-    [exec("pnpm test"), exec("ls -la")].map((e) => mod.isTestCommand(e)).join(","),
-  );
-  const ptAgent = Object.assign(makeAgent(), { id: "session-pretest" });
-  const ptExec = (command) => ({ name: "pwsh", arguments: { command }, agent: ptAgent });
-  const onResult = (map, name, result) => {
-    for (const handler of map.get("tools/result") ?? []) handler({ name, arguments: {}, agent: ptAgent }, result);
-  };
-
-  const gateListeners = new Map();
-  const gateCase = makeCtx({ listeners: gateListeners });
-  let guardRegistrations = 0;
-  gateCase.tools.guard = () => {
-    guardRegistrations += 1;
-    return () => {};
-  };
-  mod.apply(gateCase, mkConfig({ preTest: "gate" }));
-  const gateDrive = preExecute(gateListeners);
-  check(
-    "v0.6.0：preTest 只注册 tools/pre-execute，完全不碰全局 ctx.tools.guard()（限定爆炸范围）",
-    gateDrive.handlers.length === 1 && guardRegistrations === 0 && mod.preTestStats().mechanism === "pre-execute",
-    `handlers=${gateDrive.handlers.length} guard=${guardRegistrations} mechanism=${mod.preTestStats().mechanism}`,
-  );
-  const denied = gateDrive.ask(ptExec("npm test"));
-  check(
-    "preTest：没有评审覆盖 → 闸门给拒绝理由（理由点明先跑 ocr_review，非测试命令放行）",
-    denied.kind === "deny" && denied.reason.includes("ocr_review") && denied.reason.includes("评审先于测试") && gateDrive.ask(ptExec("ls -la")).kind === "allow",
-    denied.reason.slice(0, 120),
-  );
-  onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true } });
-  check("preTest：一次成功的 ocr_review 覆盖这批改动后放行", gateDrive.ask(ptExec("npm test")).kind === "allow");
-  onResult(gateListeners, "write", { isError: false, value: { ok: true } });
-  check(
-    "preTest：写文件成功后覆盖立刻作废（改完必须重新评审）",
-    gateDrive.ask(ptExec("npm test")).kind === "deny",
-  );
-  onResult(gateListeners, "ocr_review", { isError: true, value: { ok: false, code: "OCR_RUN_FAILED" } });
-  check(
-    "preTest：失败的 ocr_review 不算「评过了」（fail-closed）",
-    gateDrive.ask(ptExec("npm test")).kind === "deny",
-  );
-  onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true, preview: true } });
-  check(
-    "preTest：preview 的 ocr_review 也不算「评过了」（只列文件、没调 LLM，否则一条 preview 就能绕过闸门）",
-    gateDrive.ask(ptExec("npm test")).kind === "deny",
-  );
-  const denialsBefore = mod.preTestStats().denials;
-  const sameCall = (callId) => ({ name: "pwsh", arguments: { command: "npm test" }, agent: ptAgent, callId });
-  gateDrive.ask(sameCall("call-1"));
-  gateDrive.ask(sameCall("call-1"));
-  check(
-    "preTest：同一次工具调用被询问多次只记一次拦截（按 callId 去重）",
-    mod.preTestStats().denials - denialsBefore === 1,
-    `Δ=${mod.preTestStats().denials - denialsBefore}`,
-  );
-  onResult(gateListeners, "ocr_review", { isError: false, value: { ok: true, preview: false } });
-  check("preTest：真正调过 LLM 的评审（preview=false）才放行", gateDrive.ask(ptExec("npm test")).kind === "allow");
-
-  /* 非 shell 工具：一次 Set 查找后立刻 next()，完全不读配置、不参与判定。 */
-  const nonShell = gateDrive.ask({ name: "glob", arguments: { pattern: "*" }, agent: ptAgent });
-  check(
-    "preTest：非 shell 工具直接 next()（一次 Set 查找后就不参与判定，也不会为它读配置）",
-    nonShell.kind === "allow" && nonShell.nexted === true,
-    JSON.stringify(nonShell),
-  );
-
-  /* fail-open：闸门自身出任何错都必须放行并留下痕迹（可选功能不能拖垮工具面）。 */
-  const failOpenBefore = mod.preTestStats().failOpen;
-  const boomExec = {
-    name: "pwsh",
-    get arguments() {
-      throw new Error("注入的爆炸");
-    },
-    agent: ptAgent,
-  };
-  const boom = gateDrive.ask(boomExec);
-  const failOpenStats = mod.preTestStats();
-  check(
-    "preTest：闸门自身抛异常 → fail-open（放行 + 计数 + lastError + lastDecision.kind=fail-open）",
-    boom.kind === "allow" &&
-      boom.nexted === true &&
-      failOpenStats.failOpen - failOpenBefore === 1 &&
-      failOpenStats.lastError.includes("注入的爆炸") &&
-      failOpenStats.lastDecision.kind === "fail-open",
-    `failOpen=${failOpenStats.failOpen} lastError=${JSON.stringify(failOpenStats.lastError)} last=${JSON.stringify(failOpenStats.lastDecision)}`,
-  );
-  check(
-    "preTest：lastDecision 记下最后一次判定（工具名 + kind + 时间戳）",
-    (() => {
-      gateDrive.ask(sameCall("call-last"));
-      const d = mod.preTestStats().lastDecision;
-      return d.tool === "pwsh" && d.kind === "allow" && Number.isFinite(d.at) && d.at > 0;
-    })(),
-    JSON.stringify(mod.preTestStats().lastDecision),
-  );
-
-  /* remind：闸门照样挂上（只记账、不拦），否则测试结果回来时没有任何 pending 可提醒。 */
-  const remindListeners = new Map();
-  const remindCase = makeCtx({ listeners: remindListeners });
-  let remindGuardCalls = 0;
-  remindCase.tools.guard = () => {
-    remindGuardCalls += 1;
-    return () => {};
-  };
-  mod.apply(remindCase, mkConfig({ preTest: "remind" }));
-  const remindAgent = Object.assign(makeAgent(), { id: "session-remind" });
-  const followed = [];
-  remindAgent.followup = (message) => followed.push(message);
-  const remindExec = { name: "pwsh", arguments: { command: "npm test" }, agent: remindAgent };
-  const remindDrive = preExecute(remindListeners);
-  const remindVerdict = remindDrive.ask(remindExec);
-  check(
-    "preTest：remind 档也挂闸门但一律放行（只记账；不挂的话测试结果回来时根本没有 pending）",
-    remindDrive.handlers.length === 1 &&
-      remindGuardCalls === 0 &&
-      remindVerdict.kind === "allow" &&
-      remindVerdict.nexted === true &&
-      mod.preTestStats().mode === "remind" &&
-      mod.preTestStats().mechanism === "pre-execute",
-    `handlers=${remindDrive.handlers.length} guard=${remindGuardCalls} verdict=${JSON.stringify(remindVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
-  );
-  for (const handler of remindListeners.get("tools/result") ?? []) {
-    handler(remindExec, { isError: false, value: { ok: true } });
-  }
-  check(
-    "preTest：remind 档在测试结果回来后给模型一条「这批改动还没评审」的提醒",
-    followed.length === 1 && textOf(followed[0]).includes("ocr_review"),
-    followed.map(textOf).join(" | ").slice(0, 120),
-  );
-
-  /* v0.6.0 事故回归（源码级）：0.5.7~0.5.9 的全局 guard 是「放行返回 "" 被宿主当成拒绝
-     理由 ⇒ 所有工具变成 Error: 」的直接来源。防线是**压根不注册**它，所以这里直接检查
-     源码里不再有 tools.guard 调用（比行为断言更难绕过：无论配置是什么都不该出现）。 */
   const indexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
   /* 注释里提到这次事故是允许的（甚至是希望的文档），所以先把注释剥掉再看调用点。 */
   const indexCode = indexSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
   check(
-    "v0.6.0 事故回归：lib/index.js 的代码里不再出现 ctx.tools.guard（唯一的注册面是 tools/pre-execute）",
+    "v0.6.0 事故回归：lib/index.js 的代码里不再出现全局 ctx.tools.guard（全局单调 guard 不许回来）",
     !/tools\s*\.\s*guard\s*\(/.test(indexCode) && !/\bguards?\s*\.\s*append\s*\(/.test(indexCode),
     `matches=${(indexCode.match(/tools\s*\.\s*guard\s*\(/g) ?? []).length}（注释里提到 ${(indexSource.match(/tools\s*\.\s*guard/g) ?? []).length} 次）`,
   );
 }
 
-/* v0.6.0 契约回归：宿主对 tools/pre-execute（waterfall）的语义是「返回
-   {kind:"deny",reason} 即拒绝，必须 next() 才继续」。这条用例自己实现该语义，
-   防止再把「放行」写成假值/空字符串而让整个工具面变成 Error: —— 0.5.7~0.5.9 就是这样坏的。 */
+/* v0.5.8：文件层（config.json）没有事件通知，而 auto / onDemand 的启停是
+   「装/卸监听器」级别的决定 —— 真机上改完 config.json 常常要重启才生效。修法：指纹钩子
+   只要插件没被关掉就挂着 + 借本来就会流的事件对配置指纹、需要时才重新 sync。 */
 {
-  const contractListeners = new Map();
-  const contractCase = makeCtx({ listeners: contractListeners });
-  let contractGuardCalls = 0;
-  contractCase.tools.guard = () => {
-    contractGuardCalls += 1;
-    return () => {};
-  };
-  mod.apply(contractCase, mkConfig({ preTest: "gate" }));
-  const contractDrive = preExecute(contractListeners);
-  const contractAgent = Object.assign(makeAgent(), { id: "session-pretest-contract" });
-  const nonTest = contractDrive.ask({ name: "glob", arguments: { pattern: "*" }, agent: contractAgent });
-  const test = contractDrive.ask({ name: "pwsh", arguments: { command: "npm test" }, agent: contractAgent });
-  check(
-    "v0.6.0 契约回归：闸门一个全局 tools.guard 都不注册，只走 pre-execute（非测试命令 next() 放行、测试命令给 {kind:deny,reason}）",
-    contractGuardCalls === 0 &&
-      contractDrive.handlers.length === 1 &&
-      nonTest.kind === "allow" &&
-      nonTest.nexted === true &&
-      test.kind === "deny" &&
-      test.reason.includes("ocr_review"),
-    `guard=${contractGuardCalls} handlers=${contractDrive.handlers.length} nonTest=${JSON.stringify(nonTest)} test=${JSON.stringify(test).slice(0, 120)}`,
-  );
-}
-
-/* v0.5.8：文件层（config.json）没有事件通知，而 auto / onDemand / preTest 的启停是
-   「装/卸监听器」级别的决定 —— 真机上把 preTest 写成 gate，闸门一直没挂上、ocr_status
-   也跟着报 off。修法：闸门只要插件没被关掉就挂着（off 只是放行）+ 借本来就会流的事件
-   对配置指纹、需要时才重新 sync。 */
-{
-  const offListeners = new Map();
-  const offCase = makeCtx({ listeners: offListeners });
-  let offGuardCalls = 0;
-  offCase.tools.guard = () => {
-    offGuardCalls += 1;
-    return () => {};
-  };
-  mod.apply(offCase, mkConfig({ preTest: "off" }));
-  const offAgent = Object.assign(makeAgent(), { id: "session-pretest-off" });
-  const offExec = { name: "pwsh", arguments: { command: "npm test" }, agent: offAgent };
-  const offDrive = preExecute(offListeners);
-  const offVerdict = offDrive.ask(offExec);
-  check(
-    "v0.5.8：preTest=off 时闸门也挂着（只是放行）—— 这样 config.json 改成 gate 立刻按新档位办事，不用重挂",
-    offDrive.handlers.length === 1 &&
-      offGuardCalls === 0 &&
-      offVerdict.kind === "allow" &&
-      offVerdict.nexted === true &&
-      mod.preTestStats().mode === "off" &&
-      mod.preTestStats().mechanism === "pre-execute",
-    `handlers=${offDrive.handlers.length} guard=${offGuardCalls} verdict=${JSON.stringify(offVerdict)} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
-  );
-
-  const disabledListeners = new Map();
-  const disabledCase = makeCtx({ listeners: disabledListeners });
-  mod.apply(disabledCase, mkConfig({ enabled: false }));
-  check(
-    "v0.5.8：enabled=false 才真的卸掉闸门（mechanism=none，一个 pre-execute 监听都不注册）",
-    (disabledListeners.get("tools/pre-execute") ?? []).length === 0 &&
-      mod.preTestStats().mode === "off" &&
-      mod.preTestStats().mechanism === "none",
-    `handlers=${(disabledListeners.get("tools/pre-execute") ?? []).length} mode=${mod.preTestStats().mode}/${mod.preTestStats().mechanism}`,
-  );
-
   const syncListeners = new Map();
   const syncCase = makeCtx({ listeners: syncListeners });
   /* autoReview 是设置页 schema 的字段名（schemaOverrides 才把它映射成 auto）：
      有 schema 时只写 auto 会被丢掉，两个都写上，两种环境下的前提才是真的（OCR 自审指出）。 */
-  mod.apply(syncCase, mkConfig({ auto: "off", autoReview: "off", preTest: "off" }));
+  mod.apply(syncCase, mkConfig({ auto: "off", autoReview: "off" }));
   const resultHooks = (syncListeners.get("tools/result") ?? []).length;
   const stoppingHooks = (syncListeners.get("agent/turn-stopping") ?? []).length;
   check(
     "v0.5.8：auto=off 时也挂了配置指纹钩子（tools/result 与 agent/turn-stopping）——文件层改动靠它们被发现",
-    resultHooks >= 2 && stoppingHooks >= 1,
+    resultHooks >= 1 && stoppingHooks >= 1,
     `tools/result=${resultHooks} agent/turn-stopping=${stoppingHooks}`,
   );
 
   const stampA = cfgMod.loadConfig({}).__configStamp;
-  const stampB = cfgMod.loadConfig({ preTest: "gate" }).__configStamp;
+  const stampB = cfgMod.loadConfig({ timeoutMinutes: 9 }).__configStamp;
   check(
     "v0.5.8：loadConfig 带文件层指纹 __configStamp（含生效路径；设置页 patch 不影响它，只有文件层变了才变）",
     typeof stampA === "string" && stampA.length > 0 && stampA.includes(String(cfgMod.loadConfig({}).__configPath)) && stampA === stampB,
@@ -4187,65 +3918,10 @@ const preExecute = (listeners) => {
   );
 }
 
-/* v0.5.8 端到端：把文件层真的从 off 改成 gate，只靠「本来就会流的事件」+ 指纹去重，
-   闸门就必须按新档位拦下测试命令（这是那条真机缺陷的回归测试，不是「钩子挂上了」级别的检查）。 */
-{
-  const tmpConfig = join(tmpdir(), `ocr-smoke-pretest-${process.pid}.json`);
-  const prevEnv = process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
-  const flipListeners = new Map();
-  const flipCase = makeCtx({ listeners: flipListeners });
-  let flipGuardCalls = 0;
-  flipCase.tools.guard = () => {
-    flipGuardCalls += 1;
-    return () => {};
-  };
-  try {
-    writeFileSync(tmpConfig, JSON.stringify({ preTest: "off" }));
-    process.env.DSH_OPEN_CODE_REVIEW_CONFIG = tmpConfig;
-    mod.apply(flipCase, mkConfig({ auto: "off", autoReview: "off" }));
-    const modeBefore = mod.preTestStats().mode;
-    const keep = preExecute(flipListeners).ask({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-keep" }) });
-
-    /* 文件层改成 gate：不改任何设置页字段、不重挂监听器 */
-    writeFileSync(tmpConfig, JSON.stringify({ preTest: "gate" }));
-    for (const hook of flipListeners.get("tools/result") ?? []) {
-      hook({ name: "read", arguments: { path: "x" }, isError: false, value: {} });
-    }
-    /* syncIfConfigChanged 把重活放在微任务里，等两轮宏任务确保跑完 */
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const modeAfter = mod.preTestStats().mode;
-    /* 宿主对 waterfall 的契约是「返回 {kind:"deny",reason} = 拒绝，next() = 继续」；
-       这里按真实契约断（不是按我们自己的返回值形状）。 */
-    const verdict = preExecute(flipListeners).ask({ name: "pwsh", arguments: { command: "npm test" }, agent: Object.assign(makeAgent(), { id: "s-flip-deny" }) });
-    check(
-      "v0.5.8：文件层 off → gate 之后，下一次 tools/result 就按新档位拦下测试命令（端到端，不用重启也不用设置页）",
-      modeBefore === "off" &&
-        keep.kind === "allow" &&
-        keep.nexted === true &&
-        flipGuardCalls === 0 &&
-        modeAfter === "gate" &&
-        verdict.kind === "deny" &&
-        verdict.reason.includes("评审先于测试"),
-      `before=${modeBefore} keep=${JSON.stringify(keep)} after=${modeAfter} verdict=${JSON.stringify(verdict)}`,
-    );
-  } finally {
-    if (prevEnv === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
-    else process.env.DSH_OPEN_CODE_REVIEW_CONFIG = prevEnv;
-    try {
-      rmSync(tmpConfig, { force: true });
-    } catch {
-      /* 清理失败不影响断言 */
-    }
-    cfgMod.loadConfig({});
-  }
-}
-
 /* v0.5.8 三层优先级修（真机决定性实验的回归）：Host 把 schema 实例化后，用户没动过的字段
    也带着 schema 默认值（true / 3 / "off" / 15 …），旧实现只跳过「空值」⇒ 布尔/数字/枚举
    的默认值恒被当成设置页覆盖项，把 config.json（第二层）整个遮住。真机上表现为
-   config.json 写 timeoutMinutes:7 → 运行时仍按 15、写 preTest:"gate" → 闸门不生效。
+   config.json 写 timeoutMinutes:7 → 运行时仍按 15（schema 默认值把它遮住了）。
    规则：取值恰好等于出厂默认的字段不算覆盖（与设置页「没标已改」一致）。 */
 {
   const tmpConfig = join(tmpdir(), `ocr-smoke-layer-${process.pid}.json`);
@@ -4257,30 +3933,30 @@ const preExecute = (listeners) => {
       `overrides=${JSON.stringify(cfgMod.schemaOverrides(mkConfig({})))}`,
     );
     check(
-      "v0.5.8：设置页真改过的字段仍然覆盖文件层（preTest=gate 不是默认值，必须留下）",
-      cfgMod.schemaOverrides(mkConfig({ preTest: "gate" }))?.preTest === "gate",
-      `overrides=${JSON.stringify(cfgMod.schemaOverrides(mkConfig({ preTest: "gate" })))}`,
+      "v0.5.8：设置页真改过的字段仍然覆盖文件层（timeoutMinutes=20 不是默认值，必须留下）",
+      cfgMod.schemaOverrides(mkConfig({ timeoutMinutes: 20 }))?.timeoutMinutes === 20,
+      `overrides=${JSON.stringify(cfgMod.schemaOverrides(mkConfig({ timeoutMinutes: 20 })))}`,
     );
     /* 带 BOM 写：记事本 / PowerShell 另存为 UTF-8 会加 BOM，旧实现直接 parse 失败、
        整份配置被当坏文件回落到出厂默认（用户以为配置生效了）。 */
-    writeFileSync(tmpConfig, `\uFEFF${JSON.stringify({ preTest: "gate", timeoutMinutes: 7 })}`, "utf8");
+    writeFileSync(tmpConfig, `\uFEFF${JSON.stringify({ timeoutMinutes: 7, verbose: true })}`, "utf8");
     process.env.DSH_OPEN_CODE_REVIEW_CONFIG = tmpConfig;
     const merged = cfgMod.loadConfig(cfgMod.schemaOverrides(mkConfig({})));
     check(
-      "v0.5.8：config.json 的 preTest=gate / timeoutMinutes=7 真的生效（设置页没改过这两项，不再被 schema 默认值遮住）",
-      merged.preTest === "gate" && merged.timeoutMinutes === 7 && !merged.__configError,
-      `preTest=${merged.preTest} timeoutMinutes=${merged.timeoutMinutes} error=${String(merged.__configError)}`,
+      "v0.5.8：config.json 的 timeoutMinutes=7 / verbose=true 真的生效（设置页没改过这两项，不再被 schema 默认值遮住）",
+      merged.timeoutMinutes === 7 && merged.verbose === true && !merged.__configError,
+      `timeoutMinutes=${merged.timeoutMinutes} verbose=${merged.verbose} error=${String(merged.__configError)}`,
     );
     check(
       "v0.5.8：配置文件带 UTF-8 BOM（记事本/PowerShell 另存）不再被当成坏文件",
-      cfgMod.loadConfig({}).preTest === "gate" && !cfgMod.loadConfig({}).__configError,
-      `preTest=${cfgMod.loadConfig({}).preTest} error=${String(cfgMod.loadConfig({}).__configError)}`,
+      cfgMod.loadConfig({}).timeoutMinutes === 7 && !cfgMod.loadConfig({}).__configError,
+      `timeoutMinutes=${cfgMod.loadConfig({}).timeoutMinutes} error=${String(cfgMod.loadConfig({}).__configError)}`,
     );
     const withSetting = cfgMod.loadConfig(cfgMod.schemaOverrides(mkConfig({ timeoutMinutes: 20 })));
     check(
       "v0.5.8：设置页真改过的项仍然优先（timeoutMinutes=20 压过文件层的 7），同一份文件的其它键照常生效",
-      withSetting.timeoutMinutes === 20 && withSetting.preTest === "gate",
-      `timeoutMinutes=${withSetting.timeoutMinutes} preTest=${withSetting.preTest}`,
+      withSetting.timeoutMinutes === 20 && withSetting.verbose === true,
+      `timeoutMinutes=${withSetting.timeoutMinutes} verbose=${withSetting.verbose}`,
     );
   } finally {
     if (prevEnv === undefined) delete process.env.DSH_OPEN_CODE_REVIEW_CONFIG;
@@ -4438,10 +4114,10 @@ const preExecute = (listeners) => {
       return () => {};
     },
   };
-  const unwatch = hooksMod.armHook(hookCtx, "tools/pre-execute", () => {});
+  const unwatch = hooksMod.armHook(hookCtx, "loader/volatile-update", () => {});
   check(
     "v0.7.0：白名单内的事件挂得上，并返回可调用的卸载函数",
-    hookCalls.length === 1 && hookCalls[0].event === "tools/pre-execute" && typeof unwatch === "function",
+    hookCalls.length === 1 && hookCalls[0].event === "loader/volatile-update" && typeof unwatch === "function",
     `calls=${hookCalls.length}`,
   );
   const blockedOff = hooksMod.armHook(hookCtx, "tools/guard", () => {});
@@ -4574,7 +4250,7 @@ const preExecute = (listeners) => {
   const armCalls = hookIndexCode.match(/armHook\s*\(/g) ?? [];
   check(
     "v0.7.0：lib/index.js 里没有裸的 ctx.on( —— 事件钩子一律走 armHook 白名单",
-    bareOn.length === 0 && armCalls.length >= 6,
+    bareOn.length === 0 && armCalls.length >= 5,
     `ctx.on=${bareOn.length} armHook=${armCalls.length}`,
   );
 }
@@ -4582,15 +4258,15 @@ const preExecute = (listeners) => {
 /* v0.7.0：ocr_status 要能回答「你到底挂了哪些钩子、有没有挂失败」—— 事故当天最缺的就是这个。 */
 {
   const hookStatusCtx = makeCtx({ listeners: new Map() });
-  mod.apply(hookStatusCtx, mkConfig({ preTest: "gate" }));
+  mod.apply(hookStatusCtx, mkConfig({}));
   const hookStatus = await tools.get("ocr_status").execute({ checkLlm: false }, exec);
   const hookSchema = tools.get("ocr_status")?.output?.schema?.properties?.hooks ?? {};
   check(
-    "v0.7.0：ocr_status 报出事件钩子账目（registered/counts/errors/blocked 四件套，且能看出闸门已挂）",
+    "v0.7.0：ocr_status 报出事件钩子账目（registered/counts/errors/blocked 四件套，且能看到真实挂上的钩子）",
     Array.isArray(hookStatus.hooks?.registered) &&
-      hookStatus.hooks.registered.includes("tools/pre-execute") &&
+      hookStatus.hooks.registered.includes("tools/result") &&
       typeof hookStatus.hooks.counts === "object" &&
-      Number.isFinite(hookStatus.hooks.counts?.["tools/pre-execute"]) &&
+      Number.isFinite(hookStatus.hooks.counts?.["tools/result"]) &&
       Array.isArray(hookStatus.hooks.errors) &&
       Array.isArray(hookStatus.hooks.blocked),
     JSON.stringify(hookStatus.hooks).slice(0, 240),

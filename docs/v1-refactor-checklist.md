@@ -12,7 +12,7 @@
 
 ## 执行序（每步跑 `node --check` + 相关套件，绿了再提交）
 1. ✅ ocr 依赖 + 三级解析 + `source` 披露（`lib/ocr-cli.js` 的 `bundledCandidates()` / `resolveOcr()`）。
-2. ⬜ 删 preTest：`lib/hooks.js` 整文件、`lib/index.js:128-320`（TEST_SEGMENT_RES→preTestVerdict）、`:3077-3090`（tools/pre-execute 分支）、`:149-188`（文案/统计）、`config.preTest`、`docs/pretest-gate-safety-design.md`、相关断言。
+2. ✅ 删 preTest：`config.preTest`、`TEST_SEGMENT_RES`→`preTestVerdict`、`createPreTest`（tools/pre-execute）、文案/统计、`ocr_status.preTest`、schema/键清单/客户端字段、相关断言。**偏差**：`lib/hooks.js` 整文件与 `docs/pretest-gate-safety-design.md` 暂留（hooks 是自动评审/指纹共用基础设施，属第 4 步；design doc 被 README 本地链到，属第 13 步）。
 3. ⬜ 删独立评审 agent：`lib/reviewer.js`、`lib/index.js:1149-1304`（runReviewerReview）、`:1389-1400`（reviewerTimeoutMs）、`:3404-3424`（safeInject subagents）、工具参数/输出里的 `reviewer`、`reviewer.*` 5 键、3 个 `REVIEWER_*` 码、`test/reviewer-smoke.mjs`。
 4. ⬜ 删自动评审：`lib/index.js:2643-2940`（createAutoReviewer）、`:2888-2916`（tools/result、agent/turn-stopping 钩子）、`auto*` ~10 键、客户端「自动评审」组。
 5. ⬜ 删 skill（`skills/` + `lib/index.js:1234-1281` syncOnDemandSkill）。

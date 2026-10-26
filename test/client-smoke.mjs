@@ -289,8 +289,8 @@ check(
     && zhDict["group.basic"] === "基础"
     && zhDict["group.route"] === "模型路由"
     && zhDict["group.reviewer"] === "独立评审 agent"
-    && zhDict["group.timing"] === "评审时机",
-  JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.route"], zhDict["group.reviewer"], zhDict["group.timing"]]),
+    && !("group.timing" in zhDict),
+  JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.route"], zhDict["group.reviewer"], "group.timing" in zhDict]),
 );
 check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
 /* 批 2（UI 规范·文案双语）：en 词典必须覆盖 zh 词典的**每一个**键 —— 缺一条，`makeT` 就退回内联中文
@@ -367,13 +367,13 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-/* 主页只放「要做的决定」这 4 行；高级区（模型路由 2 + 独立评审 agent 1 + 评审时机 1 = 4）默认不渲染；
+/* 主页只放「要做的决定」这 4 行；高级区（模型路由 2 + 独立评审 agent 1 = 3）默认不渲染；
    其余 15 项是 v0.11.0 起不再露出的配置项，只在诊断区只读列出。 */
 const BASIC_LABELS = ["总开关", "默认引擎", "按需评审", "自动评审"];
-const ADVANCED_LABELS = ["模型名", "提供方（provider）", "独立评审 agent", "评审先于测试"];
-/* 「独立评审 agent」同时是折叠区里那个分组的名字，而收起提示会点名三个分组 —— 它单列。 */
-const COLLAPSED_LABELS = ["模型名", "提供方（provider）", "评审先于测试"];
-const ADVANCED_KEYS = ["llmModel", "llmProvider", "reviewerAgent", "preTest"];
+const ADVANCED_LABELS = ["模型名", "提供方（provider）", "独立评审 agent"];
+/* 「独立评审 agent」同时是折叠区里那个分组的名字，而收起提示会点名两个分组 —— 它单列。 */
+const COLLAPSED_LABELS = ["模型名", "提供方（provider）"];
+const ADVANCED_KEYS = ["llmModel", "llmProvider", "reviewerAgent"];
 const HIDDEN_KEYS = ["llmMode", "llmBaseUrl", "llmProtocol", "llmApiKeyRef", "autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "audience", "ocrPath", "timeoutMinutes", "progress", "verbose"];
 const HIDDEN_LABELS = ["LLM 路由", "端点 Base URL", "端点协议", "API Key 引用", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "结果详细程度", "ocr 可执行文件", "单次超时（分钟）", "评审进度", "调试日志"];
 for (const label of BASIC_LABELS) {
@@ -382,8 +382,8 @@ for (const label of BASIC_LABELS) {
 for (const label of COLLAPSED_LABELS) {
   check(`高级项「${label}」默认收起`, !html.includes(label));
 }
-check("收起提示里点名了三个分组", html.includes("模型路由") && html.includes("独立评审 agent") && html.includes("评审时机"), html.slice(0, 200));
-check("高级设置标题显示项数（收起时也显示 4 项）", html.includes("高级设置（4 项）"), html.slice(0, 180));
+check("收起提示里点名了两个分组（评审时机分组已去掉）", html.includes("模型路由") && html.includes("独立评审 agent") && !html.includes("评审时机"), html.slice(0, 200));
+check("高级设置标题显示项数（收起时也显示 3 项）", html.includes("高级设置（3 项）"), html.slice(0, 180));
 check("高级设置默认收起（aria-expanded=false）", hosts(tree).some((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1" && n.props["aria-expanded"] === "false"));
 check("收起时说明怎么展开", html.includes("已收起"), html.slice(0, 180));
 check("主页说明字段来源徽标", html.includes("设置页已改"));
@@ -470,7 +470,7 @@ check("高级设置有可点的标题", Boolean(advToggle(tree)));
 setAdvanced(true);
 const advTree = render();
 const advRows = controlRows(advTree);
-check("展开后高级项 4 行（模型路由 2 + 独立评审 agent 1 + 评审时机 1）", advancedRows(advTree).length === 4, `n=${advancedRows(advTree).length}`);
+check("展开后高级项 3 行（模型路由 2 + 独立评审 agent 1）", advancedRows(advTree).length === 3, `n=${advancedRows(advTree).length}`);
 check("展开后 aria-expanded=true", advToggle(advTree).props["aria-expanded"] === "true");
 check("展开后不再显示「已收起」的展开提示", !textOf(advTree).includes("低频参数已收起"));
 check(
@@ -480,13 +480,6 @@ check(
 );
 check("展开后模型名带出当前值", hosts(advTree).some((n) => n.tag === "input" && n.props.value === "deepseek/deepseek-v4.1-flash"));
 check("高级项也有「恢复默认」", advRows.every((r) => r.buttons.some((b) => textOf(b) === "恢复默认")));
-const preTestRow = advRows.find((r) => r.key === "preTest");
-check(
-  "「评审先于测试」行是下拉，三档 off/remind/gate（v0.5.7）",
-  Boolean(preTestRow) && preTestRow.field.tag === "select" &&
-    hosts(preTestRow.row).filter((n) => n.tag === "option").map((n) => n.props.value).join(",") === "off,remind,gate",
-  preTestRow ? hosts(preTestRow.row).filter((n) => n.tag === "option").map((n) => n.props.value).join(",") : "行不存在",
-);
 /* 高级区的文本框：草稿 → 保存 → form.set（旧用例拿 Base URL 测，那个键已收进诊断区）。 */
 const provRow0 = advRows.find((r) => r.key === "llmProvider");
 check("高级区有 provider 文本行（dsh 模式）", Boolean(provRow0) && provRow0.field.tag === "input");
@@ -528,30 +521,30 @@ check(
   JSON.stringify(HIDDEN_KEYS.filter((k) => expandedKeys.includes(k) || collapsedKeys.includes(k))),
 );
 check(
-  "展开态可见键 = 基础 4 + 高级 4（模型路由 2 / 独立评审 agent 1 / 评审时机 1）",
-  expandedKeys.join(",") === "enabled,engine,onDemand,autoReview,llmModel,llmProvider,reviewerAgent,preTest",
+  "展开态可见键 = 基础 4 + 高级 3（模型路由 2 / 独立评审 agent 1）",
+  expandedKeys.join(",") === "enabled,engine,onDemand,autoReview,llmModel,llmProvider,reviewerAgent",
   expandedKeys.join(","),
 );
 check("收起态可见键 = 基础 4", collapsedKeys.join(",") === "enabled,engine,onDemand,autoReview", collapsedKeys.join(","));
 check("诊断区说明「键名即是 config.json 的写法」", html.includes("键名") && html.includes("运行期实况"));
 
 /* 折叠态也要能看见「高级区里有待保存的改动」，并且能逐字段撤销。
-   用「评审时机」这个下拉来测：它没有内部状态；模型名那行是可搜索下拉，改它会把内部 text/open
+   用「独立评审 agent」这个下拉来测：它没有内部状态；模型名那行是可搜索下拉，改它会把内部 text/open
    状态留在测试夹具里，污染后面的候选列表用例。 */
 setAdvanced(true);
-const draftPreRow = controlRows(render()).find((r) => r.key === "preTest");
-check("找到高级区的评审时机行", Boolean(draftPreRow) && draftPreRow.field.tag === "select");
-if (draftPreRow) draftPreRow.field.props.onChange({ target: { value: "remind" } });
+const draftReviewerRow = controlRows(render()).find((r) => r.key === "reviewerAgent");
+check("找到高级区的独立评审 agent 行", Boolean(draftReviewerRow) && draftReviewerRow.field.tag === "select");
+if (draftReviewerRow) draftReviewerRow.field.props.onChange({ target: { value: "spawn" } });
 setAdvanced(false);
 const collapsedDirty = render();
 check("折叠后标题显示「1 项待保存」", textOf(collapsedDirty).includes("1 项待保存"), textOf(collapsedDirty).slice(0, 160));
 check("折叠后高级行不在 DOM 里", controlRows(collapsedDirty).length === 4, `n=${controlRows(collapsedDirty).length}`);
 setAdvanced(true);
-const undoRow = controlRows(render()).find((r) => r.key === "preTest");
+const undoRow = controlRows(render()).find((r) => r.key === "reviewerAgent");
 const undoBtn = undoRow && undoRow.buttons.find((b) => textOf(b) === "撤销");
 check("折叠期间草稿还在，展开后能逐字段撤销", Boolean(undoBtn));
 if (undoBtn) undoBtn.props.onClick();
-check("撤销后该行不再算脏（值已回到已存值）", !controlRows(render()).find((r) => r.key === "preTest").buttons.some((b) => textOf(b) === "保存"));
+check("撤销后该行不再算脏（值已回到已存值）", !controlRows(render()).find((r) => r.key === "reviewerAgent").buttons.some((b) => textOf(b) === "保存"));
 setAdvanced(false);
 check("撤销后待保存徽标消失", !textOf(render()).includes("项待保存"));
 
@@ -652,7 +645,7 @@ check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.v
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "spawn" } });
 const spawnTree = render();
 const spawnRows = controlRows(spawnTree);
-check("reviewer=spawn 时展开态 11 行（基础 4 + 路由 2 + 子 agent 3 行额外 + 时机 1）", spawnRows.length === 11, `n=${spawnRows.length}`);
+check("reviewer=spawn 时展开态 10 行（基础 4 + 路由 2 + 独立评审 agent 1 + 子 agent 3 行额外）", spawnRows.length === 10, `n=${spawnRows.length}`);
 check("reviewerAgent 只有 off / spawn 两个选项", (() => {
   const row = spawnRows.find((r) => r.key === "reviewerAgent");
   return Boolean(row) && hosts(row.row).filter((n) => n.tag === "option").length === 2;
@@ -695,7 +688,7 @@ if (reviewInput) {
 /* 切回 off：后面的降级场景与行数断言按默认（不启用）算 */
 controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "off" } });
 const offAgain = controlRows(render());
-check("切回 off 后子 agent 三行消失、展开态行数回到 8", offAgain.length === 8 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
+check("切回 off 后子 agent 三行消失、展开态行数回到 7", offAgain.length === 7 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
 check("切回 off 后状态行不再提独立 agent", !textOf(render()).includes("评审走独立 agent"));
 setAdvanced(false);
 check("收起后回到基础 4 行", controlRows(render()).length === 4, `n=${controlRows(render()).length}`);

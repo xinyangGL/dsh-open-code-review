@@ -216,7 +216,7 @@ try {
   check("未命中：两个工具照常注册", onCtx.calls.tools.map((spec) => spec.name).join(",") === "ocr_review,ocr_status");
   check("未命中：斜杠命令注册回来", onCtx.calls.commands.length === 1);
   check("未命中：服务注入照常（llm/subagents/jobs/skills）", onCtx.calls.injects >= 1, String(onCtx.calls.injects));
-  check("未命中：事件监听照常挂（含 preTest 的 tools/pre-execute）",
+  check("未命中：事件监听照常挂（tools/result / agent/turn-stopping 等）",
     onCtx.calls.ons.length >= 1 && onCtx.calls.ons.every((entry) => typeof entry.event === "string"),
     onCtx.calls.ons.map((entry) => entry.event).join(","));
 

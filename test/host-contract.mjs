@@ -38,10 +38,10 @@ function fullCtx() {
 /**
  * v0.7.1：事件类能力不再只看 `ctx.on` 在不在 —— 还要看**这个事件真的接上了没有**，
  * 所以探针接受一份可注入的挂载账目（不传就读 lib/hooks.js 的实时账目）。
- * 这里给一份「四个事件都挂上了」的账目，代表一次正常启动。
+ * 这里给一份「三个事件都挂上了」的账目，代表一次正常启动。
  */
 const ARMED_HOOKS = {
-  hooks: { counts: { "tools/result": 2, "agent/turn-stopping": 1, "tools/pre-execute": 1, "loader/volatile-update": 1 } },
+  hooks: { counts: { "tools/result": 2, "agent/turn-stopping": 1, "loader/volatile-update": 1 } },
 };
 const NOT_ARMED_HOOKS = { hooks: { counts: {} } };
 
@@ -58,7 +58,6 @@ function ctxWithout(id) {
     "credentials.resolve": () => delete ctx.credentials.resolve,
     "events.tools/result": () => delete ctx.on,
     "events.agent/turn-stopping": () => delete ctx.on,
-    "events.tools/pre-execute": () => delete ctx.on,
     "events.loader/volatile-update": () => delete ctx.on,
     "inject.llm": () => delete ctx.llm.stream,
     "inject.jobs": () => delete ctx.jobs.start,
@@ -76,7 +75,7 @@ function ctxWithout(id) {
   const ids = HOST_CONTRACT.capabilities.map((row) => row.id);
   check(
     "v0.7.0：清单齐备（id 唯一、都有 label/surface/required/detect/degrade、surface 只有 host/client）",
-    HOST_CONTRACT.capabilities.length >= 13 &&
+    HOST_CONTRACT.capabilities.length >= 12 &&
       new Set(ids).size === ids.length &&
       HOST_CONTRACT.capabilities.every(
         (row) =>
@@ -102,8 +101,8 @@ function ctxWithout(id) {
     JSON.stringify(HOST_CONTRACT.verifiedWith),
   );
   /* v0.7.1：package.json 的 dsh.host.capabilities 与这份清单必须是同一套 id。
-     原来一个写 `events.tools/pre-execute`、一个写 `tools/pre-execute`，两份「同样的话」
-     各说各的 —— 声明类信息最怕这种漂移，评审的人根本没法比对（第 10 条发现）。 */
+     原来一处写全名、一处写短名，两份「同样的话」各说各的 —— 声明类信息最怕这种漂移，
+     评审的人根本没法比对（第 10 条发现）。 */
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const declared = pkg?.dsh?.host?.capabilities;
   check(
@@ -131,7 +130,7 @@ function ctxWithout(id) {
     host.ok === true &&
       host.missing.length === 0 &&
       host.errors.length === 0 &&
-      hostRows.length >= 13 &&
+      hostRows.length >= 12 &&
       hostRows.every((row) => row.present === true) &&
       host.capabilities.filter((row) => row.surface === "client").every((row) => row.present === null),
     `ok=${host.ok} hostRows=${hostRows.length}`,
@@ -155,17 +154,17 @@ function ctxWithout(id) {
     hostSummary(host),
   );
   /* v0.7.1：宿主有 ctx.on 但插件一个钩子都没挂上（紧急制动、或注册全失败）时，
-     四条事件能力必须报「缺」，而不是跟着 ctx.on 一起报 true —— 那正是第 11 条发现：
+     三条事件能力必须报「缺」，而不是跟着 ctx.on 一起报 true —— 那正是第 11 条发现：
      原来的写法会一边说「能力齐备」一边在 degrade 里说「不会触发」，自相矛盾。 */
   const unarmed = probeHost(fullCtx(), NOT_ARMED_HOOKS);
   const unarmedEvents = unarmed.capabilities.filter((row) => row.id.startsWith("events."));
   check(
-    "v0.7.1：只有 ctx.on、一个钩子都没挂上时，四条事件能力报「缺」（不再假阳性）",
-    unarmedEvents.length === 4 && unarmedEvents.every((row) => row.present === false),
+    "v0.7.1：只有 ctx.on、一个钩子都没挂上时，三条事件能力报「缺」（不再假阳性）",
+    unarmedEvents.length === 3 && unarmedEvents.every((row) => row.present === false),
     unarmedEvents.map((row) => `${row.id}=${row.present}`).join(" "),
   );
   check(
-    "v0.7.1：不传账目时读实时账目；四条事件能力的 present 与 hookStats().counts 一致",
+    "v0.7.1：不传账目时读实时账目；三条事件能力的 present 与 hookStats().counts 一致",
     unarmed.capabilities
       .filter((row) => row.id.startsWith("events."))
       .every((row) => row.present === (Number(hookStats().counts?.[row.id.replace(/^events\./, "")] ?? 0) > 0)),
@@ -405,7 +404,7 @@ for (const capability of HOST_CONTRACT.capabilities) {
     `used=${used.join(",")} unregistered=${unregistered.join(",")}`,
   );
   check(
-    "v0.7.0：事件类扩展点全部来自白名单（tools/result、tools/pre-execute、agent/turn-stopping、loader/volatile-update）",
+    "v0.7.0：事件类扩展点全部来自白名单（tools/result、agent/turn-stopping、loader/volatile-update）",
     [...events].every((id) => declared.has(id)) && events.size >= 3,
     [...events].join(","),
   );
