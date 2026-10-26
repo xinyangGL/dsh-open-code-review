@@ -31,6 +31,9 @@
       "optional": true
     }
   },
+  "dependencies": {
+    "@alibaba-group/open-code-review": "1.12.13"
+  },
   "type": "module",
   "main": "lib/index.js",
   "icon": "./icon.svg",
