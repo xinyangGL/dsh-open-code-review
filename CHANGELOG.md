@@ -3,6 +3,30 @@
 All notable changes to **dsh-open-code-review**. Versions follow SemVer; the plugin is
 distributed as a DSH bundle (`dsh plugin --profile <profile> add github:xinyangGL/dsh-open-code-review`).
 
+## [1.0.0] — 2026-10-14（收成一个工具：ocr 随包、两个引擎、结论就是「文件:行 问题」）
+
+这一版不是加功能，是**减**。之前它是「套在 ocr 外面的一整套工程框架」（~13,000 行 + 9,200 行测试），
+这一版收回成「把阿里 OpenCodeReview 接进 DSH 的一个小工具」：装完就能用，一个默认引擎，点一下出结论。
+
+Changed
+
+- **`ocr` 二进制随插件安装**（`@alibaba-group/open-code-review` + 平台包）：用户不再需要单独装 ocr、不需要配 API Key。实测 `npm pack` 0.47MB、安装后解出 55MB 的 `opencodereview.exe` 并能解析到。
+- **引擎从三档收成两档**：`ocr`（默认，真流水线，按 tokens 计费、跑前给成本）与 `delegate`（不调 LLM、几秒出规格）。`auto` 及「自动降级」整块删除。
+- **默认用当前对话的模型**：路由顺序改成「当前对话正在用的模型 → DSH 默认模型 → 设置页固定值」；provider 与 model 只取同一条路由，不跨 provider 拼。
+- **结论文本按「人话优先」重排**：第 1 行是结论，之后是问题清单（`文件:行 [严重程度] 问题`）、下一步、出处；机读头行降为第 2 层。
+- **README 双语重写**：只写「装、点、结论长什么样、限制」，删掉复现包、路线图、安全边界、加固清单等第二章。
+
+Removed
+
+- **自动评审**（回合结束后自动跑）与它的全部开关；**`preTest`**（测试前自动评审）；**独立评审 agent**（`reviewer.agent = spawn`，只读子 agent + 三轮往返）。
+- **`jobs` 进度行与停止按钮**：评审期间不再占用后台任务；`lib/job.js` 与整条进度链路删除。
+- **12 条含内部事故编号的结果码**与对应测试：结果码收敛到真正会发生的那些。
+- **150+ 个测试用例**（8 套 → 4 套）与 `docs/` 下 9 份内部计划/评估文档。
+
+Note
+
+- 名字 `dsh-open-code-review` 在 npm 与插件市场目录都已被他人占用（他人的 npm 包 v0.1.2），**v1.0 不上架 npm**，只走 `dsh plugin add github:…` 安装；改名抢注暂无计划。
+
 ## [0.12.6] — 2026-10-14（一次真的委派模式评审抓到的两条：干跑被写成「未发现问题」、以及一处死代码）
 
 这一版来自**用户点了回合尾部的「启动代码审核」**之后跑的那次委派模式评审（工作区干净，所以换成

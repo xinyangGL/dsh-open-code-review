@@ -4,7 +4,7 @@
 
 把你改过的代码交给 [阿里 OpenCodeReview](https://github.com/alibaba/open-code-review) 跑一次真实评审，并把结论原样带回来：**覆盖到哪些改动、用的哪个模型、为什么没跑成**。
 
-- **不需要另外装 `ocr`**：二进制随插件安装（Windows x64 / macOS arm64）。
+- **不需要另外装 `ocr`**：二进制随插件安装（Windows x64）。
 - **不需要配 API Key**：评审用你**当前对话正在用的模型**（经 DSH 的本机桥转发，密钥不进子进程）。
 - **结论可核对**：每次都带「覆盖回执」——收录了哪些 hunk、哪些文件被排除、哪一部分没有结论。
 
@@ -27,7 +27,7 @@
 
 **跑之前**：按钮副行写明本回合改了哪些文件、大概多久、是否计费。
 
-**跑起来**：进度行显示阶段（准备 → 运行 ocr → 收尾）、已用时长、停止按钮（点两次才真的停，第一次只是武装）。
+**跑起来**：ocr 不吐增量进度，所以**没有进度条、也没有停止按钮**；工具调用行上能看到已用时长。想中断就停掉这一轮对话（已产生的用量不退还）。
 
 **跑完**：结论固定六层，从上往下读就是一次交付——
 
@@ -62,7 +62,7 @@ provider 与 model 只会取**同一条路由**上的一对，不会跨 provider
 
 ## 设置项
 
-设置页只有三个：**总开关 / 默认引擎 / 单次超时**。
+设置页四个：**总开关 / 默认引擎 / 按需评审**，展开「高级设置」还有**模型名 / 提供方**。
 
 模型名、provider、ocr 路径放在 `config.json`（留空 = 自动，见上一节）。改设置页立即生效，不需要重启。
 
@@ -88,7 +88,7 @@ provider 与 model 只会取**同一条路由**上的一对，不会跨 provider
 
 ```bash
 npm install     # 顺带装上 ocr 的平台二进制（约 55MB，只在 node_modules 里，不进仓库）
-npm test        # smoke / client-smoke / bridge-smoke / host-contract / job / 打包体检
+npm test        # smoke / client-smoke / bridge-smoke / host-contract / killswitch / cordis-inject / 打包体检
 ```
 
 - `npm run test:pack`：断言发布包里只有该有的文件。
@@ -96,7 +96,7 @@ npm test        # smoke / client-smoke / bridge-smoke / host-contract / job / �
 
 ## 已知限制
 
+- 二进制随包提供 Windows x64（macOS arm64 的包也在，但未验证）。
 - 真机验收只在 Windows x64 上做过（macOS / Linux 未验证）。
-- 进度是**阶段级**（ocr 不吐增量进度），「还剩多久」只能是区间估计。
-- 宿主没有 `jobs` 服务时，进度行里没有可视化停止按钮（可以取消整轮对话）。
+- 没有进度条（ocr 不吐增量进度），「还剩多久」只能是区间估计。
 - 只看**改动范围**（git diff），不扫全仓历史问题。
