@@ -263,7 +263,6 @@ function makeCtx(overrides = {}) {
   /* v0.11.0：路由要读「当前会话正在用的模型」，所以这两级也要能替换（不传就是没有）。 */
   if (overrides.agents) ctx.agents = overrides.agents;
   if (overrides.sessions) ctx.sessions = overrides.sessions;
-  if (overrides.subagents) ctx.subagents = overrides.subagents;
   if (overrides.jobs) ctx.jobs = overrides.jobs;
   /* 命令注册服务也可以替换：用来模拟「register() 抛错」这种宿主侧失败。 */
   if (overrides.commands) ctx.commands = overrides.commands;
@@ -613,7 +612,6 @@ const bad = await tools.get("ocr_review").execute({ scope: "commit" }, exec);
 check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.code === "OCR_INVALID_ARGS" && bad.summary.includes("需要 commit"), `${bad.code} | ${bad.summary}`);
 
 /* -------- v0.8.0：成本前置 / 失败给下一步 / 长评审心跳；v0.10.0：手动默认 ocr、自动评审默认 delegate -------- */
-const reviewerCodeValues = Object.values((await import(new URL("../lib/reviewer.js", import.meta.url))).REVIEWER_CODES);
 
 check(
   "v0.10.0：默认引擎是 ocr（跑 OCR 流水线、跑前给成本预估），autoEngine 留空 = 跟随 engine（不静默换源）",
@@ -627,7 +625,7 @@ check(
   `DEFAULTS=${cfgMod.DEFAULTS.engine}/${cfgMod.DEFAULTS.autoEngine} normalizeConfig(空)=${cfgMod.normalizeConfig({}).engine} pickEngine(空)=${review.pickEngine(undefined, {})}`,
 );
 
-const allCodes = [...Object.values(review.CODES), ...reviewerCodeValues];
+const allCodes = Object.values(review.CODES);
 const missingSteps = allCodes.filter((code) => review.nextStepForCode(code) === "");
 check(
   "v0.8.0：每个失败码都有「下一步」文案，且不写「请联系维护者」这类空话",
@@ -915,13 +913,12 @@ check(
   `${t2Timeout} ms ≈ ${Math.round(Number(t2Timeout) / 60000)} 分钟`,
 );
 
-/* R5（v0.12.0 批 1）：结果码一律走常量表，别在正文里手写字符串
-   （写错一个字符只有真机才看得见：v0.12.0 之前这里真有一处 OCR_REVIEWER_UNCERTAIN 字面量）。 */
+/* R5（v0.12.0 批 1）：结果码一律走常量表，别在正文里手写字符串。 */
 {
   const r5IndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
-  const r5Literals = r5IndexSource.match(/"(?:OCR_REVIEWER_|OCR_ALREADY_)[A-Z_]+"/g) ?? [];
+  const r5Literals = r5IndexSource.match(/"OCR_ALREADY_[A-Z_]+"/g) ?? [];
   check(
-    "R5：lib/index.js 里没有手写的结果码字符串（一律走 CODES / REVIEWER_CODES 常量）",
+    "R5：lib/index.js 里没有手写的结果码字符串（一律走 CODES 常量）",
     r5Literals.length === 0,
     r5Literals.length === 0 ? "没有手写字面量" : `发现 ${r5Literals.join("、")}`,
   );
@@ -1650,16 +1647,14 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
         const m = line.match(/hint:\s*"([^"]*)"/);
         return m ? m[1] : "";
       };
-      const tooLong = ["engine", "reviewerAgent"].filter((k) => {
+      const tooLong = ["engine"].filter((k) => {
         const h = hintOf(k);
         return h.length === 0 || h.length > 80;
       });
       check(
-        "v0.12.4（M10）：高级区两条长 hint 已压到 ≤80 字（细节移进 README）",
+        "v0.12.4（M10）：高级区长 hint 已压到 ≤80 字（细节移进 README）",
         tooLong.length === 0,
-        tooLong.length === 0
-          ? "engine/reviewerAgent 都 ≤80 字"
-          : `仍过长或取不到：${tooLong.map((k) => `${k}=${hintOf(k).length}字`).join("、")}`,
+        tooLong.length === 0 ? "engine 的 hint ≤80 字" : `仍过长或取不到：${tooLong.map((k) => `${k}=${hintOf(k).length}字`).join("、")}`,
       );
     }
   }
@@ -1764,10 +1759,11 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
 
 const codeKeys = Object.keys(review.CODES ?? {});
 check(
-  "结果码表：16 个稳定码齐全（T1 加了 OCR_ALREADY_RUNNING）、都是 OCR_ 前缀、互不重复",
-  codeKeys.length === 16 &&
-    new Set(Object.values(review.CODES)).size === 16 &&
+  "结果码表：13 个稳定码齐全（v1.0 删掉独立评审 agent 的 3 条）、都是 OCR_ 前缀、互不重复",
+  codeKeys.length === 13 &&
+    new Set(Object.values(review.CODES)).size === 13 &&
     codeKeys.includes("ALREADY_RUNNING") &&
+    !codeKeys.some((key) => key.startsWith("REVIEWER_")) &&
     codeKeys.every((key) => String(review.CODES[key]).startsWith("OCR_")),
   codeKeys.join(","),
 );
@@ -2804,496 +2800,6 @@ check(
   `${killedValue.code} terminated=${killReview?.terminated}`,
 );
 
-/* ------------------------------------------- 独立评审 agent（只读子 agent + findings 往返） */
-
-/** 罐头 SubagentRuntime：契约照 dsh-subagent 的 SubagentService（list / getProvider / start / interrupt）。 */
-function cannedSubagents(script) {
-  const calls = { start: [], interrupt: [], dispose: 0, list: 0, settle: null };
-  const runtime = {
-    list() {
-      calls.list += 1;
-      return ["spawn"];
-    },
-    getProvider(name) {
-      return name === "spawn" ? { name: "spawn", agentRouteDefaults: { provider: "commandcode" } } : null;
-    },
-    start(provider, request) {
-      calls.start.push({ provider, request });
-      const item = (typeof script === "function" ? script(provider, request, calls.start.length) : script) || {};
-      let resolvePending = () => {};
-      const pending = new Promise((resolve) => {
-        resolvePending = () => resolve(item.result ?? { stopReason: "aborted" });
-      });
-      calls.settle = resolvePending;
-      const signal = request && request.signal;
-      if (signal) {
-        if (signal.aborted) resolvePending();
-        else signal.addEventListener("abort", () => resolvePending(), { once: true });
-      }
-      const done = Promise.resolve(item.result ?? { stopReason: "completed", structured: item.structured });
-      return {
-        id: item.id ?? "child-" + calls.start.length,
-        localAgent: { session: { header: { cwd: REPO } } },
-        result: item.pending ? pending : done,
-        dispose: async () => {
-          calls.dispose += 1;
-        },
-      };
-    },
-    async interrupt(id, reason) {
-      calls.interrupt.push({ id, reason });
-      if (calls.settle) calls.settle();
-      return true;
-    },
-  };
-  return { runtime, calls };
-}
-
-/** 评审 agent 的规格来源：delegate preview → delegate rule → git diff（三条罐头命令）。 */
-function reviewerSpecRuns(files = [{ path: "lib/a.js", insertions: 3, deletions: 1 }]) {
-  return [
-    { exitCode: 0, stdout: JSON.stringify({ files, excluded: [] }) },
-    { exitCode: 0, stdout: JSON.stringify({ groups: [{ group_id: "g1", pattern: "**/*.js", rule: "不要把 undefined 当空值" }] }) },
-    { exitCode: 0, stdout: "diff --git a/lib/a.js b/lib/a.js\n+if (x == null) {}\n" },
-  ];
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const waitUntil = async (predicate, timeoutMs = 30000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) await sleep(25);
-  return predicate();
-};
-const emitOn = (map, name, ...args) => {
-  for (const handler of map.get(name) ?? []) handler(...args);
-};
-/** 把交付到某个 agent 的用户消息收进本地数组（不写全局 deliver，免得跟别的段串）。 */
-function localAgent(sink, status = "idle") {
-  return {
-    status,
-    session: { header: { cwd: REPO, origin: "user" } },
-    inject: (message) => sink.push(message),
-    followup: (message) => sink.push(message),
-  };
-}
-const FINDINGS_ONE = {
-  verdict: "issues",
-  summary: "空值判断漏了 undefined",
-  findings: [
-    {
-      file: "lib/a.js",
-      line: 12,
-      severity: "major",
-      message: "x == null 之外的路径会读到 undefined",
-      evidence: "调用方可能传 undefined",
-      suggestion: "先做空值收敛再比较",
-    },
-  ],
-};
-
-/* 先跑「宿主没有 subagents 服务」的两条：reviewerRuntime 是插件模块级状态，后面的场景会把它绑上。 */
-const bareCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" });
-const bareForced = await bareCase.call({ reviewer: true });
-check(
-  "reviewer:true 但宿主没有 subagents：报 OCR_REVIEWER_UNAVAILABLE（不回落 ocr/delegate）",
-  bareForced.ok === false && bareForced.code === "OCR_REVIEWER_UNAVAILABLE" && bareForced.engine === "agent" && bareForced.issues.length === 0,
-  bareForced.code + " | " + bareForced.summary,
-);
-check(
-  "缺 subagents 时的说明可执行（指向 reviewerProvider 与 off 两条出路）",
-  bareForced.notes.some((n) => n.includes("reviewerProvider")) && bareForced.summary.includes("不可用"),
-  JSON.stringify(bareForced.notes),
-);
-
-/* 自动档：开了 spawn 但宿主没有 subagents → 回落静态引擎，并在备注里说明。 */
-const fbMap = new Map();
-const fbSink = [];
-const fbAgent = localAgent(fbSink);
-const fbCase = cannedHarness(
-  [
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], issues: [] }) },
-  ],
-  { engine: "ocr", reviewerAgent: "spawn", autoReview: "adaptive", autoMinIntervalMs: 0 },
-  { listeners: fbMap },
-);
-emitOn(fbMap, "tools/result", { name: "edit", agent: fbAgent }, { isError: false });
-emitOn(fbMap, "agent/turn-stopping", { agent: fbAgent, reason: "test" });
-await waitUntil(() => fbSink.length > 0);
-const fbText = fbSink.length > 0 ? textOf(fbSink[0]) : "";
-check(
-  "自动档 reviewer.agent=spawn 但缺 subagents：回落 ocr/delegate 并在备注里说明",
-  fbSink.length === 1 && !fbText.includes("【独立评审 agent ·") && fbText.includes("独立评审 agent 不可用") && fbText.includes("engine=ocr"),
-  fbSink.length + " 条交付 | " + fbText.slice(0, 160),
-);
-
-/* 设置里关着 reviewer.agent（默认 off）：即使宿主有 subagents 也一次都不起。 */
-const offSub = cannedSubagents({ structured: { verdict: "clean", summary: "审完没问题", findings: [] } });
-const offRuns = [{ exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 1, deletions: 0 }], issues: [] }) }];
-const offCase = cannedHarness(offRuns, { engine: "ocr", reviewerAgent: "off" }, { subagents: offSub.runtime });
-const offRun = await offCase.call({});
-check(
-  "reviewer.agent=off（默认）：评审走 ocr，子 agent 零调用",
-  offRun.engine === "ocr" && offRun.code === "" && offSub.calls.start.length === 0,
-  offRun.engine + " code=" + offRun.code + " start=" + offSub.calls.start.length,
-);
-const offForced = cannedHarness(offRuns, { engine: "ocr", reviewerAgent: "spawn" }, { subagents: offSub.runtime });
-const offForcedRun = await offForced.call({ reviewer: false });
-check(
-  "reviewer:false 会压过设置里的 spawn（强制走 ocr/delegate）",
-  offForcedRun.engine === "ocr" && offSub.calls.start.length === 0,
-  offForcedRun.engine + " start=" + offSub.calls.start.length,
-);
-check("给的 subagents 服务在 apply 时被登记过（list 被调用）", offSub.calls.list >= 1, "list=" + offSub.calls.list);
-
-/* v0.10.0：engine=delegate 也起得起来。旧条件 `plan.engine !== "delegate"` 写在默认引擎还是 auto 的
-   年代，v0.8.0 把默认翻成 delegate 之后它在出厂配置下恒假 —— 独立评审 agent 因此永远开不起来，
-   而工具 schema 还承诺 reviewer:true 会用。这一组断言就是钉死这个回归。 */
-const dlSub = cannedSubagents({ structured: FINDINGS_ONE });
-const dlCase = cannedHarness(reviewerSpecRuns(), { engine: "delegate", reviewerAgent: "spawn" }, { subagents: dlSub.runtime });
-const dlRun = await dlCase.call({});
-check(
-  "v0.10.0：engine=delegate + reviewer.agent=spawn 也起独立评审 agent（规格由 delegate 出）",
-  dlRun.ok === true && dlRun.engine === "agent" && dlRun.issues.length === 1 && dlSub.calls.start.length === 1,
-  dlRun.engine + " code=" + dlRun.code + " issues=" + dlRun.issues.length + " start=" + dlSub.calls.start.length,
-);
-const dlForced = cannedHarness(reviewerSpecRuns(), { engine: "delegate" }, { subagents: dlSub.runtime });
-const dlForcedRun = await dlForced.call({ reviewer: true });
-check(
-  "v0.10.0：engine=delegate + 显式 reviewer:true 同样起子 agent（不再被 engine 挡住）",
-  dlForcedRun.ok === true && dlForcedRun.engine === "agent" && dlForcedRun.reviewer.round === 1 && dlForcedRun.reviewer.rounds === 1,
-  dlForcedRun.engine + " reviewer=" + JSON.stringify(dlForcedRun.reviewer),
-);
-
-/* v0.12.0（E2）：规格本身是「部分结果」时（这里用超大 diff 逼出按 hunk 截断，不依赖注入配置——
-   见上一条 v0.10.0 W3 用例的做法），独立评审 agent 这一档以前会把 partial 丢掉：子 agent 只看得到半份
-   规格，clean 摘要却照写「未发现问题」。这与 v0.11.2 修的是同一个失败方向，只是发生在 agent 档。 */
-const e2HugeHunks = Array.from({ length: 6000 }, (_, i) => `@@ -${i * 5},1 +${i * 5},1 @@\n-old${i}\n+new${i}`).join("\n");
-const e2SpecRuns = [
-  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 40, deletions: 40 }], excluded: [] }) },
-  { exitCode: 0, stdout: JSON.stringify({ groups: [{ group_id: "g1", pattern: "**/*.js", rule: "不要把 undefined 当空值" }] }) },
-  { exitCode: 0, stdout: `diff --git a/lib/a.js b/lib/a.js\n${e2HugeHunks}\n` },
-];
-const e2Sub = cannedSubagents({ structured: { verdict: "clean", summary: "看过的部分没问题", findings: [] } });
-const e2Case = cannedHarness(e2SpecRuns, { engine: "delegate", reviewerAgent: "spawn" }, { subagents: e2Sub.runtime });
-const e2Run = await e2Case.call({});
-check(
-  "E2：规格被截断（部分结果）+ 子 agent 说 clean → partial=true、摘要标⚠️部分结果、且不许出现「未发现问题」",
-  e2Run.ok === true &&
-    e2Run.partial === true &&
-    /^⚠️ 部分结果/.test(String(e2Run.summary)) &&
-    !String(e2Run.summary).includes("未发现问题") &&
-    e2Run.reviewer?.verdict === "clean",
-  `partial=${e2Run.partial} verdict=${e2Run.reviewer?.verdict} | ${String(e2Run.summary).replace(/\n/g, " ").slice(0, 150)}`,
-);
-check(
-  "v0.10.0：工具入口起独立评审 agent 时，备注写明「只跑 1 轮」",
-  dlForcedRun.notes.some((n) => n.includes("只跑 1 轮")),
-  JSON.stringify(dlForcedRun.notes),
-);
-
-/* 自动评审这条路同样漏：engine=delegate 时第三档恒假。 */
-const autoDlMap = new Map();
-const autoDlSink = [];
-const autoDlSub = cannedSubagents({ structured: { verdict: "clean", summary: "审完没问题", findings: [] } });
-const autoDlCase = cannedHarness(
-  reviewerSpecRuns(),
-  { engine: "delegate", reviewerAgent: "spawn", autoReview: "adaptive", autoMinIntervalMs: 0 },
-  { listeners: autoDlMap, subagents: autoDlSub.runtime },
-);
-const autoDlAgent = localAgent(autoDlSink);
-emitOn(autoDlMap, "tools/result", { name: "edit", agent: autoDlAgent }, { isError: false });
-emitOn(autoDlMap, "agent/turn-stopping", { agent: autoDlAgent, reason: "test" });
-/* 等「交付」而不是等 list：subagents 的 list 在 apply 时就调过，等它会抢在自动评审跑完之前断言。 */
-await waitUntil(() => autoDlSink.length > 0, 8000);
-check(
-  "v0.10.0：自动评审在 engine=delegate + reviewer.agent=spawn 下也起独立评审 agent",
-  autoDlSub.calls.start.length === 1,
-  "start=" + autoDlSub.calls.start.length + " | " + (autoDlSink.length ? textOf(autoDlSink[0]).slice(0, 140) : "(没有交付)"),
-);
-
-/* delegate 的 argv 里没有 --effort：显式传了必须留一句备注，不能静默无效。 */
-const effCase = cannedHarness(reviewerSpecRuns(), { engine: "delegate" });
-const effRun = await effCase.call({ effort: "high" });
-check(
-  "v0.10.0：delegate 下 effort 不生效并在备注里说明（不再静默无效）",
-  effRun.engine === "delegate" && effRun.ok === true && effRun.notes.some((n) => n.includes("effort=high 在 delegate 下不生效")),
-  effRun.engine + " ok=" + effRun.ok + " notes=" + JSON.stringify(effRun.notes),
-);
-
-/* 工具入口 reviewer:true：起一个只读子 agent，拿结构化 findings。 */
-const okSub = cannedSubagents({ structured: FINDINGS_ONE });
-const okCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: okSub.runtime });
-const okRun = await okCase.call({ reviewer: true });
-const okStart = okSub.calls.start[0];
-const okPrompt = okStart ? okStart.request.prompt.map((b) => b.text).join("") : "";
-check(
-  "工具入口 reviewer:true：engine=agent、findings 进 issues、单轮（第 1/1 轮）",
-  okRun.ok === true && okRun.engine === "agent" && okRun.issues.length === 1 && okRun.issues[0].severity === "major" && okRun.reviewer.round === 1 && okRun.reviewer.rounds === 1 && okRun.reviewer.childId === "child-1",
-  okRun.engine + " issues=" + okRun.issues.length + " reviewer=" + JSON.stringify(okRun.reviewer),
-);
-check(
-  "子 agent 只拿到只读工具、结构化 schema、父 agent 与人格（不共享编码上下文）",
-  Boolean(okStart) && okStart.provider === "spawn" && okStart.request.toolFilter.allow.join(",") === "read,grep,glob" && okStart.request.outputSchema.properties.verdict.enum.join(",") === "clean,issues,uncertain" && okStart.request.parent === okCase.exec.agent && String(okStart.request.persona || "").length > 0 && okStart.request.label.includes("第 1/1 轮"),
-  okStart ? JSON.stringify({ provider: okStart.provider, allow: okStart.request.toolFilter.allow, label: okStart.request.label }) : "start 没被调用",
-);
-check(
-  "评审提示词带着 ocr 的规则正文与 diff（规格仍来自 ocr，不由 agent 自己找范围）",
-  okPrompt.includes("不要把 undefined 当空值") && okPrompt.includes("diff --git a/lib/a.js") && okPrompt.includes("## 审查规格"),
-  "prompt 长度=" + okPrompt.length + " | " + okPrompt.slice(0, 200).replace(/\n/g, " / "),
-);
-check("每次子 agent 跑完都 dispose（不泄漏子会话）", okSub.calls.dispose === 1, "dispose=" + okSub.calls.dispose);
-
-/* 失败路径：一律不当作通过。 */
-const errSub = cannedSubagents({ result: { stopReason: "error", diagnostic: "provider 502" } });
-const errCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: errSub.runtime });
-const errRun = await errCase.call({ reviewer: true });
-check(
-  "评审 agent 结束理由不是 completed：OCR_REVIEWER_FAILED（绝不当作通过）",
-  errRun.ok === false && errRun.code === "OCR_REVIEWER_FAILED" && errRun.reviewer.stopReason === "error" && errRun.notes.some((n) => n.includes("502")),
-  errRun.code + " | " + errRun.summary,
-);
-const noStructSub = cannedSubagents({ result: { stopReason: "completed" } });
-const noStructCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: noStructSub.runtime });
-const noStructRun = await noStructCase.call({ reviewer: true });
-check(
-  "structured 缺失：OCR_REVIEWER_FAILED 且 ok=false（fail-closed）",
-  noStructRun.ok === false && noStructRun.code === "OCR_REVIEWER_FAILED" && noStructRun.notes.some((n) => n.includes("fail-closed")),
-  noStructRun.code + " | " + noStructRun.summary,
-);
-const unsureSub = cannedSubagents({ structured: { verdict: "uncertain", summary: "看不到调用方，无法判断" } });
-const unsureCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: unsureSub.runtime });
-const unsureRun = await unsureCase.call({ reviewer: true });
-check(
-  "verdict=uncertain：OCR_REVIEWER_UNCERTAIN 且 ok=false（不算通过）",
-  unsureRun.ok === false && unsureRun.code === "OCR_REVIEWER_UNCERTAIN" && unsureRun.reviewer.verdict === "uncertain" && unsureRun.notes.some((n) => n.includes("uncertain 不算通过")),
-  unsureRun.code + " | " + unsureRun.summary,
-);
-
-/* 自动档：第 1 轮由独立子 agent 执行并交付 findings 清单。 */
-const autoSub = cannedSubagents({ structured: FINDINGS_ONE });
-const autoMap = new Map();
-const autoSink = [];
-const revAutoAgent = localAgent(autoSink);
-const autoCase = cannedHarness(
-  [
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
-    ...reviewerSpecRuns(),
-  ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoReview: "adaptive", autoMinIntervalMs: 0 },
-  { subagents: autoSub.runtime, listeners: autoMap },
-);
-emitOn(autoMap, "tools/result", { name: "edit", agent: revAutoAgent }, { isError: false });
-emitOn(autoMap, "agent/turn-stopping", { agent: revAutoAgent, reason: "test" });
-await waitUntil(() => autoSink.length > 0);
-const revAutoText = autoSink.length > 0 ? textOf(autoSink[0]) : "";
-check(
-  "自动档第 1 轮：交付带轮次 + 按文件分组的 findings 清单 + 「请逐条修复或说明理由」",
-  autoSink.length === 1 &&
-    revAutoText.includes("【独立评审 agent · 第 1/3 轮】") &&
-    revAutoText.includes("lib/a.js") &&
-    revAutoText.includes("- 12 [高]") &&
-    revAutoText.includes("请逐条修复或说明理由"),
-  autoSink.length + " 条 | " + revAutoText.slice(0, 200).replace(/\n/g, " / "),
-);
-check(
-  "自动档：子 agent 的 parent 就是编码 agent，且只给只读工具",
-  autoSub.calls.start.length === 1 && autoSub.calls.start[0].request.parent === revAutoAgent && autoSub.calls.start[0].request.toolFilter.allow.join(",") === "read,grep,glob",
-  "start=" + autoSub.calls.start.length,
-);
-
-/* clean 之后线程关闭：换签名再来一次，又该从「第 1/3 轮」开始（不是第 2 轮）。 */
-const cleanSub = cannedSubagents({ structured: { verdict: "clean", summary: "审完没问题", findings: [] } });
-const cleanMap = new Map();
-const cleanSink = [];
-const cleanAgent = localAgent(cleanSink);
-const cleanRoundCase = cannedHarness(
-  [
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
-    ...reviewerSpecRuns(),
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
-    ...reviewerSpecRuns([{ path: "lib/a.js", insertions: 9, deletions: 1 }]),
-  ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 3, autoReview: "adaptive", autoMinIntervalMs: 0 },
-  { subagents: cleanSub.runtime, listeners: cleanMap },
-);
-emitOn(cleanMap, "tools/result", { name: "edit", agent: cleanAgent }, { isError: false });
-emitOn(cleanMap, "agent/turn-stopping", { agent: cleanAgent, reason: "test" });
-await waitUntil(() => cleanSink.length >= 1);
-emitOn(cleanMap, "tools/result", { name: "edit", agent: cleanAgent }, { isError: false });
-emitOn(cleanMap, "agent/turn-stopping", { agent: cleanAgent, reason: "test" });
-await waitUntil(() => cleanSink.length >= 2);
-const cleanText1 = cleanSink[0] ? textOf(cleanSink[0]) : "";
-const cleanText2 = cleanSink[1] ? textOf(cleanSink[1]) : "";
-check(
-  "clean 之后线程关闭：换签名再评又回到「第 1/3 轮」",
-  cleanSink.length === 2 && cleanText1.includes("第 1/3 轮") && cleanText1.includes("未发现问题") && cleanText2.includes("第 1/3 轮") && cleanSub.calls.start.length === 2,
-  "交付=" + cleanSink.length + " start=" + cleanSub.calls.start.length + " | " + cleanText2.slice(0, 140),
-);
-
-/* 轮次上限：reviewerRounds=1 且还有未确认的问题 → 第二轮不再起子 agent。 */
-const capSub = cannedSubagents({ structured: FINDINGS_ONE });
-const capMap = new Map();
-const capSink = [];
-const capAgent = localAgent(capSink);
-const capCase = cannedHarness(
-  [
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
-    ...reviewerSpecRuns(),
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
-  ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoReview: "adaptive", autoMinIntervalMs: 0 },
-  { subagents: capSub.runtime, listeners: capMap },
-);
-emitOn(capMap, "tools/result", { name: "edit", agent: capAgent }, { isError: false });
-emitOn(capMap, "agent/turn-stopping", { agent: capAgent, reason: "test" });
-await waitUntil(() => capSink.length >= 1);
-emitOn(capMap, "tools/result", { name: "edit", agent: capAgent }, { isError: false });
-emitOn(capMap, "agent/turn-stopping", { agent: capAgent, reason: "test" });
-await waitUntil(() => capSink.length >= 2);
-const capText2 = capSink[1] ? textOf(capSink[1]) : "";
-check(
-  "reviewerRounds=1：还有未确认的问题就到上限收工（不再起子 agent）",
-  capSink.length === 2 && capText2.includes("已达轮次上限") && capText2.includes("lib/a.js:12") && capSub.calls.start.length === 1,
-  "交付=" + capSink.length + " start=" + capSub.calls.start.length + " | " + capText2.slice(0, 160),
-);
-
-/* ocr_status 的 reviewer 诊断段：把「为什么没起来」摆给用户看。 */
-const stSub = cannedSubagents({ structured: { verdict: "clean", summary: "x", findings: [] } });
-const stCase = cannedHarness([{ exitCode: 0, stdout: "ocr 9.9.9" }], { reviewerAgent: "spawn", reviewerProvider: "spawn", reviewerRounds: 3 }, { subagents: stSub.runtime });
-const stRun = await tools.get("ocr_status").execute({ checkLlm: false }, stCase.exec);
-check(
-  "ocr_status 报出评审 agent 的可用性 / provider 清单 / 轮数",
-  stRun.reviewer.enabled === true && stRun.reviewer.available === true && stRun.reviewer.providers.join(",") === "spawn" && stRun.reviewer.rounds === 3 && stRun.reviewer.ready === true,
-  JSON.stringify(stRun.reviewer),
-);
-check("ocr_status：没有 llm 服务时 bridge=null（schema 里的另一支）", stRun.bridge === null, JSON.stringify(stRun.bridge));
-
-/* dispose：在飞的评审子 agent 会被 abort + dispose（不留孤儿子会话）。 */
-const hangSub = cannedSubagents({ pending: true });
-const hangCase = cannedHarness(reviewerSpecRuns(), { engine: "ocr" }, { subagents: hangSub.runtime });
-const hangRun = hangCase.call({ reviewer: true });
-await waitUntil(() => hangSub.calls.start.length > 0);
-const hangEntry = hangCase.ctx.effects.find((entry) => String(entry.label).includes("在飞"));
-await hangEntry.dispose();
-const hangValue = await hangRun;
-check(
-  "dispose：在飞的评审子 agent 收到 abort，结果报 OCR_ABORTED（不留孤儿）",
-  hangValue.ok === false && hangValue.code === "OCR_ABORTED" && hangSub.calls.dispose >= 1,
-  hangValue.code + " | " + hangValue.summary + " dispose=" + hangSub.calls.dispose,
-);
-if (HAS_OCR) {
-  /* 罐头 ctx 覆盖了同名工具，先切回真子进程的注册再跑真 ocr。 */
-  mod.apply(ctx, settingsPatch);
-  const ocrOnly = await tools.get("ocr_review").execute({ engine: "ocr" }, exec);
-  check(
-    "engine=ocr 且没配 LLM 端点：返回 OCR_LLM_MISSING（真 ocr，不静默降级）",
-    ocrOnly.ok === false && ocrOnly.code === "OCR_LLM_MISSING",
-    `${ocrOnly.code} | ${ocrOnly.summary}`,
-  );
-}
-
-/* ---------------------------------------------------------- 加固回归
-   （审计发现的 fail-open / job 不结算 / 参数越界；这些形状以前都会「静默通过」。） */
-
-/* P0：ocr 输出里没有可识别的问题清单字段时，过去会被当成「未发现问题」——
-   只要被审仓库能影响 ocr 的输出，评审就能静默变成通过。现在必须 fail-closed。 */
-const hrBadShapes = [
-  ["问题清单里是纯字符串", { issues: ["这是个字符串，不是对象"] }],
-  ["条目缺 message 字段（只有 file/line/severity）", { files: [{ path: "a.js" }], issues: [{ file: "a.js", line: 3, severity: "high" }] }],
-  ["message 只有空白", { issues: [{ file: "a.js", line: 1, message: "   " }] }],
-  ["空 JSON 对象", {}],
-  ["只有 summary 与插入行数（没有清单）", { summary: "x", total_insertions: 3 }],
-  ["findings 是对象不是数组", { findings: { a: 1 } }],
-  ["清单埋在 7 层嵌套里（超过深度上限 6）", { a: { b: { c: { d: { e: { f: { g: { issues: [] } } } } } } } }],
-];
-for (const [label, payload] of hrBadShapes) {
-  const hrCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify(payload) }]);
-  const hrRun = await hrCase.call({ engine: "ocr" });
-  check(
-    `fail-closed（P0 回归）：${label} → 不当作通过`,
-    hrRun.ok === false && hrRun.code === "OCR_OUTPUT_SHAPE_UNKNOWN",
-    `${hrRun.code || "(无 code)"} ok=${hrRun.ok} | ${hrRun.summary}`,
-  );
-}
-const hrEmptyCase = cannedHarness([{ exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }) }]);
-const hrEmptyRun = await hrEmptyCase.call({ engine: "ocr" });
-check(
-  "M6：空文件清单 + 空问题清单 = 「本次没有检测到任何改动」，不是「未发现问题」",
-  hrEmptyRun.ok === true &&
-    hrEmptyRun.summary.includes("没有检测到任何代码改动") &&
-    !hrEmptyRun.summary.includes("未发现问题") &&
-    hrEmptyRun.partial === true,
-  `${hrEmptyRun.code || "(无 code)"} ok=${hrEmptyRun.ok} partial=${hrEmptyRun.partial} | ${hrEmptyRun.summary}`,
-);
-/* M6 的两侧边界：有改动但一个都没审 → 说清「没有可审的代码改动」；真审了文件且清单为空 → 才允许说「未发现问题」。 */
-const hrExcludedCase = cannedHarness([
-  {
-    exitCode: 0,
-    stdout: JSON.stringify({ files: [], issues: [], total_files: 1, reviewable_count: 0, excluded_files: ["notes.txt"] }),
-  },
-]);
-const hrExcludedRun = await hrExcludedCase.call({ engine: "ocr" });
-check(
-  "M6：有改动但一个都没审（被排除）→ 说「没有可审的代码改动」，且 partial=true",
-  hrExcludedRun.ok === true &&
-    hrExcludedRun.summary.includes("没有可审的代码改动") &&
-    !hrExcludedRun.summary.includes("未发现问题") &&
-    hrExcludedRun.partial === true,
-  `${hrExcludedRun.code || "(无 code)"} partial=${hrExcludedRun.partial} | ${hrExcludedRun.summary}`,
-);
-const hrCleanCase = cannedHarness([
-  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js" }], issues: [], total_files: 1, reviewable_count: 1 }) },
-]);
-const hrCleanRun = await hrCleanCase.call({ engine: "ocr" });
-check(
-  "M6 不误伤：真审了文件且问题清单为空 → 仍然说「未发现问题」（partial=false）",
-  hrCleanRun.ok === true && hrCleanRun.summary.includes("未发现问题") && hrCleanRun.partial === false,
-  `${hrCleanRun.code || "(无 code)"} partial=${hrCleanRun.partial} | ${hrCleanRun.summary}`,
-);
-const hrMixedCase = cannedHarness([
-  { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js" }], issues: [{ file: "a.js", line: 2, message: "真问题" }, { file: "b.js", line: 5 }] }) },
-]);
-const hrMixedRun = await hrMixedCase.call({ engine: "ocr" });
-check(
-  "fail-closed 不误报：能读的条目照常交付，读不出的只记一条备注",
-  hrMixedRun.ok === true &&
-    hrMixedRun.issues.length === 1 &&
-    hrMixedRun.issues[0].message === "真问题" &&
-    hrMixedRun.notes.some((note) => note.includes("1 条无法解析")),
-  `ok=${hrMixedRun.ok} issues=${hrMixedRun.issues.length} | ${hrMixedRun.notes.join(" / ")}`,
-);
-
-/* P1：自动评审到「轮次上限」时过去直接 return，job 永远停在运行中。 */
-const hrCapJobs = makeJobsRegistry();
-const hrCapSub = cannedSubagents({ structured: FINDINGS_ONE });
-const hrCapMap = new Map();
-const hrCapSink = [];
-const hrCapAgent = localAgent(hrCapSink);
-const hrCapCase = cannedHarness(
-  [
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
-    ...reviewerSpecRuns(),
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 9, deletions: 1 }], excluded: [] }) },
-  ],
-  { engine: "ocr", reviewerAgent: "spawn", reviewerRounds: 1, autoReview: "adaptive", autoMinIntervalMs: 0 },
-  { subagents: hrCapSub.runtime, listeners: hrCapMap, jobs: hrCapJobs },
-);
-emitOn(hrCapMap, "tools/result", { name: "edit", agent: hrCapAgent }, { isError: false });
-emitOn(hrCapMap, "agent/turn-stopping", { agent: hrCapAgent, reason: "test" });
-await waitUntil(() => hrCapSink.length >= 1);
-emitOn(hrCapMap, "tools/result", { name: "edit", agent: hrCapAgent }, { isError: false });
-emitOn(hrCapMap, "agent/turn-stopping", { agent: hrCapAgent, reason: "test" });
-await waitUntil(() => hrCapSink.length >= 2);
-await settleJobs();
-await settleJobs();
-const hrCapJob = hrCapJobs.starts.at(-1);
-check(
-  "进度（P1 回归）：自动评审到轮次上限也结算 job（否则面板永远显示运行中）",
-  Boolean(hrCapJob) && hrCapJob.status === "failed" && String(hrCapJob.detail).includes("已达轮次上限"),
-  hrCapJob ? `${hrCapJob.id}=${hrCapJob.status} | ${hrCapJob.detail}` : "(没有 job)",
-);
-
 /* P1：maxTimeoutMinutes 为负会让插件侧硬超时整条消失，还把 `--timeout -5` 交给 ocr。
    （走不到 apply 的 schema 校验——手写 config.json 是插件自己读的，这里直接测解析函数。） */
 const hrNegCfg = { timeoutMinutes: -3, maxTimeoutMinutes: -5 };
@@ -3533,12 +3039,6 @@ check(
     cfgMod.timeoutMsOf(hrSameSrcCfg, hrSameSrcPlan.timeoutMinutes) === hrSameSrcPlan.timeoutMs - 60000,
   `plan.timeoutMs=${hrSameSrcPlan.timeoutMs} jobBase=${cfgMod.timeoutMsOf(hrSameSrcCfg, hrSameSrcPlan.timeoutMinutes)}`,
 );
-const reviewerMod = await import(new URL("../lib/reviewer.js", import.meta.url));
-check(
-  "配置（v0.3.6 回归）：DEFAULT_REVIEWER_ROUNDS 只有一份定义（lib/config.js，reviewer.js 只转发）",
-  reviewerMod.DEFAULT_REVIEWER_ROUNDS === cfgMod.DEFAULT_REVIEWER_ROUNDS && cfgMod.DEFAULT_REVIEWER_ROUNDS === 3,
-  `reviewer=${reviewerMod.DEFAULT_REVIEWER_ROUNDS} config=${cfgMod.DEFAULT_REVIEWER_ROUNDS}`,
-);
 check(
   "可见性（v0.3.6 回归）：endpoint 模式仍用出厂默认地址时点名提醒（换了供应商忘改地址 → 凭据发到旧地址）",
   cfgMod.endpointDisplay() === "(未设置)" &&
@@ -3574,7 +3074,6 @@ const exampleDefaultPairs = [
   ["timeoutMinutes", cfgMod.DEFAULTS.timeoutMinutes],
   ["maxTimeoutMinutes", cfgMod.DEFAULTS.maxTimeoutMinutes],
   ["llm.mode", cfgMod.DEFAULTS.llm.mode],
-  ["reviewer.agent", cfgMod.DEFAULTS.reviewer.agent],
 ];
 const exampleDrift = exampleDefaultPairs
   .filter(([key]) => {
@@ -3740,27 +3239,24 @@ check(
   /* v0.5.0 步骤 5：三层合并必须**先深合并、再归一**，否则合并进来的坏类型会原样漏过去；
      数值再夹一层上下界（config.json 能绕过设置页 schema 的 min/max）。 */
   const merged = cfgMod.mergeLayers(
-    { llm: { model: "from-file", protocol: "OpenAI " }, env: { A: "1" }, reviewer: { rounds: "3" } },
-    { llm: { mode: "Endpoint" }, reviewer: { agent: "SPAWN" } },
+    { llm: { model: "from-file", protocol: "OpenAI " }, env: { A: "1" } },
+    { llm: { mode: "Endpoint" } },
   );
   check(
-    "v0.5.0 步骤 5：mergeLayers 先深合并再归一（file 的 llm/env/reviewer 与 patch 的键都在，坏类型被收敛）",
+    "v0.5.0 步骤 5：mergeLayers 先深合并再归一（file 的 llm/env 与 patch 的键都在，坏类型被收敛）",
     merged.llm.model === "from-file" &&
       merged.llm.mode === "endpoint" &&
       merged.llm.protocol === "openai" &&
       merged.env.A === "1" &&
-      merged.reviewer.agent === "spawn" &&
-      merged.reviewer.rounds === 3,
-    JSON.stringify({ llm: merged.llm, env: merged.env, reviewer: merged.reviewer }),
+    JSON.stringify({ llm: merged.llm, env: merged.env }),
   );
-  const guarded = cfgMod.mergeLayers({ llm: ["x"] }, { reviewer: ["y"], env: "nope" });
+  const guarded = cfgMod.mergeLayers({ llm: ["x"] }, { env: "nope" });
   check(
     "v0.5.0 步骤 5：嵌套块传数组/字符串时整块回落默认（不会展开成数字键对象污染配置）",
     guarded.llm.mode === "dsh" &&
-      guarded.reviewer.agent === "off" &&
       Object.keys(guarded.llm).every((key) => !/^\d+$/.test(key)) &&
       JSON.stringify(guarded.env) === "{}",
-    JSON.stringify({ llm: guarded.llm, reviewer: guarded.reviewer, env: guarded.env }),
+    JSON.stringify({ llm: guarded.llm, env: guarded.env }),
   );
   const clamped = cfgMod.normalizeConfig({
     engine: "OCR",
@@ -3771,7 +3267,6 @@ check(
     timeoutMinutes: 0,
     maxTimeoutMinutes: 99999,
     llm: { mode: "Endpoint", protocol: "Anthropic " },
-    reviewer: { agent: "Spawn", rounds: 99 },
   });
   check(
     "v0.5.0 步骤 5：越界值 — 大于上界夹住，小于下界回落到默认（负数不是「要更小」而是写错）",
@@ -3783,14 +3278,12 @@ check(
     JSON.stringify({ autoMaxPerSession: clamped.autoMaxPerSession, autoMinReviewableFiles: clamped.autoMinReviewableFiles, autoMinIntervalMs: clamped.autoMinIntervalMs, timeoutMinutes: clamped.timeoutMinutes, maxTimeoutMinutes: clamped.maxTimeoutMinutes }),
   );
   check(
-    "v0.5.0 步骤 5：枚举非法值回落默认、合法值去空白小写（engine/audience/llm.mode/llm.protocol/reviewer.agent）",
+    "v0.5.0 步骤 5：枚举非法值回落默认、合法值去空白小写（engine/audience/llm.mode/llm.protocol）",
     clamped.engine === "ocr" &&
       clamped.audience === "agent" &&
       clamped.llm.mode === "endpoint" &&
       clamped.llm.protocol === "anthropic" &&
-      clamped.reviewer.agent === "spawn" &&
-      clamped.reviewer.rounds === 10,
-    JSON.stringify({ engine: clamped.engine, audience: clamped.audience, llm: clamped.llm, reviewer: clamped.reviewer }),
+    JSON.stringify({ engine: clamped.engine, audience: clamped.audience, llm: clamped.llm }),
   );
 }
 {
@@ -3976,19 +3469,13 @@ check(
    只断 DEFAULTS 会不会变是不够的（传进去的是新副本时旧实现也能过，等于没测到）。 */
 {
   const llmInput = { ...cfgMod.DEFAULTS.llm, protocol: " OpenAI " };
-  const reviewerInput = { ...cfgMod.DEFAULTS.reviewer, rounds: "3" };
-  const norm = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, llm: llmInput, reviewer: reviewerInput });
+  const norm = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, llm: llmInput });
   check(
-    "v0.5.8：normalizeConfig 不就地改调用方传入的嵌套块（llmInput/reviewerInput 保持原样），但结果照常收敛",
+    "v0.5.8：normalizeConfig 不就地改调用方传入的嵌套块（llmInput 保持原样），但结果照常收敛",
     llmInput.protocol === " OpenAI " &&
-      reviewerInput.rounds === "3" &&
       norm.llm !== llmInput &&
-      norm.reviewer !== reviewerInput &&
-      norm.llm.protocol === "openai" &&
-      norm.reviewer.rounds === 3,
-    `输入 protocol=${JSON.stringify(llmInput.protocol)} rounds=${JSON.stringify(reviewerInput.rounds)} 结果 protocol=${
-      norm.llm.protocol
-    } rounds=${norm.reviewer.rounds} 同一引用=${norm.llm === llmInput}`,
+      norm.llm.protocol === "openai",
+    `输入 protocol=${JSON.stringify(llmInput.protocol)} 结果 protocol=${norm.llm.protocol} 同一引用=${norm.llm === llmInput}`,
   );
 
   const effortTrim = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, llm: { ...cfgMod.DEFAULTS.llm, effort: "  HIGH  " } }).llm.effort;
@@ -4001,17 +3488,11 @@ check(
   );
 
   const llmBefore = JSON.stringify(cfgMod.DEFAULTS.llm);
-  const reviewerBefore = JSON.stringify(cfgMod.DEFAULTS.reviewer);
   const shallow = cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS }); // 浅拷贝 DEFAULTS：嵌套块与 DEFAULTS 同一个引用
   check(
     "v0.5.8：浅拷贝 DEFAULTS 进去也不会把出厂默认的嵌套块就地写掉（normalizeConfig 换了新对象）",
-    JSON.stringify(cfgMod.DEFAULTS.llm) === llmBefore &&
-      JSON.stringify(cfgMod.DEFAULTS.reviewer) === reviewerBefore &&
-      shallow.llm !== cfgMod.DEFAULTS.llm &&
-      shallow.reviewer !== cfgMod.DEFAULTS.reviewer,
-    `llm 未变=${JSON.stringify(cfgMod.DEFAULTS.llm) === llmBefore} reviewer 未变=${
-      JSON.stringify(cfgMod.DEFAULTS.reviewer) === reviewerBefore
-    } 新对象=${shallow.llm !== cfgMod.DEFAULTS.llm}/${shallow.reviewer !== cfgMod.DEFAULTS.reviewer}`,
+    JSON.stringify(cfgMod.DEFAULTS.llm) === llmBefore && shallow.llm !== cfgMod.DEFAULTS.llm,
+    `llm 未变=${JSON.stringify(cfgMod.DEFAULTS.llm) === llmBefore} 新对象=${shallow.llm !== cfgMod.DEFAULTS.llm}`,
   );
 
   const autoCases = [
@@ -4368,7 +3849,7 @@ check(
     "v0.9.0：auto 桶存在，且自动评审的开跑/结算两处都真的记了账（源码级）",
     typeof entryStatus.stats?.byEntry?.auto?.started === "number" &&
       /noteEntryStart\("auto"\)/.test(entryIndexSource) &&
-      (entryIndexSource.match(/noteEntryResult\("auto"/g) ?? []).length >= 3,
+      (entryIndexSource.match(/noteEntryResult\("auto"/g) ?? []).length >= 2,
     JSON.stringify({ auto: entryStatus.stats?.byEntry?.auto, resultCalls: (entryIndexSource.match(/noteEntryResult\("auto"/g) ?? []).length }),
   );
 

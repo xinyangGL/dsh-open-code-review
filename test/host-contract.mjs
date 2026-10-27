@@ -75,7 +75,8 @@ function ctxWithout(id) {
   const ids = HOST_CONTRACT.capabilities.map((row) => row.id);
   check(
     "v0.7.0：清单齐备（id 唯一、都有 label/surface/required/detect/degrade、surface 只有 host/client）",
-    HOST_CONTRACT.capabilities.length >= 12 &&
+    /* v1.0：删掉 preTest（tools/pre-execute）与独立评审 agent（subagents）后，host 侧 11 条 + client 槽位 1 条。 */
+    HOST_CONTRACT.capabilities.length >= 11 &&
       new Set(ids).size === ids.length &&
       HOST_CONTRACT.capabilities.every(
         (row) =>
@@ -130,7 +131,8 @@ function ctxWithout(id) {
     host.ok === true &&
       host.missing.length === 0 &&
       host.errors.length === 0 &&
-      hostRows.length >= 12 &&
+      hostRows.length === HOST_CONTRACT.capabilities.filter((row) => row.surface === "host").length &&
+      hostRows.length >= 11 &&
       hostRows.every((row) => row.present === true) &&
       host.capabilities.filter((row) => row.surface === "client").every((row) => row.present === null),
     `ok=${host.ok} hostRows=${hostRows.length}`,
@@ -318,7 +320,6 @@ for (const capability of HOST_CONTRACT.capabilities) {
       llm: { stream: () => {} },
       jobs: { start: () => {} },
       skills: { register: () => () => {} },
-      subagents: { start: () => {} },
     };
     const ctx = {
       tools: { register: () => () => {} },
@@ -342,8 +343,8 @@ for (const capability of HOST_CONTRACT.capabilities) {
   const host = probeHost(injectOnlyCtx());
   const injectRows = host.capabilities.filter((row) => row.id.startsWith("inject."));
   check(
-    "v0.7.1：服务藏在 inject 后面（直接读 ctx.llm 抛 cannot get property … without inject）时，探针仍靠 ctx.reflect.get(name,false) 认出 llm/jobs/skills/subagents",
-    host.errors.length === 0 && injectRows.length === 4 && injectRows.every((row) => row.present === true),
+    "v0.7.1：服务藏在 inject 后面（直接读 ctx.llm 抛 cannot get property … without inject）时，探针仍靠 ctx.reflect.get(name,false) 认出 llm/jobs/skills",
+    host.errors.length === 0 && injectRows.length === 3 && injectRows.every((row) => row.present === true),
     `errors=${JSON.stringify(host.errors)} present=${injectRows.map((row) => row.present).join(",")}`,
   );
 
@@ -400,7 +401,7 @@ for (const capability of HOST_CONTRACT.capabilities) {
   const unregistered = used.filter((id) => !declared.has(id));
   check(
     "v0.7.0：lib/index.js 里用到的每个扩展点都在 HOST_CONTRACT 里登记（新增挂载点不登记 = 测试红）",
-    unregistered.length === 0 && used.length >= 9,
+    unregistered.length === 0 && used.length >= 8,
     `used=${used.join(",")} unregistered=${unregistered.join(",")}`,
   );
   check(

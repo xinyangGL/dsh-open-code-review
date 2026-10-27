@@ -288,9 +288,9 @@ check(
   String(zhDict["choice.llmMode.dsh"] || "").startsWith("dsh —")
     && zhDict["group.basic"] === "基础"
     && zhDict["group.route"] === "模型路由"
-    && zhDict["group.reviewer"] === "独立评审 agent"
+    && !("group.reviewer" in zhDict)
     && !("group.timing" in zhDict),
-  JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.route"], zhDict["group.reviewer"], "group.timing" in zhDict]),
+  JSON.stringify([zhDict["choice.llmMode.dsh"], zhDict["group.basic"], zhDict["group.route"], "group.reviewer" in zhDict, "group.timing" in zhDict]),
 );
 check("en 词典覆盖字段标签、按钮与状态文案", enDict["field.llmModel.label"] === "Model" && enDict["button.save"] === "Save" && Boolean(enDict["status.routeDsh"]), JSON.stringify([enDict["field.llmModel.label"], enDict["button.save"]]));
 /* 批 2（UI 规范·文案双语）：en 词典必须覆盖 zh 词典的**每一个**键 —— 缺一条，`makeT` 就退回内联中文
@@ -367,13 +367,13 @@ const render = () => {
 };
 const tree = render();
 const html = textOf(tree);
-/* 主页只放「要做的决定」这 4 行；高级区（模型路由 2 + 独立评审 agent 1 = 3）默认不渲染；
-   其余 15 项是 v0.11.0 起不再露出的配置项，只在诊断区只读列出。 */
+/* 主页只放「要做的决定」这 4 行；高级区（模型路由 2）默认不渲染；
+   其余 15 项是 v0.11.0 起不再露出的配置项，只在诊断区只读列出。
+   v1.0：独立评审 agent 整组已删（reviewer.* 五个键不存在）。 */
 const BASIC_LABELS = ["总开关", "默认引擎", "按需评审", "自动评审"];
-const ADVANCED_LABELS = ["模型名", "提供方（provider）", "独立评审 agent"];
-/* 「独立评审 agent」同时是折叠区里那个分组的名字，而收起提示会点名两个分组 —— 它单列。 */
+const ADVANCED_LABELS = ["模型名", "提供方（provider）"];
 const COLLAPSED_LABELS = ["模型名", "提供方（provider）"];
-const ADVANCED_KEYS = ["llmModel", "llmProvider", "reviewerAgent"];
+const ADVANCED_KEYS = ["llmModel", "llmProvider"];
 const HIDDEN_KEYS = ["llmMode", "llmBaseUrl", "llmProtocol", "llmApiKeyRef", "autoScope", "autoMaxPerSession", "autoMinReviewableFiles", "autoMinIntervalMs", "autoSkipSubagents", "autoIncludeDiff", "audience", "ocrPath", "timeoutMinutes", "progress", "verbose"];
 const HIDDEN_LABELS = ["LLM 路由", "端点 Base URL", "端点协议", "API Key 引用", "自动评审范围", "每会话上限", "最少可审文件数", "最小间隔", "跳过子代理会话", "委派时带 diff", "结果详细程度", "ocr 可执行文件", "单次超时（分钟）", "评审进度", "调试日志"];
 for (const label of BASIC_LABELS) {
@@ -382,8 +382,8 @@ for (const label of BASIC_LABELS) {
 for (const label of COLLAPSED_LABELS) {
   check(`高级项「${label}」默认收起`, !html.includes(label));
 }
-check("收起提示里点名了两个分组（评审时机分组已去掉）", html.includes("模型路由") && html.includes("独立评审 agent") && !html.includes("评审时机"), html.slice(0, 200));
-check("高级设置标题显示项数（收起时也显示 3 项）", html.includes("高级设置（3 项）"), html.slice(0, 180));
+check("收起提示里点名了分组（模型路由）", html.includes("模型路由") && !html.includes("评审时机"), html.slice(0, 200));
+check("高级设置标题显示项数（收起时也显示 2 项）", html.includes("高级设置（2 项）"), html.slice(0, 180));
 check("高级设置默认收起（aria-expanded=false）", hosts(tree).some((n) => n.props && n.props["data-ocr-advanced-toggle"] === "1" && n.props["aria-expanded"] === "false"));
 check("收起时说明怎么展开", html.includes("已收起"), html.slice(0, 180));
 check("主页说明字段来源徽标", html.includes("设置页已改"));
@@ -470,7 +470,7 @@ check("高级设置有可点的标题", Boolean(advToggle(tree)));
 setAdvanced(true);
 const advTree = render();
 const advRows = controlRows(advTree);
-check("展开后高级项 3 行（模型路由 2 + 独立评审 agent 1）", advancedRows(advTree).length === 3, `n=${advancedRows(advTree).length}`);
+check("展开后高级项 2 行（模型路由 2）", advancedRows(advTree).length === 2, `n=${advancedRows(advTree).length}`);
 check("展开后 aria-expanded=true", advToggle(advTree).props["aria-expanded"] === "true");
 check("展开后不再显示「已收起」的展开提示", !textOf(advTree).includes("低频参数已收起"));
 check(
@@ -521,30 +521,30 @@ check(
   JSON.stringify(HIDDEN_KEYS.filter((k) => expandedKeys.includes(k) || collapsedKeys.includes(k))),
 );
 check(
-  "展开态可见键 = 基础 4 + 高级 3（模型路由 2 / 独立评审 agent 1）",
-  expandedKeys.join(",") === "enabled,engine,onDemand,autoReview,llmModel,llmProvider,reviewerAgent",
+  "展开态可见键 = 基础 4 + 高级 2（模型路由 2）",
+  expandedKeys.join(",") === "enabled,engine,onDemand,autoReview,llmModel,llmProvider",
   expandedKeys.join(","),
 );
 check("收起态可见键 = 基础 4", collapsedKeys.join(",") === "enabled,engine,onDemand,autoReview", collapsedKeys.join(","));
 check("诊断区说明「键名即是 config.json 的写法」", html.includes("键名") && html.includes("运行期实况"));
 
 /* 折叠态也要能看见「高级区里有待保存的改动」，并且能逐字段撤销。
-   用「独立评审 agent」这个下拉来测：它没有内部状态；模型名那行是可搜索下拉，改它会把内部 text/open
+   用 provider 这个文本行来测：它没有内部状态；模型名那行是可搜索下拉，改它会把内部 text/open
    状态留在测试夹具里，污染后面的候选列表用例。 */
 setAdvanced(true);
-const draftReviewerRow = controlRows(render()).find((r) => r.key === "reviewerAgent");
-check("找到高级区的独立评审 agent 行", Boolean(draftReviewerRow) && draftReviewerRow.field.tag === "select");
-if (draftReviewerRow) draftReviewerRow.field.props.onChange({ target: { value: "spawn" } });
+const draftProvRow = controlRows(render()).find((r) => r.key === "llmProvider");
+check("找到高级区的 provider 行", Boolean(draftProvRow) && draftProvRow.field.tag === "input");
+if (draftProvRow) draftProvRow.field.props.onChange({ target: { value: "commandcode" } });
 setAdvanced(false);
 const collapsedDirty = render();
 check("折叠后标题显示「1 项待保存」", textOf(collapsedDirty).includes("1 项待保存"), textOf(collapsedDirty).slice(0, 160));
 check("折叠后高级行不在 DOM 里", controlRows(collapsedDirty).length === 4, `n=${controlRows(collapsedDirty).length}`);
 setAdvanced(true);
-const undoRow = controlRows(render()).find((r) => r.key === "reviewerAgent");
+const undoRow = controlRows(render()).find((r) => r.key === "llmProvider");
 const undoBtn = undoRow && undoRow.buttons.find((b) => textOf(b) === "撤销");
 check("折叠期间草稿还在，展开后能逐字段撤销", Boolean(undoBtn));
 if (undoBtn) undoBtn.props.onClick();
-check("撤销后该行不再算脏（值已回到已存值）", !controlRows(render()).find((r) => r.key === "reviewerAgent").buttons.some((b) => textOf(b) === "保存"));
+check("撤销后该行不再算脏（值已回到已存值）", !controlRows(render()).find((r) => r.key === "llmProvider").buttons.some((b) => textOf(b) === "保存"));
 setAdvanced(false);
 check("撤销后待保存徽标消失", !textOf(render()).includes("项待保存"));
 
@@ -640,58 +640,8 @@ modelInputNode(oneMatch).props.onKeyDown({ key: "Enter", preventDefault() {} });
 const kbPicked = controlRows(render()).find((r) => r.key === "llmModel");
 check("↑↓ + 回车也能选中", Boolean(kbPicked) && kbPicked.field.props.value === "kimi-k2.7-code", kbPicked ? String(kbPicked.field.props.value) : "没有该行");
 
-/* ------------------------------------------------------------ 独立评审 agent（opt-in） */
-
-controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "spawn" } });
-const spawnTree = render();
-const spawnRows = controlRows(spawnTree);
-check("reviewer=spawn 时展开态 10 行（基础 4 + 路由 2 + 独立评审 agent 1 + 子 agent 3 行额外）", spawnRows.length === 10, `n=${spawnRows.length}`);
-check("reviewerAgent 只有 off / spawn 两个选项", (() => {
-  const row = spawnRows.find((r) => r.key === "reviewerAgent");
-  return Boolean(row) && hosts(row.row).filter((n) => n.tag === "option").length === 2;
-})());
-check("spawn 后出现子 agent provider / 模型 / 轮次三行", ["reviewerProvider", "reviewerModel", "reviewerRounds"].every((key) => spawnRows.some((r) => r.key === key)));
-check("spawn 状态行说明走独立 agent", textOf(spawnTree).includes("评审走独立 agent"));
-check("spawn 后轮次上限默认 3（数字框）", (() => {
-  const row = spawnRows.find((r) => r.key === "reviewerRounds");
-  return Boolean(row) && row.field.props.type === "number" && row.field.props.value === "3";
-})());
-
-/* 评审子会话的模型也走同一份 DSH 目录，选中候选写的是 reviewerProvider，不动 llmProvider */
-const reviewModelRow = spawnRows.find((r) => r.key === "reviewerModel");
-const reviewInput = reviewModelRow && hosts(reviewModelRow.row).find((n) => n.tag === "input" && n.props["data-ocr-model-input"] === true);
-check("子 agent 模型行也是可搜索下拉", Boolean(reviewInput) && reviewInput.props.disabled !== true);
-if (reviewInput) {
-  reviewInput.props.onFocus();
-  const reviewMenu = render();
-  /* 菜单节点必须在这一行内部找：树里还有模型名那行的菜单，宽泛查找会点到别人的候选。 */
-  const reviewMenuRow = controlRows(reviewMenu).find((r) => r.key === "reviewerModel");
-  const reviewItems = hosts(reviewMenuRow.row).filter((n) => n.props && n.props["data-ocr-model-item"] === true);
-  check("子 agent 模型行能展开候选", reviewItems.length >= 4, `n=${reviewItems.length}`);
-  const target = reviewItems.find((n) => textOf(n).includes("Kimi K2.7 Code"));
-  check("子 agent 候选里能找到模型", Boolean(target));
-  if (target) {
-    target.props.onMouseDown({ preventDefault() {} });
-    const afterPick = controlRows(render());
-    const rm = afterPick.find((r) => r.key === "reviewerModel");
-    const rp = afterPick.find((r) => r.key === "reviewerProvider");
-    check("选中后写入 reviewerModel 草稿", Boolean(rm) && rm.field.props.value === "kimi-k2.7-code", rm ? String(rm.field.props.value) : "没有该行");
-    check("选中后把提供方写进 reviewerProvider（不是 llmProvider）", Boolean(rp) && rp.field.props.value === "commandcode", rp ? String(rp.field.props.value) : "没有该行");
-    const saveReviewModel = rm && rm.buttons.find((b) => textOf(b) === "保存");
-    if (saveReviewModel) {
-      await saveReviewModel.props.onClick();
-      check("保存子 agent 模型调用 form.set(reviewerModel)", writes.some((w) => w.op === "set" && w.key === "reviewerModel" && w.value === "kimi-k2.7-code"), JSON.stringify(writes.slice(-2)));
-    }
-  }
-}
-
-/* 切回 off：后面的降级场景与行数断言按默认（不启用）算 */
-controlRows(render()).find((r) => r.key === "reviewerAgent").field.props.onChange({ target: { value: "off" } });
-const offAgain = controlRows(render());
-check("切回 off 后子 agent 三行消失、展开态行数回到 7", offAgain.length === 7 && !offAgain.some((r) => r.key === "reviewerModel"), `n=${offAgain.length}`);
-check("切回 off 后状态行不再提独立 agent", !textOf(render()).includes("评审走独立 agent"));
 setAdvanced(false);
-check("收起后回到基础 4 行", controlRows(render()).length === 4, `n=${controlRows(render()).length}`);
+check("收起后回到基础 4 行", controlRows(render()).length === 4, "n=" + controlRows(render()).length);
 
 /* Remote 信封报错（{ ok: false, error }）时也要给出可读诊断 */
 /* 模型名/提供方在高级区：下面这一串都在看模型行的退化表现，先把高级区展开。 */

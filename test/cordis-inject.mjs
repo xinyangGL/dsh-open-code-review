@@ -382,12 +382,12 @@ check(
   host.inject.join(","),
 );
 
-/* 形态 E：宿主提供了 subagents —— 子 fiber 激活并绑定服务 */
+/* 形态 E：宿主提供了 subagents —— v1.0 起插件完全不用这个服务，所以一次都不该碰 */
 const fullHost = await makeHostPlugin(["subagents"]);
 await settle();
 check(
-  "提供了 subagents 时子 fiber 激活（确实读了一次 list()）",
-  fullHost.calls.subagentsList >= 1,
+  "宿主提供了 subagents 也不去碰它（v1.0 已删独立评审 agent 与自动评审的子 agent 分支）",
+  fullHost.calls.subagentsList === 0,
   `list=${fullHost.calls.subagentsList}`,
 );
 check(
