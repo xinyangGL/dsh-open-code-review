@@ -591,14 +591,14 @@ checkEither(
   HAS_OCR ? `${delegated.summary} | spec=${delegated.reviewSpec.length} 字符` : `${delegated.code} | ${delegated.summary}`,
 );
 
-/* v0.8.0 起「不传 engine」= 跟着配置走（出厂是 delegate），所以这里显式点名 auto，
-   否则这条断言会随本机 config.json 是否 pin 了 engine 而变味。 */
-const auto = await tools.get("ocr_review").execute({ engine: "auto" }, exec);
-checkEither(
-  "auto：无 LLM 端点时降级 delegate 并给出配置指引（没装 ocr 时先报 OCR_NOT_FOUND）",
-  auto.ok === true && auto.engine === "delegate" && auto.configHint.includes("no valid LLM endpoint configured"),
-  auto.ok === false && auto.code === "OCR_NOT_FOUND",
-  `${auto.summary} | notes=${auto.notes.join(" / ")}`,
+/* v1.0：auto 引擎已删除 —— 传 engine:"auto" 不再有「自动降级」，按非法值回落到默认档。 */
+check(
+  "v1.0：auto 引擎已删除（配置/工具枚举只剩 ocr 与 delegate，传 auto 回落默认）",
+  !review.ENGINES.includes("auto") &&
+    review.pickEngine("auto", {}) === "ocr" &&
+    cfgMod.normalizeConfig({ engine: "auto" }).engine === "ocr" &&
+    !(tools.get("ocr_review").parameters?.properties?.engine?.enum ?? []).includes("auto"),
+  `ENGINES=${review.ENGINES.join(",")} pickEngine(auto)=${review.pickEngine("auto", {})}`,
 );
 
 const bad = await tools.get("ocr_review").execute({ scope: "commit" }, exec);
@@ -638,7 +638,7 @@ check(
   "v0.8.0：成本前置提示只在会烧 LLM 的档出现（delegate 不提示），并说清规模与计费口径",
   review.costHint({ engine: "delegate" }) === "" &&
     /2 个路径/.test(review.costHint({ engine: "ocr", scope: "scan", paths: ["a.js", "b.js"] })) &&
-    /按 tokens 计费/.test(review.costHint({ engine: "auto", scope: "workspace" })) &&
+    /按 tokens 计费/.test(review.costHint({ engine: "ocr", scope: "workspace" })) &&
     /engine=delegate/.test(review.costHint({ engine: "ocr" })),
   review.costHint({ engine: "ocr", scope: "scan", paths: ["a.js", "b.js"] }).slice(0, 60),
 );
@@ -1388,9 +1388,9 @@ check(
 );
 const autoNoBridge = await tools.get("ocr_review").execute({ engine: "auto" }, bridgeExec);
 check(
-  "v0.11.0：engine=auto 仍按出厂契约降级 delegate（只是不再换 LLM 路径）",
-  autoNoBridge.ok === true && autoNoBridge.engine === "delegate" && String(autoNoBridge.notes.join(" ")).includes("不再回落静态端点"),
-  `${autoNoBridge.engine} | ${autoNoBridge.summary} | notes=${autoNoBridge.notes.join(" / ")}`,
+  "v1.0：auto 引擎已删除 —— 桥不可用时传 auto 不再降级，回落到默认 ocr 档并明确失败",
+  autoNoBridge.ok === false && autoNoBridge.code === "OCR_LLM_MISSING" && autoNoBridge.engine === "ocr",
+  `${autoNoBridge.engine} | ${autoNoBridge.code} | ${autoNoBridge.summary}`,
 );
 for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function") entry.dispose();
 
@@ -1526,7 +1526,6 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
     pickerSource.includes('"data-ocr-tail-cost"') &&
       /if \(key === "delegate"\)/.test(pickerSource) &&
       /if \(key === "ocr"\)/.test(pickerSource) &&
-      /if \(key === "auto"\)/.test(pickerSource) &&
       /return t\("tail\.costUnknown"/.test(pickerSource) &&
       !/\$\s?\d/.test(pickerSource),
     "按钮没有代价副行，或档位分支/兜底文案缺失",
@@ -3182,12 +3181,13 @@ check(
   const engineCases = [
     ["OCR", "ocr"],
     [" Delegate ", "delegate"],
-    ["auto", "auto"],
+    /* v1.0：auto 不再是合法档位 —— 与其它非法值一样回落默认（ocr）。 */
+    ["auto", cfgMod.DEFAULTS.engine],
     ["nope", cfgMod.DEFAULTS.engine],
   ];
   const engineGot = engineCases.map(([input]) => cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, engine: input }).engine);
   check(
-    "配置：engine 收敛（去空白小写；枚举值与非法值照旧）",
+    "配置：engine 收敛（去空白小写；auto 已不再是合法档位）",
     engineCases.every(([, want], i) => engineGot[i] === want),
     engineCases.map(([input], i) => `${JSON.stringify(input)}→${engineGot[i]}`).join(" · "),
   );

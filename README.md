@@ -4,7 +4,7 @@
 
 Run a real review of the changes you just made with [Alibaba OpenCodeReview](https://github.com/alibaba/open-code-review), and get the result back **as it is** — what was covered, which model answered, and why it failed.
 
-- **No separate `ocr` install.** The binary ships with the plugin (Windows x64 / macOS arm64).
+- **No separate `ocr` install.** The binary ships with the plugin (Windows x64).
 - **No API key to configure.** The review uses the model **your current conversation is already using**, forwarded through a loopback-only bridge inside DSH (your key never enters the `ocr` child process).
 - **Verifiable conclusions.** Every review carries a coverage receipt: which hunks were included, which files were excluded, and which parts have no conclusion.
 
@@ -27,7 +27,7 @@ Run a real review of the changes you just made with [Alibaba OpenCodeReview](htt
 
 **Before it runs** — the button's sub-line states the files changed, rough duration, and whether it will be billed.
 
-**While it runs** — a progress row with phases (prepare → run ocr → finish), elapsed time, and a stop button (armed on the first click, stopped on the second).
+**While it runs** — there is **no progress bar and no stop button** (ocr emits no incremental progress); the tool-call row shows elapsed time. To stop, stop the turn (usage already incurred is not refunded).
 
 **When it finishes** — six fixed layers, top to bottom:
 
@@ -62,7 +62,7 @@ Provider and model are always taken as **one route**; they are never mixed acros
 
 ## Settings
 
-The settings page exposes three fields: **enabled / default engine / per-review timeout**.
+The settings page exposes four fields: **enabled / default engine / on-demand review**, plus **model name / provider** under “Advanced”.
 
 Model name, provider and the ocr path live in `config.json` (empty = automatic, see above). Changes apply immediately; no restart needed.
 
@@ -88,7 +88,7 @@ Model name, provider and the ocr path live in `config.json` (empty = automatic, 
 
 ```bash
 npm install     # also installs the platform ocr binary (~55MB, node_modules only, not committed)
-npm test        # smoke / client-smoke / bridge-smoke / host-contract / job / pack check
+npm test        # smoke / client-smoke / bridge-smoke / host-contract / killswitch / cordis-inject / pack check
 ```
 
 - `npm run test:pack` asserts the published tarball contains only what it should.
@@ -96,7 +96,8 @@ npm test        # smoke / client-smoke / bridge-smoke / host-contract / job / pa
 
 ## Known limitations
 
+- The bundled binary covers Windows x64 (a macOS arm64 package exists but is unverified).
+- Installing downloads about 57 MB (the platform binary package); no build scripts run.
 - Real-machine acceptance was done on Windows x64 only (macOS / Linux unverified).
-- Progress is **phase-level** (ocr emits no incremental progress), so “how much longer” is a range.
-- Without a host `jobs` service the progress row has no visual stop button (cancel the turn instead).
+- No progress bar (ocr emits no incremental progress), so “how much longer” is a range.
 - Reviews cover the **change set** (git diff); historical issues elsewhere in the repo are out of scope.

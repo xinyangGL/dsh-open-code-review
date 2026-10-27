@@ -317,7 +317,7 @@ let snapshot = {
   status: "ready",
   value: {
     enabled: true,
-    engine: "auto",
+    engine: "delegate",
     audience: "agent",
     timeoutMinutes: 15,
     llmBaseUrl: "https://api.commandcode.ai/provider/v1",
@@ -758,7 +758,7 @@ const cardHtml = textOf(cardTree);
 const cardRows = hosts(cardTree).filter((n) => n.props && typeof n.props["data-ocr-summary-row"] === "string");
 check("卡片渲染只读摘要（不再是 null）", Boolean(hosts(cardTree).find((n) => n.props && n.props["data-ocr-card-summary"] === "1")), cardHtml.slice(0, 160));
 check("摘要只列基础项（基础 3 行，不重复整张表单）", cardRows.length === 3, `n=${cardRows.length}`);
-check("摘要行带出当前值（开 / 关 / 选项文案）", cardHtml.includes("开") && cardHtml.includes("关") && cardHtml.includes("auto — "), cardHtml.slice(0, 220));
+check("摘要行带出当前值（开 / 关 / 选项文案）", cardHtml.includes("开") && cardHtml.includes("关") && cardHtml.includes("delegate — "), cardHtml.slice(0, 220));
 check("摘要给出完整设置的入口", cardHtml.includes("设置 → 代码评审"), cardHtml.slice(0, 220));
 check("摘要里没有可编辑控件", !hosts(cardTree).some((n) => n.tag === "input" || n.tag === "select"));
 
@@ -962,7 +962,7 @@ check(
 const noThemeOptions = optionsOf(noThemeTree);
 check(
   "每个 option 都显式给了文字色与底色（白底白字的根因）",
-  noThemeOptions.length >= 3 &&
+  noThemeOptions.length >= 2 &&
     noThemeOptions.every((n) => n.props.style && n.props.style.color === LABEL_TOKEN && n.props.style.background === OPTION_BG_TOKEN),
   `n=${noThemeOptions.length}`,
 );

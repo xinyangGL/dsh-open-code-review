@@ -1,8 +1,8 @@
 {
   "name": "dsh-open-code-review",
-  "version": "0.12.6",
+  "version": "1.0.0",
   "private": true,
-  "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、按需评审（回合尾部的「启动代码审核」按钮 —— v0.11.0 起只在检测到本回合有改动时才出现 —— 加运行时 skill），三档引擎（v0.10.0 起出厂默认 ocr 流水线：要真调 LLM、按 tokens 计费，但跑前先给一条本次规模的成本预估；delegate 不调 LLM、几秒出规格，仍可显式选择），结果按文件逐条列出「文件:行 [严重程度] 问题」并给每个失败码附「下一步」。",
+  "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、回合尾部按需评审按钮与运行时 skill。ocr 二进制随插件安装（零前置）；评审默认用当前对话的模型；结论按「文件:行 [严重程度] 问题」逐条列出，失败给结果码与下一步。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -31,8 +31,15 @@
       "optional": true
     }
   },
-  "dependencies": {
-    "@alibaba-group/open-code-review": "1.12.13"
+  "dependencies": {},
+  "_comment_deps": "不用 @alibaba-group/open-code-review 本体：它的 postinstall 要下载二进制，pnpm 会拦掉（ERR_PNPM_IGNORED_BUILDS），装到用户机器上直接失败。这里直接依赖它的平台包（无任何脚本），由 lib/ocr-cli.js 用模块解析找到 exe。",
+  "optionalDependencies": {
+    "@alibaba-group/ocr-darwin-arm64": "1.12.13",
+    "@alibaba-group/ocr-darwin-x64": "1.12.13",
+    "@alibaba-group/ocr-linux-arm64": "1.12.13",
+    "@alibaba-group/ocr-linux-x64": "1.12.13",
+    "@alibaba-group/ocr-win32-arm64": "1.12.13",
+    "@alibaba-group/ocr-win32-x64": "1.12.13"
   },
   "type": "module",
   "main": "lib/index.js",
@@ -57,7 +64,6 @@
     "CHANGELOG.md",
     "LICENSE",
     "docs/host-contract.md",
-    "docs/pretest-gate-safety-design.md",
     "docs/settings-basic.png",
     "docs/settings-advanced.png"
   ],
