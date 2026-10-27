@@ -29,19 +29,17 @@ function fullCtx() {
     credentials: { resolve: async () => "" },
     on: () => () => {},
     llm: { stream: () => {} },
-    jobs: { start: () => {} },
     skills: { register: () => () => {} },
-    subagents: { start: () => {} },
   };
 }
 
 /**
  * v0.7.1：事件类能力不再只看 `ctx.on` 在不在 —— 还要看**这个事件真的接上了没有**，
  * 所以探针接受一份可注入的挂载账目（不传就读 lib/hooks.js 的实时账目）。
- * 这里给一份「三个事件都挂上了」的账目，代表一次正常启动。
+ * v1-slim：自动评审删掉后只剩 loader/volatile-update 一条事件，这里代表一次正常启动。
  */
 const ARMED_HOOKS = {
-  hooks: { counts: { "tools/result": 2, "agent/turn-stopping": 1, "loader/volatile-update": 1 } },
+  hooks: { counts: { "loader/volatile-update": 1 } },
 };
 const NOT_ARMED_HOOKS = { hooks: { counts: {} } };
 
@@ -56,13 +54,9 @@ function ctxWithout(id) {
     "subprocess.resolveExecutable": () => delete ctx.subprocess.resolveExecutable,
     "commands.register": () => delete ctx.commands.register,
     "credentials.resolve": () => delete ctx.credentials.resolve,
-    "events.tools/result": () => delete ctx.on,
-    "events.agent/turn-stopping": () => delete ctx.on,
     "events.loader/volatile-update": () => delete ctx.on,
     "inject.llm": () => delete ctx.llm.stream,
-    "inject.jobs": () => delete ctx.jobs.start,
     "inject.skills": () => delete ctx.skills.register,
-    "inject.subagents": () => delete ctx.subagents.start,
     "client.slots": () => {},
   }[id];
   if (!drop) throw new Error(`测试没覆盖这个能力 id：${id}`);
@@ -75,8 +69,9 @@ function ctxWithout(id) {
   const ids = HOST_CONTRACT.capabilities.map((row) => row.id);
   check(
     "v0.7.0：清单齐备（id 唯一、都有 label/surface/required/detect/degrade、surface 只有 host/client）",
-    /* v1.0：删掉 preTest（tools/pre-execute）与独立评审 agent（subagents）后，host 侧 11 条 + client 槽位 1 条。 */
-    HOST_CONTRACT.capabilities.length >= 11 &&
+    /* v1.0：删掉 preTest（tools/pre-execute）与独立评审 agent（subagents）后，host 侧 8 条 + client 槽位 1 条。
+       v1-slim：再删掉自动评审（events.tools/result、events.agent/turn-stopping）与 jobs 集成（inject.jobs）。 */
+    HOST_CONTRACT.capabilities.length >= 9 &&
       new Set(ids).size === ids.length &&
       HOST_CONTRACT.capabilities.every(
         (row) =>
@@ -132,7 +127,7 @@ function ctxWithout(id) {
       host.missing.length === 0 &&
       host.errors.length === 0 &&
       hostRows.length === HOST_CONTRACT.capabilities.filter((row) => row.surface === "host").length &&
-      hostRows.length >= 11 &&
+      hostRows.length >= 8 &&
       hostRows.every((row) => row.present === true) &&
       host.capabilities.filter((row) => row.surface === "client").every((row) => row.present === null),
     `ok=${host.ok} hostRows=${hostRows.length}`,
@@ -156,17 +151,18 @@ function ctxWithout(id) {
     hostSummary(host),
   );
   /* v0.7.1：宿主有 ctx.on 但插件一个钩子都没挂上（紧急制动、或注册全失败）时，
-     三条事件能力必须报「缺」，而不是跟着 ctx.on 一起报 true —— 那正是第 11 条发现：
-     原来的写法会一边说「能力齐备」一边在 degrade 里说「不会触发」，自相矛盾。 */
+     事件能力必须报「缺」，而不是跟着 ctx.on 一起报 true —— 那正是第 11 条发现：
+     原来的写法会一边说「能力齐备」一边在 degrade 里说「不会触发」，自相矛盾。
+     v1-slim：自动评审删掉后只剩 loader/volatile-update 一条事件能力。 */
   const unarmed = probeHost(fullCtx(), NOT_ARMED_HOOKS);
   const unarmedEvents = unarmed.capabilities.filter((row) => row.id.startsWith("events."));
   check(
-    "v0.7.1：只有 ctx.on、一个钩子都没挂上时，三条事件能力报「缺」（不再假阳性）",
-    unarmedEvents.length === 3 && unarmedEvents.every((row) => row.present === false),
+    "v0.7.1：只有 ctx.on、一个钩子都没挂上时，事件能力报「缺」（不再假阳性）",
+    unarmedEvents.length === 1 && unarmedEvents.every((row) => row.present === false),
     unarmedEvents.map((row) => `${row.id}=${row.present}`).join(" "),
   );
   check(
-    "v0.7.1：不传账目时读实时账目；三条事件能力的 present 与 hookStats().counts 一致",
+    "v0.7.1：不传账目时读实时账目；事件能力的 present 与 hookStats().counts 一致",
     unarmed.capabilities
       .filter((row) => row.id.startsWith("events."))
       .every((row) => row.present === (Number(hookStats().counts?.[row.id.replace(/^events\./, "")] ?? 0) > 0)),
@@ -235,8 +231,8 @@ function ctxWithout(id) {
   const ctxA = { on: () => () => {} };
   const ctxB = { on: () => () => {} };
   const emptyForBoth =
-    !hookStatsFor(ctxA).counts["tools/result"] && !hookStatsFor(ctxB).counts["tools/result"];
-  armHook(ctxA, "tools/result", () => {});
+    !hookStatsFor(ctxA).counts["loader/volatile-update"] && !hookStatsFor(ctxB).counts["loader/volatile-update"];
+  armHook(ctxA, "loader/volatile-update", () => {});
   const ledgerA = hookStatsFor(ctxA);
   const eventsForA = probeHost(ctxA).capabilities.filter((row) => row.id.startsWith("events."));
   const eventsForB = probeHost(ctxB).capabilities.filter((row) => row.id.startsWith("events."));
@@ -247,12 +243,12 @@ function ctxWithout(id) {
   );
   check(
     "v0.7.2：账目跟着 ctx 走 —— A 挂上的事件在 B 那里必须是 0（多实例/热重载不串账）",
-    ledgerA.counts["tools/result"] === 1 &&
-      Number(hookStatsFor(ctxB).counts["tools/result"] ?? 0) === 0 &&
+    ledgerA.counts["loader/volatile-update"] === 1 &&
+      Number(hookStatsFor(ctxB).counts["loader/volatile-update"] ?? 0) === 0 &&
       eventsForA.filter((row) => row.present === true).map((row) => row.id).join(",") ===
-        "events.tools/result" &&
+        "events.loader/volatile-update" &&
       eventsForB.every((row) => row.present === false),
-    `A=${ledgerA.counts["tools/result"]} B=${hookStatsFor(ctxB).counts["tools/result"]} eventsA=${eventsForA.map((row) => `${row.id}=${row.present}`).join(",")} eventsB=${eventsForB.map((row) => row.present).join(",")}`,
+    `A=${ledgerA.counts["loader/volatile-update"]} B=${hookStatsFor(ctxB).counts["loader/volatile-update"]} eventsA=${eventsForA.map((row) => `${row.id}=${row.present}`).join(",")} eventsB=${eventsForB.map((row) => row.present).join(",")}`,
   );
   resetHookStats();
 }
@@ -318,7 +314,6 @@ for (const capability of HOST_CONTRACT.capabilities) {
   function injectOnlyCtx() {
     const services = {
       llm: { stream: () => {} },
-      jobs: { start: () => {} },
       skills: { register: () => () => {} },
     };
     const ctx = {
@@ -343,8 +338,8 @@ for (const capability of HOST_CONTRACT.capabilities) {
   const host = probeHost(injectOnlyCtx());
   const injectRows = host.capabilities.filter((row) => row.id.startsWith("inject."));
   check(
-    "v0.7.1：服务藏在 inject 后面（直接读 ctx.llm 抛 cannot get property … without inject）时，探针仍靠 ctx.reflect.get(name,false) 认出 llm/jobs/skills",
-    host.errors.length === 0 && injectRows.length === 3 && injectRows.every((row) => row.present === true),
+    "v0.7.1：服务藏在 inject 后面（直接读 ctx.llm 抛 cannot get property … without inject）时，探针仍靠 ctx.reflect.get(name,false) 认出 llm/skills",
+    host.errors.length === 0 && injectRows.length === 2 && injectRows.every((row) => row.present === true),
     `errors=${JSON.stringify(host.errors)} present=${injectRows.map((row) => row.present).join(",")}`,
   );
 
@@ -401,12 +396,12 @@ for (const capability of HOST_CONTRACT.capabilities) {
   const unregistered = used.filter((id) => !declared.has(id));
   check(
     "v0.7.0：lib/index.js 里用到的每个扩展点都在 HOST_CONTRACT 里登记（新增挂载点不登记 = 测试红）",
-    unregistered.length === 0 && used.length >= 8,
+    unregistered.length === 0 && used.length >= 5,
     `used=${used.join(",")} unregistered=${unregistered.join(",")}`,
   );
   check(
-    "v0.7.0：事件类扩展点全部来自白名单（tools/result、agent/turn-stopping、loader/volatile-update）",
-    [...events].every((id) => declared.has(id)) && events.size >= 3,
+    "v0.7.0：事件类扩展点全部来自白名单（v1-slim 只剩 loader/volatile-update）",
+    [...events].every((id) => declared.has(id)) && events.size >= 1,
     [...events].join(","),
   );
   void registered;

@@ -2,7 +2,7 @@
   "name": "dsh-open-code-review",
   "version": "0.12.6",
   "private": true,
-  "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、按需评审（回合尾部的「启动代码审核」按钮 —— v0.11.0 起只在检测到本回合有改动时才出现 —— 加运行时 skill，出厂默认不自动评审）、三档引擎（v0.10.0 起出厂默认 ocr 流水线：要真调 LLM、按 tokens 计费，但跑前先给一条本次规模的成本预估、可随时停；delegate 不调 LLM、几秒出规格，仍可显式选择），结果按文件逐条列出「文件:行 [严重程度] 问题」并给每个失败码附「下一步」，每次评审都有实时进度（Jobs 面板 + 会话内进度行 + 30 秒心跳、预计剩余与成本前置提示、可停止）。",
+  "description": "把阿里 OpenCodeReview(ocr) 接进 DSH：模型可调用的 ocr_review/ocr_status 工具、/ocr-review 命令、按需评审（回合尾部的「启动代码审核」按钮 —— v0.11.0 起只在检测到本回合有改动时才出现 —— 加运行时 skill），三档引擎（v0.10.0 起出厂默认 ocr 流水线：要真调 LLM、按 tokens 计费，但跑前先给一条本次规模的成本预估；delegate 不调 LLM、几秒出规格，仍可显式选择），结果按文件逐条列出「文件:行 [严重程度] 问题」并给每个失败码附「下一步」。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -62,7 +62,7 @@
     "docs/settings-advanced.png"
   ],
   "scripts": {
-    "test": "node test/smoke.mjs && node test/killswitch-smoke.mjs && node test/host-contract.mjs && node test/job-smoke.mjs && node test/bridge-smoke.mjs && node test/client-smoke.mjs && node test/cordis-inject.mjs && node test/pack-check.mjs",
+    "test": "node test/smoke.mjs && node test/killswitch-smoke.mjs && node test/host-contract.mjs && node test/bridge-smoke.mjs && node test/client-smoke.mjs && node test/cordis-inject.mjs && node test/pack-check.mjs",
     "test:pack": "node test/pack-check.mjs"
   },
   "_comment_files": "files 只发 README 真正链到的文档与图；内部计划与自评（maturity-assessment / ROADMAP / *-plan-*.md）留在仓库里、靠 GitHub 绝对链接引用 —— 断言见 test/pack-check.mjs（npm run test:pack）。",
@@ -91,11 +91,8 @@
         "subprocess.resolveExecutable",
         "commands.register",
         "credentials.resolve",
-        "events.tools/result",
-        "events.agent/turn-stopping",
         "events.loader/volatile-update",
         "inject.llm",
-        "inject.jobs",
         "inject.skills",
         "client.slots"
       ]

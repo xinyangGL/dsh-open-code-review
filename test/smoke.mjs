@@ -263,7 +263,6 @@ function makeCtx(overrides = {}) {
   /* v0.11.0：路由要读「当前会话正在用的模型」，所以这两级也要能替换（不传就是没有）。 */
   if (overrides.agents) ctx.agents = overrides.agents;
   if (overrides.sessions) ctx.sessions = overrides.sessions;
-  if (overrides.jobs) ctx.jobs = overrides.jobs;
   /* 命令注册服务也可以替换：用来模拟「register() 抛错」这种宿主侧失败。 */
   if (overrides.commands) ctx.commands = overrides.commands;
   return ctx;
@@ -310,9 +309,9 @@ const mkConfig = (patch = {}) => (HAS_SCHEMA ? mod.Config(patch) : { ...patch })
  * CI（裸 clone + node，不跑 pnpm/npm 全局安装）里没有真 ocr：@alibaba-group/open-code-review 是 npm
  * 全局包，Actions 上不存在。本机开发机装了，所以以前这些用例只在「有 ocr」的机器上验过。
  * 现在两种环境都跑，同一条 check 换期望值（断言数恒定）：
- *   · 有 ocr：真实链路（定位 → 跑 ocr → 解析 → 进度 job）全验
+ *   · 有 ocr：真实链路（定位 → 跑 ocr → 解析）全验
  *   · 没有：验「定位失败」的诊断路径 —— 新用户最常见的第一屏（OCR_NOT_FOUND + 安装指引），
- *     以及 fail-closed 行为（不装 ocr 时绝不开一个假装在评审的 job）
+ *     以及 fail-closed 行为（不装 ocr 时绝不真的跑一个假装在评审的子进程）
  * 探测方式与插件一致（lib/ocr-cli.js 的 resolveOcr：显式路径 → 候选目录 → PATH），
  * 顺带把命中的路径写进它的模块级 cachedExecutable，后面的真实用例就不用再找一遍。
  */
@@ -425,7 +424,7 @@ if (HAS_SCHEMA) {
 } else {
   check(
     "没有 schema 时不解析 volatile 引用，但扁平字段映射照常（CI 路径：插件功能不依赖这个包）",
-    schemaRefs === null && cfgMod.schemaOverrides({ autoReview: { get: () => "adaptive" } })?.auto === "adaptive",
+    schemaRefs === null && cfgMod.schemaOverrides({ llmModel: { get: () => "m" } })?.llm?.model === "m",
     `schemaRefs=${schemaRefs ? "有" : "无"}`,
   );
 }
@@ -439,7 +438,6 @@ const settingsPatch = schemaRefs ?? mkConfig({ llmMode: "endpoint", llmModel: "d
 const ref = (value) => Object.freeze({ get: () => value });
 const overrides = cfgMod.schemaOverrides({
   engine: ref("delegate"),
-  autoReview: ref("adaptive"),
   timeoutMinutes: ref(20),
   llmModel: ref("deepseek/deepseek-v4.1-flash"),
   llmApiKeyRef: ref("SMOKE_OCR_KEY"),
@@ -447,11 +445,10 @@ const overrides = cfgMod.schemaOverrides({
   verbose: ref(true),
 });
 check(
-  "schemaOverrides：扁平字段名 → 生效配置路径（llm.* / autoReview→auto / 空串回落）",
+  "schemaOverrides：扁平字段名 → 生效配置路径（llm.* / 空串回落）",
   overrides?.llm?.model === "deepseek/deepseek-v4.1-flash" &&
     overrides?.llm?.apiKeyRef === "SMOKE_OCR_KEY" &&
     overrides?.engine === "delegate" &&
-    overrides?.auto === "adaptive" &&
     overrides?.timeoutMinutes === 20 &&
     overrides?.ocrPath === undefined &&
     overrides?.verbose === true &&
@@ -500,11 +497,7 @@ check(
 
 /* ------------------------------------------------------------- 端到端：工具 */
 
-/* 评审进度（可选 jobs 服务）替身：ctx 上有它，插件才会把每次评审登记成 job。
-   定义在文件末尾那节，函数声明会提升；这里先建实例（const 不提升）。 */
-const progressRegistry = makeJobsRegistry();
 const ctx = makeCtx();
-ctx.jobs = progressRegistry;
 mod.apply(ctx, settingsPatch);
 check("注册了 ocr_review / ocr_status / ocr-review", tools.has("ocr_review") && tools.has("ocr_status") && commands.has("ocr-review"), [...tools.keys()].join(","));
 check("工具声明了 output.schema + render", typeof tools.get("ocr_review").output?.render === "function" && tools.get("ocr_review").output.schema?.type === "object");
@@ -611,18 +604,16 @@ checkEither(
 const bad = await tools.get("ocr_review").execute({ scope: "commit" }, exec);
 check("参数缺失时明确报错且不执行命令", bad.ok === false && bad.code === "OCR_INVALID_ARGS" && bad.summary.includes("需要 commit"), `${bad.code} | ${bad.summary}`);
 
-/* -------- v0.8.0：成本前置 / 失败给下一步 / 长评审心跳；v0.10.0：手动默认 ocr、自动评审默认 delegate -------- */
+/* -------- v0.8.0：成本前置 / 失败给下一步 / 长评审心跳；v0.10.0：手动默认 ocr -------- */
 
 check(
-  "v0.10.0：默认引擎是 ocr（跑 OCR 流水线、跑前给成本预估），autoEngine 留空 = 跟随 engine（不静默换源）",
+  "v0.10.0：默认引擎是 ocr（跑 OCR 流水线、跑前给成本预估）",
   cfgMod.DEFAULTS.engine === "ocr" &&
-    cfgMod.DEFAULTS.autoEngine === "" &&
     cfgMod.normalizeConfig({}).engine === "ocr" &&
-    cfgMod.normalizeConfig({}).autoEngine === "" &&
     review.pickEngine(undefined, {}) === "ocr" &&
     review.pickEngine("delegate", {}) === "delegate" &&
     review.pickEngine("bogus", { engine: "也坏" }) === "ocr",
-  `DEFAULTS=${cfgMod.DEFAULTS.engine}/${cfgMod.DEFAULTS.autoEngine} normalizeConfig(空)=${cfgMod.normalizeConfig({}).engine} pickEngine(空)=${review.pickEngine(undefined, {})}`,
+  `DEFAULTS=${cfgMod.DEFAULTS.engine} normalizeConfig(空)=${cfgMod.normalizeConfig({}).engine} pickEngine(空)=${review.pickEngine(undefined, {})}`,
 );
 
 const allCodes = Object.values(review.CODES);
@@ -668,12 +659,9 @@ check(
 {
   const indexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
   check(
-    "v0.8.0：长评审真的挂了心跳（runOcrOnce 里 startHeartbeat + clockedSink，且 finally 里 stop）",
-    /startHeartbeat\(job/.test(indexSource) &&
-      /clockedSink\(chunkSink\(job\), beat\)/.test(indexSource) &&
-      /} finally \{\s*\n\s*beat\.stop\(\);/.test(indexSource) &&
-      /out\.notes\.push\(cost\)/.test(indexSource),
-    `startHeartbeat=${(indexSource.match(/startHeartbeat\(job/g) ?? []).length} clockedSink=${(indexSource.match(/clockedSink\(chunkSink/g) ?? []).length}`,
+    "v0.8.0：成本前置提示进了结果 notes（out.notes.push(cost)）",
+    /out\.notes\.push\(cost\)/.test(indexSource),
+    `cost=${(indexSource.match(/out\.notes\.push\(cost\)/g) ?? []).length}`,
   );
 }
 
@@ -924,10 +912,10 @@ check(
   );
 }
 
-/* R6（v0.12.0 批 1）：覆盖回执只有一份文案 —— 结论的「可用性」行与 job 记录共用 coverageSummary()。 */
+/* R6（v0.12.0 批 1）：覆盖回执只有一份文案（coverageSummary 喂结论文本）。 */
 const r6Coverage = { totalFiles: 3, totalHunks: 12, keptHunks: 7, droppedHunks: 5, slices: 2, truncated: true };
 check(
-  "R6：覆盖回执单一来源（coverageSummary 同时喂结论文本与 job 记录；空输入返回空串）",
+  "R6：覆盖回执单一来源（coverageSummary 喂结论文本；空输入返回空串）",
   review.coverageSummary(r6Coverage) === "收录 7/12 个 hunk · 2/3 个文件片 · 丢弃 5 个 hunk · diff 被截断" &&
     review.coverageSummary({}) === "" &&
     review.coverageSummary(null) === "" &&
@@ -935,26 +923,9 @@ check(
   `${review.coverageSummary(r6Coverage)} || 空=${JSON.stringify(review.coverageSummary({}))}`,
 );
 
-/* R3（v0.12.0 批 1）+ v0.12.5：回合尾部按钮不仅「不要求」jobs，而且**完全不碰**它 ——
-   v0.12.5 的真机事故是：inject 里去掉了 jobs，组件却仍在调 props.useJobs / watchRows，
-   cordis 对未注入的服务是「调用时抛」⇒ 组件在 render/commit 抛 ⇒ 宿主把整个 turnTail 槽
-   换成 <div data-slot-error=…>，按钮与第一方交付卡片一起消失。 */
+/* v1-slim：自动评审与 jobs 进度行整体删除后，client.js 里不该再有任何 jobs 调用点。 */
 {
   const r3ClientSource = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
-  check(
-    "R3：回合尾部按钮的依赖里没有 jobs（进度行仍依赖它），按钮只要求 sessionId",
-    !/ctx\.inject\(\["jobs", "configForms"/.test(r3ClientSource) &&
-      /ctx\.inject\(\["configForms", "remote", "remote\.commands"\]/.test(r3ClientSource) &&
-      /ctx\.inject\(\["jobs"\]/.test(r3ClientSource) &&
-      /if \(!props\.sessionId\) return null;/.test(r3ClientSource),
-    [
-      `旧依赖=${/ctx\.inject\(\["jobs", "configForms"/.test(r3ClientSource)}`,
-      `新依赖=${/ctx\.inject\(\["configForms", "remote", "remote\.commands"\]/.test(r3ClientSource)}`,
-      `进度行仍要 jobs=${/ctx\.inject\(\["jobs"\]/.test(r3ClientSource)}`,
-      `按钮守门=${/if \(!props\.sessionId\) return null;/.test(r3ClientSource)}`,
-    ].join(" · "),
-  );
-  /* 注释里会出现这些名字（说明「为什么不再这么做」），所以判据只统计**代码行**。 */
   const r3CodeOnly = r3ClientSource
     .split("\n")
     .filter((line) => {
@@ -963,23 +934,23 @@ check(
     })
     .join("\n");
   check(
-    "v0.12.5：尾部入口一个 jobs 调用都不留（props.useJobs / watchRows / hooks.jobs / jobsState / NO_ROWS_HOOK 全清）",
-    !/props\.useJobs/.test(r3CodeOnly)
-      && !/watchRows: jobsWatch/.test(r3CodeOnly)
-      && !/hooks: \{ jobs: jobsState \}/.test(r3CodeOnly)
-      && !/noJobsState/.test(r3CodeOnly)
-      && !/NO_ROWS_HOOK/.test(r3CodeOnly)
-      && !/jobsApi/.test(r3CodeOnly),
+    "v1-slim：client.js 不再碰 jobs（无 useJobs / watchRows / kill / input.dock 注册），turnTail 按钮照常注册",
+    !/ctx\.inject\(\["jobs"\]/.test(r3CodeOnly) &&
+      !/props\.useJobs/.test(r3CodeOnly) &&
+      !/watchRows/.test(r3CodeOnly) &&
+      !/input\.dock/.test(r3CodeOnly) &&
+      /ctx\.inject\(\["configForms", "remote", "remote\.commands"\]/.test(r3ClientSource) &&
+      /if \(!props\.sessionId\) return null;/.test(r3ClientSource),
     [
-      `props.useJobs=${/props\.useJobs/.test(r3CodeOnly)}`,
-      `watchRows: jobsWatch=${/watchRows: jobsWatch/.test(r3CodeOnly)}`,
-      `hooks.jobs=${/hooks: \{ jobs: jobsState \}/.test(r3CodeOnly)}`,
-      `noJobsState=${/noJobsState/.test(r3CodeOnly)}`,
-      `NO_ROWS_HOOK=${/NO_ROWS_HOOK/.test(r3CodeOnly)}`,
-      `jobsApi=${/jobsApi/.test(r3CodeOnly)}`,
+      `jobs inject=${/ctx\.inject\(\["jobs"\]/.test(r3CodeOnly)}`,
+      `useJobs=${/props\.useJobs/.test(r3CodeOnly)}`,
+      `watchRows=${/watchRows/.test(r3CodeOnly)}`,
+      `input.dock=${/input\.dock/.test(r3CodeOnly)}`,
+      `按钮守门=${/if \(!props\.sessionId\) return null;/.test(r3ClientSource)}`,
     ].join(" · "),
   );
 }
+
 
 /* v0.5.0 步骤 3：按需评审（按钮 + skill）的状态必须在 ocr_status 里可见；
    这个实例的宿主没有 skills 服务 → registered=false 且给出原因（真机核验时必须是 true）。 */
@@ -993,51 +964,39 @@ check(
   `onDemand=${status.onDemand} skill=${JSON.stringify(status.skill)}`,
 );
 
-/* ------------------------------------------------------------- 端到端：按需 / 自动 */
-
-/* v0.5.0 起出厂默认 auto=off（按需评审：回合尾部按钮 + skill）：写完文件的回合结束**不该**自动注入。
-   这条以前是「默认就会注入」，默认改了以后它变成第一道断言。 */
+/* v1-slim：自动评审整体删除 —— 插件不再挂 tools/result 与 agent/turn-stopping 两个钩子，
+   写完文件的回合结束不会自动注入任何东西；按需评审（按钮 / /ocr-review）仍照常工作。 */
+check(
+  "v1-slim：apply 之后没有 tools/result 与 agent/turn-stopping 监听（自动评审已删除）",
+  (listeners.get("tools/result") ?? []).length === 0 && (listeners.get("agent/turn-stopping") ?? []).length === 0,
+  `tools/result=${(listeners.get("tools/result") ?? []).length} turn-stopping=${(listeners.get("agent/turn-stopping") ?? []).length}`,
+);
 const autoAgent = makeAgent();
 emit("tools/result", { name: "edit", agent: autoAgent, callId: "c2", arguments: {} }, { isError: false });
 emit("agent/turn-stopping", { agent: autoAgent, turn: 7, signal: undefined });
-await new Promise((resolve) => setTimeout(resolve, 3000));
+await new Promise((resolve) => setTimeout(resolve, 200));
 check(
-  "默认按需（auto=off）：写文件后回合结束不自动注入评审",
+  "v1-slim：写文件后回合结束不自动注入评审（没有任何自动路径）",
   deliver.followed.length === 0 && deliver.injected.length === 0,
   `followup=${deliver.followed.length} inject=${deliver.injected.length}（期望都是 0）`,
 );
-
-/* 显式打开自动档（老行为）后照旧：另起一个 auto=adaptive 的实例，
-   证明四档自动模式仍然可用，只是不再默认替用户打开。 */
-mod.apply(makeCtx(), mkConfig({ autoReview: "adaptive", autoMaxPerSession: 3, autoMinIntervalMs: 0 }));
-emit("tools/result", { name: "edit", agent: autoAgent, callId: "c2b", arguments: {} }, { isError: false });
-emit("agent/turn-stopping", { agent: autoAgent, turn: 7, signal: undefined });
-const deadline = Date.now() + 120000;
-while (deliver.followed.length === 0 && deliver.injected.length === 0 && Date.now() < deadline) {
-  await new Promise((resolve) => setTimeout(resolve, 250));
-}
-const autoText = textOf(deliver.followed[0] ?? deliver.injected[0]);
-checkEither(
-  "自动档（显式 auto=adaptive）：写文件后回合结束自动注入评审结果",
-  autoText.includes("自动代码评审") && autoText.includes("OpenCodeReview") && /engine=(delegate|ocr)/.test(autoText),
-  /* 没装 ocr 时自动档照样要投递一条**说明白为什么没跑成**的结果（含安装指引），而不是静默。 */
-  autoText.includes("自动代码评审") && autoText.includes("无法定位 ocr 可执行文件") && autoText.includes("@alibaba-group/open-code-review"),
-  `followup=${deliver.followed.length} inject=${deliver.injected.length} 长度=${autoText.length}`,
+check(
+  "v1-slim：设置页 schema 不再有自动评审字段（auto* 与 progress 全删）",
+  (() => {
+    const dict = typeof schema === "function" ? schema({}).dict : null;
+    return !dict || (!Object.keys(dict).some((key) => key.startsWith("auto")) && !("progress" in dict));
+  })(),
+  typeof schema === "function" ? Object.keys(schema({}).dict).join(",") : "无 schema",
 );
-
-const before = deliver.followed.length + deliver.injected.length;
-emit("agent/turn-stopping", { agent: autoAgent, turn: 8, signal: undefined });
-await new Promise((resolve) => setTimeout(resolve, 1500));
-check("自动评审：同一改动签名不重复触发", deliver.followed.length + deliver.injected.length === before, `新增交付 ${deliver.followed.length + deliver.injected.length - before} 条`);
 
 /* ------------------------------------------------- 设置页：总开关（热更新） */
 
-const listenersBefore = (listeners.get("agent/turn-stopping") ?? []).length;
+const listenersBefore = (listeners.get("loader/volatile-update") ?? []).length;
 emit("loader/volatile-update", {});
 check(
-  "loader/volatile-update：设置页改动即时同步（开关未变则不重挂监听）",
-  (listeners.get("agent/turn-stopping") ?? []).length === listenersBefore,
-  `turn-stopping 监听=${(listeners.get("agent/turn-stopping") ?? []).length}`,
+  "loader/volatile-update：设置页改动即时同步按需评审接缝（开关未变则不重挂监听）",
+  listenersBefore >= 1 && (listeners.get("loader/volatile-update") ?? []).length === listenersBefore,
+  `volatile-update 监听=${(listeners.get("loader/volatile-update") ?? []).length}`,
 );
 
 mod.apply(makeCtx(), mkConfig({ enabled: false }));
@@ -1573,23 +1532,9 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
     "按钮没有代价副行，或档位分支/兜底文案缺失",
   );
 
-  /* 武装态：点过一次停止后，必须写出「再点一次会发生什么」（保留部分结论 / 没跑完的没有结论）。 */
-  check(
-    "批 2：进度卡的武装态会写出后果句（不是只有一个「再点一次停止」的按钮）",
-    pickerSource.includes('"data-ocr-stop-armed"') && /progress\.stopConsequence/.test(pickerSource),
-    "缺少武装态后果句",
-  );
-
   /* ------------------------------- v0.12.4：UX「必须改」里剩下的 M2/M3/M4/M7/M8/M9/M10 ------------------------------- */
   {
     const m8Source = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
-
-    /* M7：后果句必须把「用量不退」说清楚 —— 取消不等于不计费。 */
-    check(
-      "v0.12.4（M7）：停止武装态的后果句写明用量照常计费",
-      /"progress\.stopConsequence": "[^"]*用量[^"]*计费/.test(pickerSource),
-      "后果句没提用量",
-    );
 
     /* M8：取消路径与超时路径同一口径（同一句「不因…而退还」）。 */
     check(
@@ -1609,8 +1554,8 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
 
     /* M3：按钮失败文案必须有去处 —— 不许只显示「评审没能启动。」 */
     check(
-      "v0.12.4（M3）：按钮失败文案带去处（后台任务 / ocr_status），不是零信息的一句",
-      /"tail\.failed": "[^"]*ocr_status/.test(pickerSource) && /"tail\.failed": "[^"]*后台任务/.test(pickerSource),
+      "v0.12.4（M3）：按钮失败文案带去处（指向 ocr_status 看原因），不是零信息的一句",
+      /"tail\.failed": "[^"]*ocr_status/.test(pickerSource),
       "失败文案没有去处",
     );
 
@@ -1675,25 +1620,25 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
   }
 
   /* 批 2（UI 规范）：样式表自身的纪律 —— 键唯一、间距在 4px 刻度上、圆角与字号收敛。
-     覆盖 S / P / T 三张表（S 是设置页，P 是进度卡，T 是回合尾部按钮）。 */
+     覆盖 S / T 两张表（S 是设置页，T 是回合尾部按钮；进度卡随 jobs 一起删了）。 */
   {
     const blockOf = (head) => {
       const start = pickerSource.indexOf(head);
       const end = start >= 0 ? pickerSource.indexOf("\n    };", start) : -1;
       return start >= 0 && end > start ? pickerSource.slice(start, end) : "";
     };
-    const stylesAll = [blockOf("const S = {"), blockOf("const P = {"), blockOf("const T = {")].join("\n");
+    const stylesAll = [blockOf("const S = {"), blockOf("const T = {")].join("\n");
     check(
-      "批 2：三张样式表都取到了（守卫本身不能静默变成空跑）",
-      stylesAll.includes("menu:") && stylesAll.includes("btnBusy:") && stylesAll.includes("stop:"),
+      "批 2：两张样式表都取到了（守卫本身不能静默变成空跑）",
+      stylesAll.includes("menu:") && stylesAll.includes("btnBusy:") && stylesAll.includes("cost:"),
       `长度=${stylesAll.length}`,
     );
 
-    /* 键唯一必须**逐表**看：S/P/T 三张表里有同名键（wrap/row/btn…）是正常的，
+    /* 键唯一必须**逐表**看：S/T 两张表里有同名键（wrap/row/btn…）是正常的，
        只有在同一张表里写两遍才会静默覆盖（combo 事故就是这样来的）。 */
     const dup = [];
     let keyCount = 0;
-    for (const head of ["const S = {", "const P = {", "const T = {"]) {
+    for (const head of ["const S = {", "const T = {"]) {
       const keys = [...blockOf(head).matchAll(/^\s{6}([A-Za-z][A-Za-z0-9]*)\s*:/gm)].map((m) => m[1]);
       keyCount += keys.length;
       for (const k of new Set(keys.filter((k, i) => keys.indexOf(k) !== i))) dup.push(`${head.split(" ")[1]}.${k}`);
@@ -1734,14 +1679,12 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
     );
 
     check(
-      "批 2：可访问性 —— 菜单/输入框有 listbox+combobox 角色，进度卡是 role=status 且耗时 aria-hidden",
+      "批 2：可访问性 —— 菜单/输入框有 listbox+combobox 角色与 aria-activedescendant",
       /role:\s*"listbox"/.test(pickerSource)
         && /role:\s*"combobox"/.test(pickerSource)
         && /role:\s*"option"/.test(pickerSource)
-        && /"aria-activedescendant"/.test(pickerSource)
-        && /role:\s*"status",\s*"aria-live":\s*"polite"/.test(pickerSource)
-        && /style:\s*P\.time,\s*"aria-hidden":\s*"true"/.test(pickerSource),
-      "菜单/输入框/进度卡的角色或 aria 属性缺失",
+        && /"aria-activedescendant"/.test(pickerSource),
+      "菜单/输入框的角色或 aria 属性缺失",
     );
 
     check(
@@ -1957,7 +1900,6 @@ check(
 );
 
 /* 步骤 2（v0.5.0）：问题逐条列到「文件 → 行 [severity] 问题」，摘要不再出现「0 个文件却有 N 条问题」。 */
-const listJobs = makeJobsRegistry();
 const listCase = cannedHarness(
   [
     {
@@ -1975,7 +1917,6 @@ const listCase = cannedHarness(
     },
   ],
   {},
-  { jobs: listJobs },
 );
 const listRun = await listCase.call({ engine: "ocr" });
 check(
@@ -1994,7 +1935,6 @@ check(
     listText.includes("高 1 · 中 1 · 低 1 · 未分级 0"),
   listText.split("\n").slice(-5).join(" / "),
 );
-const listJobText = (listJobs.records.get("ocr-review-1")?.output ?? []).map((o) => o.text).join("");
 check(
   "批 2：结论的附录行固定存在（有材料就列出材料，没有就明写「无附加输出」）",
   review.valueToText({ ok: true, engine: "delegate", scope: "workspace", exitCode: 0, durationMs: 10 }, {}).includes("附录：无附加输出") &&
@@ -2098,12 +2038,11 @@ check(
   ["critical", "moderate", "nit", "unheard-of", ""].map((s) => `${JSON.stringify(s)}→${review.severityLabel(s).label}`).join(" · "),
 );
 check(
-  "job 行也逐条列出问题（文件 → 行 [severity] 问题）",
-  listJobText.includes("lib/a.js") &&
-    listJobText.includes("- 12-14 [高] 空指针风险（null-check）") &&
-    listJobText.includes("lib/b.js") &&
-    listJobText.includes("2 个文件 · 3 条问题"),
-  listJobText.split("\n").slice(-6).join(" / "),
+  "issuesToLines（工具结果内联）：同样逐条列出问题（文件 → 行 [severity] 问题）",
+  review.issuesToLines(listRun.issues, { max: 12 }).lines.includes("lib/a.js") &&
+    review.issuesToLines(listRun.issues, { max: 12 }).lines.includes("- 12-14 [高] 空指针风险（null-check）") &&
+    review.issuesToLines(listRun.issues, { max: 12 }).lines.includes("lib/b.js"),
+  review.issuesToLines(listRun.issues, { max: 12 }).lines.slice(-4).join(" / "),
 );
 const capped = review.issuesToLines(
   [
@@ -2241,8 +2180,7 @@ check(
     review.extractSessionId({ session_id: "abc" }),
   );
 
-  /* 开跑那一行：预估前置（第一次 delegate preview 拿规模，第二次才是 review），且 note 里带会话 id。 */
-  const phaseJobs = makeJobsRegistry();
+  /* 开跑前告警：预估下限 > 超时 → 结果 notes 里留一条（v1-slim 起没有 job 进度行可看了）。 */
   const phaseCase = cannedHarness(
     [
       { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "lib/a.js", insertions: 3, deletions: 1 }], excluded: [] }) },
@@ -2252,18 +2190,15 @@ check(
       },
     ],
     { timeoutMinutes: 1 },
-    { jobs: phaseJobs },
   );
   const phaseRun = await phaseCase.call({ engine: "ocr" });
   const phaseNotes = (phaseRun.notes ?? []).join("\n");
-  const phases = (phaseJobs.starts[0]?.progressLines ?? []).concat((phaseJobs.starts[0]?.output ?? []).map((row) => row.text)).join("\n");
   check(
-    "v0.11.0：开跑那一行先给规模（预估下限 3 分钟 > 超时 1 分钟 → 开跑前告警 + 结果里也留一条）",
+    "v0.11.0：开跑前告警留在结果 notes 里（超时 1 分钟 < 预估下限 3 分钟 → 告警 + 缩小范围建议）",
     phaseRun.ok === true &&
-      /本次约 1 个文件 → 按真机历史约 3~10 分钟/.test(phases) &&
       /超时 1 分钟小于预估下限 3 分钟/.test(phaseNotes) &&
       /缩小范围/.test(phaseNotes),
-    `phases=${phases.replace(/\n/g, " | ").slice(0, 120)} notes=${phaseNotes.replace(/\n/g, " ").slice(0, 100)}`,
+    `notes=${phaseNotes.replace(/\n/g, " ").slice(0, 100)}`,
   );
   check(
     "v0.11.0：结果带 ocr 会话 id —— 摘要在前，note 给出 session show/export/viewer 三步",
@@ -2575,230 +2510,12 @@ check(
   `${disposeValue.code} | ${disposeValue.summary}`,
 );
 
-/* ----------------------------------------------- 评审进度可见（可选 jobs 服务） */
-
-/**
- * jobs 服务替身：契约照 @deepseek-ai/dsh-jobs-local —— start 同步跑 spec.run(handle) 并返回
- * `<kind>-N`，handle.append/updateProgress 写进环，hooks.done 落地即结算，hooks.cancel 由 kill 触发。
- * 进度是旁路能力，这一节只断言「看得见、停得掉」，不影响上面任何评审结果。
- */
-function makeJobsRegistry() {
-  const records = new Map();
-  const starts = [];
-  const waits = [];
-  const kills = [];
-  return {
-    records,
-    starts,
-    waits,
-    kills,
-    start(spec) {
-      const id = `${spec.kind}-${starts.length + 1}`;
-      const record = {
-        id,
-        kind: spec.kind,
-        label: spec.label,
-        owner: spec.owner,
-        progress: "",
-        progressLines: [],
-        output: [],
-        status: "running",
-        detail: undefined,
-        awaited: false,
-      };
-      records.set(id, record);
-      starts.push(record);
-      const handle = {
-        id,
-        append: (text, opts = {}) => record.output.push({ text, channel: opts.channel ?? "stdout" }),
-        updateProgress: (line) => {
-          record.progress = line;
-          record.progressLines.push(line);
-        },
-      };
-      const hooks = spec.run(handle);
-      record.hooks = hooks;
-      hooks.done.then(
-        (outcome) => {
-          record.status = outcome?.status ?? "completed";
-          record.detail = outcome?.detail;
-          record.finishedAt = Date.now();
-        },
-        () => {
-          record.status = "failed";
-        },
-      );
-      return id;
-    },
-    wait(id, timeoutMs, owner) {
-      const record = records.get(id);
-      waits.push({ id, timeoutMs, owner });
-      return new Promise((resolve) => {
-        const poll = setInterval(() => {
-          if (!record || record.status !== "running") {
-            clearInterval(poll);
-            record.awaited = true;
-            resolve(records.get(id));
-          }
-        }, 5);
-      });
-    },
-    kill(id, caller, reason) {
-      kills.push({ id, caller, reason });
-      records.get(id)?.hooks?.cancel(reason);
-      return { ok: true };
-    },
-  };
-}
-
-/** 等一次 job 结算的微任务链走完（status/detail 是 hooks.done.then 里落的）。 */
-const settleJobs = () => new Promise((resolve) => setImmediate(resolve));
-
 /** 轮询等一个条件成立（等 spawn 真的发生之类）。 */
 async function until(predicate, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
   return predicate();
 }
-
-/* 没装 ocr 时（CI）：真实工具调用在「定位 ocr」那一步就返回了，**根本不会开 job** —— 这是有意的
-   fail-closed（绝不显示一条假装在评审的进度行）。所以这里按环境换期望值：
-   有 ocr 时前四条 job 就是那四次真实调用；没有时它们只会来自后面的罐头场景。 */
-if (HAS_OCR) await until(() => progressRegistry.starts.length >= 4);
-else await until(() => progressRegistry.starts.length >= 1, 500);
-await settleJobs();
-
-const repoName = REPO.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
-/* 前四条 = 工具链路那四次调用（参数错误那条在开 job 之前就返回了，不该占位）。 */
-const allJobs = () => progressRegistry.starts;
-const toolJobs = HAS_OCR ? allJobs().slice(0, 4) : [];
-checkEither(
-  "进度：真实工具链路每次评审登记一条 job（preview/delegate/auto/非 git 仓库 = 4 条，参数错误不登记）",
-  toolJobs.length === 4 && toolJobs.every((job) => job.id.startsWith("ocr-review-")),
-  /* 没 ocr 时至少守住「登记的 job 都是本插件的」这条不变量。 */
-  allJobs().length >= 1 && allJobs().every((job) => job.id.startsWith("ocr-review-")),
-  allJobs().map((job) => job.id).join(","),
-);
-checkEither(
-  "进度：kind 统一是 ocr-review（Jobs 面板按它显示徽章、会话内进度行按它筛选）",
-  toolJobs.length === 4 && toolJobs.every((job) => job.kind === "ocr-review"),
-  allJobs().length >= 1 && allJobs().every((job) => job.kind === "ocr-review"),
-  [...new Set(allJobs().map((job) => job.kind))].join(","),
-);
-checkEither(
-  "进度：标题 = 来源 · 范围 · 仓库名（非 git 那条指向它自己的临时目录）",
-  toolJobs[0]?.label === `评审 · 工作区改动 · ${repoName}` && toolJobs[3]?.label?.includes("ocr-nongit-"),
-  allJobs().every((job) => String(job.label).startsWith("评审 · ")),
-  allJobs().map((job) => job.label).join(" | "),
-);
-checkEither(
-  "进度：结算状态 3 成功 1 失败，失败明细带结果码",
-  toolJobs.filter((job) => job.status === "completed").length === 3 &&
-    toolJobs[3]?.status === "failed" &&
-    String(toolJobs[3]?.detail).startsWith("OCR_NOT_GIT_REPO"),
-  /* 没 ocr 时的关键不变量：没有任何 job 停在 running（否则面板/进度行会永远转圈）。 */
-  allJobs().every((job) => job.status !== "running"),
-  allJobs().map((job) => `${job.id}=${job.status}:${job.detail}`).join(" | "),
-);
-checkEither(
-  "进度：成功行的明细带耗时（评审结束后面板行仍可读）",
-  /（\d+(\.\d+)?(s|m\d+s)）$/.test(String(toolJobs[0]?.detail)),
-  allJobs().some((job) => job.status === "completed" && /（\d+(\.\d+)?(s|m\d+s)）$/.test(String(job.detail))),
-  String(toolJobs[0]?.detail ?? allJobs()[0]?.detail),
-);
-checkEither(
-  "进度：过程行覆盖「跑 ocr」与「delegate」两种引擎",
-  toolJobs.some((job) => job.progressLines.some((line) => line.includes("运行 ocr review（超时"))) &&
-    toolJobs.some((job) => job.progressLines.some((line) => line.startsWith("delegate："))),
-  /* 没 ocr 时退回可验的那一半：进度行里必须写清「要跑什么命令」。 */
-  allJobs().some((job) => job.progressLines.some((line) => line.includes("运行 ocr review（超时"))),
-  allJobs().map((job) => job.progress).join(" / "),
-);
-checkEither(
-  "进度：输出环里有带时间戳的日志行 + 结算行（面板可展开的实时流）",
-  toolJobs[0]?.output.some((chunk) => chunk.channel === "log" && /^\[\d\d:\d\d:\d\d\]/.test(chunk.text)) &&
-    toolJobs[0]?.output.some((chunk) => chunk.text.includes("完成：")),
-  allJobs().some((job) => job.output.some((chunk) => chunk.channel === "log" && /^\[\d\d:\d\d:\d\d\]/.test(chunk.text))),
-  (toolJobs[0]?.output ?? allJobs()[0]?.output ?? []).slice(-2).map((chunk) => `[${chunk.channel}]${chunk.text}`).join(""),
-);
-/* v0.3.6：Jobs 行的截止时间改成读 plan.timeoutMs（= 分钟 + 60s 宽限，lib/review.js:118），
-   不再读 cfg 的裸分钟数 —— 这里守住「等待者 = plan 截止 + 60s」这条链。 */
-const hrDefaultPlan = review.normalizeTarget({ scope: "workspace" }, {}, "C:/tmp");
-check(
-  "进度：每条 job 都挂了等待者；等待者 = plan 截止（分钟 + 60s 宽限）+ 60s（否则结算事件会往会话灌唤醒消息）",
-  progressRegistry.waits.length === progressRegistry.starts.length &&
-    hrDefaultPlan.timeoutMs === (cfgMod.DEFAULTS.timeoutMinutes + 1) * 60000 &&
-    progressRegistry.waits.every((waiter) => waiter.timeoutMs === hrDefaultPlan.timeoutMs + 60000),
-  JSON.stringify([...new Set(progressRegistry.waits.map((waiter) => waiter.timeoutMs))]),
-);
-check(
-  "进度：owner 透传（这里的 agent 没有 id，所以不传 owner）",
-  progressRegistry.starts.every((job) => job.owner === undefined),
-  JSON.stringify([...new Set(progressRegistry.starts.map((job) => job.owner))]),
-);
-/* owner 语义（宿主 jobs 契约）：owner 就是「按会话 id 栅栏」的归属键 ——
-   jobs.start 会拒绝没有对应 job controller 的 owner，list/get/kill/wait 都按它过滤，
-   「有主」的记录一直留到 owner dispose。所以插件必须把调用方 agent 的 id 原样传下去。 */
-const ownerRegistry = makeJobsRegistry();
-const ownerCase = cannedHarness(
-  [{ exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 0 }], issues: [] }) }],
-  {},
-  { jobs: ownerRegistry },
-);
-const ownerAgent = Object.assign(makeAgent(), { id: "session-owner-1" });
-const ownerRun = await tools.get("ocr_review").execute(
-  { engine: "ocr" },
-  { name: "ocr_review", callId: "owner", arguments: {}, agent: ownerAgent, signal: undefined },
-);
-await settleJobs();
-check(
-  "进度：agent 有 id 时 owner 一路透传到 start 与 wait（归属栅栏；缺 owner 会变成所有人可见的无主 job）",
-  ownerRun.ok === true &&
-    ownerRegistry.starts.length === 1 &&
-    ownerRegistry.starts[0].owner === "session-owner-1" &&
-    ownerRegistry.waits.length === 1 &&
-    ownerRegistry.waits[0].owner === "session-owner-1",
-  `starts=${JSON.stringify(ownerRegistry.starts.map((job) => job.owner))} waits=${JSON.stringify(ownerRegistry.waits.map((waiter) => waiter.owner))}`,
-);
-const autoJobs = allJobs().filter((job) => String(job.label).startsWith("自动评审 · "));
-checkEither(
-  "进度：自动评审那条也登记了 job 且已结算（label 用「自动评审」区分）",
-  autoJobs.length >= 1 && autoJobs.every((job) => job.status === "completed"),
-  /* 没 ocr 时这条自动评审在定位就失败（fail-closed 不开假 job）—— 守住「不留 running」。 */
-  autoJobs.every((job) => job.status !== "running"),
-  autoJobs.map((job) => `${job.label}=${job.status}`).join(" | ") || "(无)",
-);
-
-/* 停止链路：面板「停止」→ job cancel → 评审自己的 AbortController → 终结子进程 → 结算成 killed。 */
-const killRegistry = makeJobsRegistry();
-const killCase = cannedHarness(
-  [
-    { exitCode: 0, stdout: JSON.stringify({ files: [{ path: "a.js", insertions: 1, deletions: 0 }] }) },
-    { exitCode: 0, stdout: JSON.stringify({ files: [], issues: [] }), manual: true },
-  ],
-  {},
-  { jobs: killRegistry },
-);
-check("进度：cannedHarness 能把 jobs 服务带进 makeCtx（kill 场景的前提）", killCase.ctx.jobs === killRegistry);
-const killRun = killCase.call({ engine: "ocr" });
-await until(() => killRegistry.starts.length === 1 && killCase.canned.calls.some((call) => call.spec.argv.includes("review")));
-const stopping = killRegistry.starts[0];
-check("进度：评审一开始就登记（面板/进度行立刻看得见，无需等结果）", Boolean(stopping) && stopping.status === "running", `${stopping?.id} ${stopping?.progress}`);
-const killed = killRegistry.kill(stopping.id, {}, "用户停止");
-const killedValue = await killRun;
-await settleJobs();
-check(
-  "停止：kill 记录带原因，job 结算成 killed 且明细以停止原因为准（不显示成「评审完成」）",
-  killed.ok === true && killRegistry.kills[0]?.reason === "用户停止" &&
-    stopping.status === "killed" && String(stopping.detail).startsWith("用户停止") && String(stopping.detail).includes("OCR_ABORTED"),
-  `${stopping.status} | ${stopping.detail} | kills=${JSON.stringify(killRegistry.kills)}`,
-);
-const killReview = killCase.canned.calls.find((call) => call.spec.argv.includes("review"));
-check(
-  "停止：子进程被终结，结果报 OCR_ABORTED（不会当成功结果投递）",
-  killReview?.terminated === true && killedValue.ok === false && killedValue.code === "OCR_ABORTED",
-  `${killedValue.code} terminated=${killReview?.terminated}`,
-);
 
 /* P1：maxTimeoutMinutes 为负会让插件侧硬超时整条消失，还把 `--timeout -5` 交给 ocr。
    （走不到 apply 的 schema 校验——手写 config.json 是插件自己读的，这里直接测解析函数。） */
@@ -2811,33 +2528,25 @@ check(
   `timeoutMinutes=${hrNegPlan.timeoutMinutes} timeoutMs=${hrNegPlan.timeoutMs} argv=${hrNegArgv}`,
 );
 
-/* P2：手写 config 里的 "false" / false / -1 这类写法过去会被当成「启用 / 不节流」。 */
-const hrCfgWeird = cfgMod.loadConfig({ enabled: "false", auto: false, autoMinIntervalMs: -1, autoMaxPerSession: "2" });
+/* P2：手写 config 里的 "false" / false 这类写法过去会被当成「启用」。 */
+const hrCfgWeird = cfgMod.loadConfig({ enabled: "false", timeoutMinutes: "9" });
 check(
-  "配置（P2 回归）：字符串/布尔/负数写法被归一（enabled:'false' 不再当启用，'2' 认成 2，-1 回落默认）",
-  hrCfgWeird.enabled === false &&
-    hrCfgWeird.auto === "off" &&
-    hrCfgWeird.autoMinIntervalMs === cfgMod.DEFAULTS.autoMinIntervalMs &&
-    hrCfgWeird.autoMaxPerSession === 2,
-  JSON.stringify({
-    enabled: hrCfgWeird.enabled,
-    auto: hrCfgWeird.auto,
-    autoMinIntervalMs: hrCfgWeird.autoMinIntervalMs,
-    autoMaxPerSession: hrCfgWeird.autoMaxPerSession,
-  }),
+  "配置（P2 回归）：字符串/布尔写法被归一（enabled:'false' 不再当启用，'9' 认成 9）",
+  hrCfgWeird.enabled === false && hrCfgWeird.timeoutMinutes === 9,
+  JSON.stringify({ enabled: hrCfgWeird.enabled, timeoutMinutes: hrCfgWeird.timeoutMinutes }),
 );
-const hrCfgTrue = cfgMod.loadConfig({ enabled: "true", auto: "OFF" });
+const hrCfgTrue = cfgMod.loadConfig({ enabled: "true" });
 check(
-  "配置（P2 回归）：'true' / 'OFF' 这类写法认得出来",
-  hrCfgTrue.enabled === true && hrCfgTrue.auto === "off",
-  JSON.stringify({ enabled: hrCfgTrue.enabled, auto: hrCfgTrue.auto }),
+  "配置（P2 回归）：'true' 这类写法认得出来",
+  hrCfgTrue.enabled === true,
+  JSON.stringify({ enabled: hrCfgTrue.enabled }),
 );
 
-/* v0.5.0 步骤 3：默认改成「按需」—— auto 出厂 off，onDemand 出厂 true（回合尾部按钮 + runtime skill）。 */
+/* v0.5.0 步骤 3：默认按需评审（回合尾部按钮 + runtime skill）。 */
 check(
-  "配置（v0.5.0 步骤 3）：出厂 auto=off、onDemand=true",
-  cfgMod.DEFAULTS.auto === "off" && cfgMod.DEFAULTS.onDemand === true,
-  `auto=${cfgMod.DEFAULTS.auto} onDemand=${cfgMod.DEFAULTS.onDemand}`,
+  "配置（v0.5.0 步骤 3）：出厂 onDemand=true",
+  cfgMod.DEFAULTS.onDemand === true,
+  `onDemand=${cfgMod.DEFAULTS.onDemand}`,
 );
 check(
   "配置（v0.5.0 步骤 3）：onDemand 的 'false' / false 都归一成 false，缺省 true",
@@ -2852,18 +2561,15 @@ check(
 );
 if (HAS_SCHEMA) {
   check(
-    "配置（v0.5.0 步骤 3）：设置页 schema 的 auto / onDemand 默认值引用 DEFAULTS（不写死）",
-    schema?.dict?.autoReview?.meta?.default === cfgMod.DEFAULTS.auto && schema?.dict?.onDemand?.meta?.default === cfgMod.DEFAULTS.onDemand,
-    JSON.stringify({ autoReview: schema?.dict?.autoReview?.meta?.default, onDemand: schema?.dict?.onDemand?.meta?.default }),
+    "配置（v0.5.0 步骤 3）：设置页 schema 的 onDemand 默认值引用 DEFAULTS（不写死）",
+    schema?.dict?.onDemand?.meta?.default === cfgMod.DEFAULTS.onDemand,
+    JSON.stringify({ onDemand: schema?.dict?.onDemand?.meta?.default }),
   );
 } else {
   check(
-    "配置（v0.5.0 步骤 3）：没有 schema 时这两个默认值仍由 DEFAULTS 单点决定（CI 路径：auto=off / onDemand=true）",
-    cfgMod.DEFAULTS.auto === "off" &&
-      cfgMod.DEFAULTS.onDemand === true &&
-      cfgMod.loadConfig({}).auto === cfgMod.DEFAULTS.auto &&
-      cfgMod.loadConfig({}).onDemand === cfgMod.DEFAULTS.onDemand,
-    JSON.stringify({ auto: cfgMod.loadConfig({}).auto, onDemand: cfgMod.loadConfig({}).onDemand }),
+    "配置（v0.5.0 步骤 3）：没有 schema 时 onDemand 默认值仍由 DEFAULTS 单点决定（CI 路径：onDemand=true）",
+    cfgMod.DEFAULTS.onDemand === true && cfgMod.loadConfig({}).onDemand === cfgMod.DEFAULTS.onDemand,
+    JSON.stringify({ onDemand: cfgMod.loadConfig({}).onDemand }),
   );
 }
 
@@ -2873,11 +2579,6 @@ if (HAS_SCHEMA) {
   check(
     "配置（v0.3.5 回归）：设置页默认值直接引用 DEFAULTS（不再两处硬编码），timeoutMinutes 上界也是",
     schemaDefault("timeoutMinutes") === cfgMod.DEFAULTS.timeoutMinutes &&
-      schemaDefault("autoMaxPerSession") === cfgMod.DEFAULTS.autoMaxPerSession &&
-      schemaDefault("autoMinReviewableFiles") === cfgMod.DEFAULTS.autoMinReviewableFiles &&
-      schemaDefault("autoMinIntervalMs") === cfgMod.DEFAULTS.autoMinIntervalMs &&
-      schemaDefault("autoSkipSubagents") === cfgMod.DEFAULTS.autoSkipSubagents &&
-      schemaDefault("autoIncludeDiff") === cfgMod.DEFAULTS.autoIncludeDiff &&
       schema?.dict?.timeoutMinutes?.meta?.max === cfgMod.DEFAULTS.maxTimeoutMinutes,
     JSON.stringify({
       timeoutMinutes: schemaDefault("timeoutMinutes"),
@@ -2932,16 +2633,8 @@ if (HAS_SCHEMA) {
     ["enabled", cfgMod.DEFAULTS.enabled],
     ["engine", cfgMod.DEFAULTS.engine],
     ["audience", cfgMod.DEFAULTS.audience],
-    ["autoReview", cfgMod.DEFAULTS.auto],
     ["onDemand", cfgMod.DEFAULTS.onDemand],
-    ["autoScope", cfgMod.DEFAULTS.autoScope],
-    ["autoMaxPerSession", cfgMod.DEFAULTS.autoMaxPerSession],
-    ["autoMinReviewableFiles", cfgMod.DEFAULTS.autoMinReviewableFiles],
-    ["autoMinIntervalMs", cfgMod.DEFAULTS.autoMinIntervalMs],
-    ["autoSkipSubagents", cfgMod.DEFAULTS.autoSkipSubagents],
-    ["autoIncludeDiff", cfgMod.DEFAULTS.autoIncludeDiff],
     ["timeoutMinutes", cfgMod.DEFAULTS.timeoutMinutes],
-    ["progress", cfgMod.DEFAULTS.progress],
     ["verbose", cfgMod.DEFAULTS.verbose],
   ];
   const drifted = pairs.filter(([name, want]) => schemaDefault(name) !== want).map(([name]) => `${name}=${schemaDefault(name)}≠${cfgMod.DEFAULTS[name] ?? "?"}`);
@@ -2955,22 +2648,10 @@ if (HAS_SCHEMA) {
     "配置（v0.5.9）：没有 schema 时默认值仍由 DEFAULTS 单点决定（CI 路径）",
     cfgMod.loadConfig({}).enabled === cfgMod.DEFAULTS.enabled &&
       cfgMod.loadConfig({}).engine === cfgMod.DEFAULTS.engine &&
-      cfgMod.loadConfig({}).progress === cfgMod.DEFAULTS.progress &&
       cfgMod.loadConfig({}).verbose === cfgMod.DEFAULTS.verbose,
-    JSON.stringify({ engine: cfgMod.loadConfig({}).engine, progress: cfgMod.loadConfig({}).progress }),
+    JSON.stringify({ engine: cfgMod.loadConfig({}).engine, verbose: cfgMod.loadConfig({}).verbose }),
   );
 }
-
-const autoEngineCases = {
-  empty: cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, autoEngine: "" }).autoEngine,
-  padded: cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, autoEngine: " Delegate " }).autoEngine,
-  bogus: cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, autoEngine: "nope" }).autoEngine,
-};
-check(
-  "配置（v0.5.9）：autoEngine 与 engine 同样收敛（去空白小写；非法值回落空串 = 跟随 engine，不悄悄改成别的引擎）",
-  autoEngineCases.empty === "" && autoEngineCases.padded === "delegate" && autoEngineCases.bogus === "",
-  JSON.stringify(autoEngineCases),
-);
 
 const bigCfg = cfgMod.loadConfig({ includeDiffMaxBytes: 120000000000, maxIssuesInText: 999999 });
 const negCfg = cfgMod.loadConfig({ includeDiffMaxBytes: -1, maxIssuesInText: -5 });
@@ -3011,11 +2692,11 @@ check(
 check(
   "配置（v0.3.6 回归）：数字字符串（手写 config.json 常见）不再静默回落默认，空串也不当 0",
   cfgMod.loadConfig({ timeoutMinutes: "20" }).timeoutMinutes === 20 &&
-    cfgMod.loadConfig({ autoMinIntervalMs: "250" }).autoMinIntervalMs === 250 &&
+    cfgMod.loadConfig({ maxIssuesInText: "25" }).maxIssuesInText === 25 &&
     cfgMod.loadConfig({ timeoutMinutes: "" }).timeoutMinutes === cfgMod.DEFAULTS.timeoutMinutes,
   JSON.stringify({
     str: cfgMod.loadConfig({ timeoutMinutes: "20" }).timeoutMinutes,
-    interval: cfgMod.loadConfig({ autoMinIntervalMs: "250" }).autoMinIntervalMs,
+    maxIssues: cfgMod.loadConfig({ maxIssuesInText: "25" }).maxIssuesInText,
     empty: cfgMod.loadConfig({ timeoutMinutes: "" }).timeoutMinutes,
   }),
 );
@@ -3033,11 +2714,11 @@ check(
 const hrSameSrcCfg = { timeoutMinutes: 999, maxTimeoutMinutes: 120 };
 const hrSameSrcPlan = review.normalizeTarget({ scope: "workspace", timeoutMinutes: 999 }, hrSameSrcCfg, "C:/tmp");
 check(
-  "配置（v0.3.6 回归）：Jobs 行的截止时间与 run 同源（plan.timeoutMs = 分钟 + 60s 宽限，job 不早于 run 触发）",
+  "配置（v0.3.6 回归）：run 的硬超时与 ocr --timeout 同源（plan.timeoutMs = 分钟 + 60s 宽限）",
   hrSameSrcPlan.timeoutMinutes === 120 &&
     hrSameSrcPlan.timeoutMs === 121 * 60000 &&
     cfgMod.timeoutMsOf(hrSameSrcCfg, hrSameSrcPlan.timeoutMinutes) === hrSameSrcPlan.timeoutMs - 60000,
-  `plan.timeoutMs=${hrSameSrcPlan.timeoutMs} jobBase=${cfgMod.timeoutMsOf(hrSameSrcCfg, hrSameSrcPlan.timeoutMinutes)}`,
+  `plan.timeoutMs=${hrSameSrcPlan.timeoutMs} base=${cfgMod.timeoutMsOf(hrSameSrcCfg, hrSameSrcPlan.timeoutMinutes)}`,
 );
 check(
   "可见性（v0.3.6 回归）：endpoint 模式仍用出厂默认地址时点名提醒（换了供应商忘改地址 → 凭据发到旧地址）",
@@ -3068,7 +2749,6 @@ const exampleCfg = JSON.parse(readFileSync(new URL("../config.example.json", imp
 const exampleDefaultPairs = [
   ["enabled", cfgMod.DEFAULTS.enabled],
   ["engine", cfgMod.DEFAULTS.engine],
-  ["auto", cfgMod.DEFAULTS.auto],
   ["onDemand", cfgMod.DEFAULTS.onDemand],
   ["audience", cfgMod.DEFAULTS.audience],
   ["timeoutMinutes", cfgMod.DEFAULTS.timeoutMinutes],
@@ -3261,21 +2941,24 @@ check(
   const clamped = cfgMod.normalizeConfig({
     engine: "OCR",
     audience: "nope",
-    autoMaxPerSession: 99999,
-    autoMinReviewableFiles: 0,
-    autoMinIntervalMs: -1,
     timeoutMinutes: 0,
     maxTimeoutMinutes: 99999,
+    maxIssuesInText: 999999,
+    includeDiffMaxBytes: -1,
     llm: { mode: "Endpoint", protocol: "Anthropic " },
   });
   check(
     "v0.5.0 步骤 5：越界值 — 大于上界夹住，小于下界回落到默认（负数不是「要更小」而是写错）",
-    clamped.autoMaxPerSession === 50 &&
-      clamped.autoMinReviewableFiles === 1 &&
-      clamped.autoMinIntervalMs === 60000 &&
+    clamped.maxIssuesInText === 2000 &&
+      clamped.includeDiffMaxBytes === cfgMod.DEFAULTS.includeDiffMaxBytes &&
       clamped.timeoutMinutes === 15 &&
       clamped.maxTimeoutMinutes === 1440,
-    JSON.stringify({ autoMaxPerSession: clamped.autoMaxPerSession, autoMinReviewableFiles: clamped.autoMinReviewableFiles, autoMinIntervalMs: clamped.autoMinIntervalMs, timeoutMinutes: clamped.timeoutMinutes, maxTimeoutMinutes: clamped.maxTimeoutMinutes }),
+    JSON.stringify({
+      maxIssuesInText: clamped.maxIssuesInText,
+      includeDiffMaxBytes: clamped.includeDiffMaxBytes,
+      timeoutMinutes: clamped.timeoutMinutes,
+      maxTimeoutMinutes: clamped.maxTimeoutMinutes,
+    }),
   );
   check(
     "v0.5.0 步骤 5：枚举非法值回落默认、合法值去空白小写（engine/audience/llm.mode/llm.protocol）",
@@ -3377,21 +3060,19 @@ check(
   );
 }
 
-/* v0.5.8：文件层（config.json）没有事件通知，而 auto / onDemand 的启停是
-   「装/卸监听器」级别的决定 —— 真机上改完 config.json 常常要重启才生效。修法：指纹钩子
-   只要插件没被关掉就挂着 + 借本来就会流的事件对配置指纹、需要时才重新 sync。 */
+/* v1-slim：设置页 / 文件层改动靠 loader/volatile-update 一条钩子同步（自动评审删掉后
+   不再需要配置指纹钩子，也不许残留 tools/result 与 agent/turn-stopping 监听）。 */
 {
   const syncListeners = new Map();
   const syncCase = makeCtx({ listeners: syncListeners });
-  /* autoReview 是设置页 schema 的字段名（schemaOverrides 才把它映射成 auto）：
-     有 schema 时只写 auto 会被丢掉，两个都写上，两种环境下的前提才是真的（OCR 自审指出）。 */
-  mod.apply(syncCase, mkConfig({ auto: "off", autoReview: "off" }));
+  mod.apply(syncCase, mkConfig({ onDemand: true }));
+  const volatileHooks = (syncListeners.get("loader/volatile-update") ?? []).length;
   const resultHooks = (syncListeners.get("tools/result") ?? []).length;
   const stoppingHooks = (syncListeners.get("agent/turn-stopping") ?? []).length;
   check(
-    "v0.5.8：auto=off 时也挂了配置指纹钩子（tools/result 与 agent/turn-stopping）——文件层改动靠它们被发现",
-    resultHooks >= 1 && stoppingHooks >= 1,
-    `tools/result=${resultHooks} agent/turn-stopping=${stoppingHooks}`,
+    "v1-slim：apply 只挂 loader/volatile-update 一条钩子（自动评审的 tools/result 与 agent/turn-stopping 不再挂）",
+    volatileHooks >= 1 && resultHooks === 0 && stoppingHooks === 0,
+    `volatile=${volatileHooks} tools/result=${resultHooks} agent/turn-stopping=${stoppingHooks}`,
   );
 
   const stampA = cfgMod.loadConfig({}).__configStamp;
@@ -3401,8 +3082,8 @@ check(
     typeof stampA === "string" && stampA.length > 0 && stampA.includes(String(cfgMod.loadConfig({}).__configPath)) && stampA === stampB,
     `${String(stampA).slice(0, 90)} / 相等=${stampA === stampB}`,
   );
-  /* 轻量指纹（只 stat）必须与完整读取的指纹逐字相等，否则 syncAutoReviewer 的去重会永远失效 ——
-     这条断言就是防两处实现漂移的（OCR 自审要求「别只断钩子挂上了，要断真的会重新同步」）。 */
+  /* 轻量指纹（只 stat）必须与完整读取的指纹逐字相等，否则「配置文件变没变」的判定会永远失效 ——
+     这条断言就是防两处实现漂移的。 */
   const cheapStamp = cfgMod.configFileStamp();
   check(
     "v0.5.8：configFileStamp()（只 stat 的轻量指纹）与 loadConfig().__configStamp 完全一致",
@@ -3495,21 +3176,17 @@ check(
     `llm 未变=${JSON.stringify(cfgMod.DEFAULTS.llm) === llmBefore} 新对象=${shallow.llm !== cfgMod.DEFAULTS.llm}`,
   );
 
-  const autoCases = [
-    ["on", "adaptive"],
-    ["true", "adaptive"],
-    [1, "adaptive"],
-    ["off", "off"],
-    ["0", "off"],
-    [false, "off"],
-    ["inject", "inject"],
-    ["nope", cfgMod.DEFAULTS.auto],
+  const engineCases = [
+    ["OCR", "ocr"],
+    [" Delegate ", "delegate"],
+    ["auto", "auto"],
+    ["nope", cfgMod.DEFAULTS.engine],
   ];
-  const autoGot = autoCases.map(([input]) => cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, auto: input }).auto);
+  const engineGot = engineCases.map(([input]) => cfgMod.normalizeConfig({ ...cfgMod.DEFAULTS, engine: input }).engine);
   check(
-    "v0.5.8：auto 写成开关键也认（true/\"on\"/1 → adaptive，false/\"0\" → off），枚举值与非法值照旧",
-    autoCases.every(([, want], i) => autoGot[i] === want),
-    autoCases.map(([input], i) => `${JSON.stringify(input)}→${autoGot[i]}`).join(" · "),
+    "配置：engine 收敛（去空白小写；枚举值与非法值照旧）",
+    engineCases.every(([, want], i) => engineGot[i] === want),
+    engineCases.map(([input], i) => `${JSON.stringify(input)}→${engineGot[i]}`).join(" · "),
   );
 }
 {
@@ -3731,7 +3408,7 @@ check(
   const armCalls = hookIndexCode.match(/armHook\s*\(/g) ?? [];
   check(
     "v0.7.0：lib/index.js 里没有裸的 ctx.on( —— 事件钩子一律走 armHook 白名单",
-    bareOn.length === 0 && armCalls.length >= 5,
+    bareOn.length === 0 && armCalls.length >= 1,
     `ctx.on=${bareOn.length} armHook=${armCalls.length}`,
   );
 }
@@ -3745,9 +3422,9 @@ check(
   check(
     "v0.7.0：ocr_status 报出事件钩子账目（registered/counts/errors/blocked 四件套，且能看到真实挂上的钩子）",
     Array.isArray(hookStatus.hooks?.registered) &&
-      hookStatus.hooks.registered.includes("tools/result") &&
+      hookStatus.hooks.registered.includes("loader/volatile-update") &&
       typeof hookStatus.hooks.counts === "object" &&
-      Number.isFinite(hookStatus.hooks.counts?.["tools/result"]) &&
+      Number.isFinite(hookStatus.hooks.counts?.["loader/volatile-update"]) &&
       Array.isArray(hookStatus.hooks.errors) &&
       Array.isArray(hookStatus.hooks.blocked),
     JSON.stringify(hookStatus.hooks).slice(0, 240),
@@ -3834,30 +3511,19 @@ check(
     JSON.stringify({ stats: entryStatus.stats, line: entryStatusText.split("\n").find((l) => l.includes("按入口记账")) }),
   );
   check(
-    "v0.9.0：stats 进 ocr_status 的 schema（since + 四个入口，各自五个计数）",
+    "v0.9.0：stats 进 ocr_status 的 schema（since + 三个入口，各自五个计数）",
     (entrySchema.properties?.stats?.required ?? []).join(",") === "since,byEntry" &&
-      (byEntrySchema.required ?? []).join(",") === "tool,command,button,auto" &&
+      (byEntrySchema.required ?? []).join(",") === "tool,command,button" &&
       (entrySchema.required ?? []).includes("stats") &&
       (byEntrySchema.properties?.tool?.required ?? []).join(",") === "started,ok,failed,lastAt,lastCode",
     JSON.stringify({ byEntryRequired: byEntrySchema.required, rootHasStats: (entrySchema.required ?? []).includes("stats") }),
   );
 
-  /* auto 桶不方便在这里真跑（要驱动器整个 turn-stopping 流程），但「记过账」这件事要能被钉住：
-     字段存在 + 源码里确实在中途结算处记了账（不然桶永远是 0 也看不出来）。 */
-  const entryIndexSource = readFileSync(new URL("../lib/index.js", import.meta.url), "utf8");
-  check(
-    "v0.9.0：auto 桶存在，且自动评审的开跑/结算两处都真的记了账（源码级）",
-    typeof entryStatus.stats?.byEntry?.auto?.started === "number" &&
-      /noteEntryStart\("auto"\)/.test(entryIndexSource) &&
-      (entryIndexSource.match(/noteEntryResult\("auto"/g) ?? []).length >= 2,
-    JSON.stringify({ auto: entryStatus.stats?.byEntry?.auto, resultCalls: (entryIndexSource.match(/noteEntryResult\("auto"/g) ?? []).length }),
-  );
-
   /* 没有 skill 桶是**有意的**：模型自发调用与按 skill 说明调用在工具层是同一次调用。
-     这条断言防的是「以后有人为了报表好看造一个猜出来的桶」。 */
+     这条断言防的是「以后有人为了报表好看造一个猜出来的桶」；v1-slim 起 auto 桶随自动评审一起删了。 */
   check(
-    "v0.9.0：只有四个可核对的口径（没有猜出来的 skill 桶）",
-    Object.keys(entryStatus.stats.byEntry).join(",") === "tool,command,button,auto",
+    "v0.9.0：只有三个可核对的口径（没有猜出来的 skill / auto 桶）",
+    Object.keys(entryStatus.stats.byEntry).join(",") === "tool,command,button",
     Object.keys(entryStatus.stats.byEntry).join(","),
   );
 }
