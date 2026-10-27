@@ -1030,13 +1030,13 @@ check(
 );
 const tailInjected = tailReg && typeof tailReg.options.inject === "function" ? tailReg.options.inject() : {};
 check(
-  "注入面恰好是 {cfgCtx / runReview / t / changesFeedReady}：不依赖宿主的 jobs 服务（v1-slim 已删）",
+  "注入面恰好是 {cfgCtx / runReview / t}：不依赖 jobs，也不依赖会话级改动清单（v1.0）",
   Boolean(tailInjected.cfgCtx)
     && typeof tailInjected.runReview === "function"
     && typeof tailInjected.t === "function"
-    && typeof tailInjected.changesFeedReady === "function"
     && tailInjected.hooks === undefined
-    && tailInjected.watchRows === undefined,
+    && tailInjected.watchRows === undefined
+    && tailInjected.changesFeedReady === undefined,
   JSON.stringify(Object.keys(tailInjected)),
 );
 const tailProps = (props = {}) => ({
@@ -1098,91 +1098,34 @@ snapshot = { ...snapshot, value: { ...snapshot.value, onDemand: undefined, enabl
 check("enabled=false 时按钮整块不出现", renderTail() === null);
 snapshot = snapshotKept;
 
-/* v0.11.0：按钮只在「本回合确实动了工作区」时出现。
-   改动记录由插件注册的 conversation 定义发布（只发布数据、不发布视图节点）；事件体只有 {turn}，
-   所以真正的文件清单要按 seq 去宿主那里取 api/changes.summary。宿主没有这一支时退回「总是显示」。
-   v0.12.2 收紧为「只有明确读到 total=0 才隐藏」：记录缺失、请求失败、路由不可用一律显示 ——
-   真机上遇到过宿主改动服务不可用，按钮整块静默消失（功能在，入口没了）。 */
-const turnWithChanges = (seq) => ({
-  data: { get: (kind) => (kind === "ocrTurnChanges" ? { turn: 1, changesSeq: seq } : undefined) },
-});
-const fetchSummary = (total) => async () => ({ ok: true, json: async () => ({ total, files: [] }) });
-const renderTailReady = async (extra = {}) => {
-  const props = {
-    changesFeedReady: () => true,
-    turn: turnWithChanges(7),
-    fetchChanges: fetchSummary(2),
-    ...extra,
-  };
-  renderTail(props);
-  await tick();
-  return renderTail(props);
+/* v1.0：入口不再看「本回合有没有改动」。
+   旧做法注册一份 ocrTurnChanges conversation 定义、按事件 seq 去请求 api/changes.summary，
+   绑死会话级改动清单（真机上 404 / 被撤销 / 与 harness 的会话存储绑定），读不到只能 fail-open，
+   于是入口「有时出现、有时不出现」。现在按钮与 turn 无关，总是出现。 */
+const turnNoise = {
+  turn: { data: { get: () => ({ turn: 1, changesSeq: 7 }) } },
+  fetchChanges: async () => ({ ok: true, json: async () => ({ total: 0 }) }),
 };
+check(
+  "v1.0：即使 turn 数据里写着「0 个改动」、fetchChanges 也说 total=0，按钮照样出现",
+  Boolean(tailButton(renderTail(turnNoise))),
+  textOf(renderTail(turnNoise)),
+);
+check(
+  "v1.0：宿主提供了 uiConversation 也不注册任何会话事件定义（不再依赖改动清单）",
+  (() => {
+    let registered = 0;
+    const ctx = makeCtx({
+      registrations: [],
+      uiConversation: { events: { register() { registered += 1; return () => {}; } } },
+    });
+    plugin.apply(ctx);
+    return registered === 0;
+  })(),
+  "no conversation definitions",
+);
 
-const changedTree = await renderTailReady();
-check("宿主给了改动记录、本回合确实改了文件：按钮出现", Boolean(tailButton(changedTree)), textOf(changedTree));
-const cleanTree = await renderTailReady({ fetchChanges: fetchSummary(0) });
-check("本回合没有改动（total=0）：按钮不出现", tailButton(cleanTree) === undefined, cleanTree === null ? "null" : textOf(cleanTree));
-const noRecordTree = await renderTailReady({ turn: { data: { get: () => undefined } } });
-check(
-  "本回合没有留下改动记录（宿主没发 workspace/changes，或这一回合是在页面刷新前完成的）：按「不知道」处理，仍给出入口 —— 真机上出现过宿主改动服务不可用、按钮整块静默消失",
-  Boolean(tailButton(noRecordTree)),
-  noRecordTree === null ? "null" : textOf(noRecordTree),
-);
-const offlineTree = await renderTailReady({ fetchChanges: async () => { throw new Error("离线"); } });
-check("取不到改动清单时退回「总是显示」（fail-open：别在刚改完代码时把入口藏掉）", Boolean(tailButton(offlineTree)), textOf(offlineTree));
-const noRouteTree = await renderTailReady({ fetchChanges: async () => ({ ok: false, status: 404, json: async () => ({}) }) });
-check("路由不可用（404）时同样退回「总是显示」", Boolean(tailButton(noRouteTree)), textOf(noRouteTree));
-check("宿主没给改动记录这一支时按钮总是显示（降级路径）", Boolean(tailButton(renderTail())), "降级");
-check("默认夹具没有 uiConversation：脏检查未生效（退回总是显示）", tailInjected.changesFeedReady() === false, String(tailInjected.changesFeedReady()));
-
-/* 改动记录的定义本身：形状、「只发布数据」的契约、以及数据没变时的引用稳定（宿主靠它避免白刷）。 */
-let capturedDef = null;
-const defCtx = makeCtx({
-  registrations: [],
-  uiConversation: { events: { register(definition) { capturedDef = definition; return () => {}; } } },
-});
-plugin.apply(defCtx);
-check(
-  "注册了本回合改动记录（走 ctx.effect，随 fiber 撤销）",
-  Boolean(capturedDef) && defCtx.effectCalls.includes("本回合改动记录（启动代码审核按钮的脏检查）"),
-  JSON.stringify(defCtx.effectCalls.slice(-2)),
-);
-check(
-  "定义只认 turn/start 与 workspace/changes（事件体只有 turn，其它一律 null）",
-  capturedDef.kind === "ocrTurnChanges"
-    && JSON.stringify(capturedDef.match({ type: "turn/start", data: { turn: 1 } })) === JSON.stringify({ id: "1", role: "start" })
-    && JSON.stringify(capturedDef.match({ type: "workspace/changes", data: { turn: 3 }, seq: 42 })) === JSON.stringify({ id: "3", role: "update" })
-    && capturedDef.match({ type: "tool/call", data: { turn: 1 } }) === null
-    && capturedDef.match({ type: "workspace/changes", data: {} }) === null
-    && capturedDef.match({ type: "workspace/changes", data: { turn: "3" } }) === null,
-  JSON.stringify([capturedDef.match({ type: "turn/start", data: { turn: 1 } }), capturedDef.match({ type: "workspace/changes", data: { turn: 3 }, seq: 42 })]),
-);
-const defState = capturedDef.start({}, { event: { type: "turn/start", data: { turn: 2 } } });
-let startRejects = false;
-try {
-  capturedDef.start({}, { event: { type: "workspace/changes", data: { turn: 2 } } });
-} catch {
-  startRejects = true;
-}
-check("start 只认 turn/start（其余抛错，宿主会据此拒绝）", defState.turn === 2 && defState.changesSeq === undefined && startRejects, JSON.stringify(defState));
-const defAfterUpdate = capturedDef.update({ state: defState }, { event: { type: "workspace/changes", seq: 42 } });
-check("update 用事件的 seq 当坐标（清单另取）", defAfterUpdate.changesSeq === 42 && defAfterUpdate.turn === 2, JSON.stringify(defAfterUpdate));
-const defFirst = capturedDef.buildLocationData({ state: defAfterUpdate }, "turn", undefined);
-const defSame = capturedDef.buildLocationData({ state: defAfterUpdate }, "turn", defFirst);
-const defChanged = capturedDef.buildLocationData({ state: { ...defAfterUpdate, changesSeq: 43 } }, "turn", defFirst);
-check(
-  "发布的 turn 数据 key=kind、没变时返回同一个对象（引用稳定）",
-  defFirst.kind === "turn"
-    && defFirst.turn === 2
-    && defFirst.key === "ocrTurnChanges"
-    && defFirst.value.changesSeq === 42
-    && defSame === defFirst
-    && defChanged !== defFirst
-    && defChanged.value.changesSeq === 43,
-  JSON.stringify([defFirst, defSame === defFirst, defChanged]),
-);
-check("步级作用域不发布数据（返回 null）", capturedDef.buildLocationData({ state: defAfterUpdate }, "step", undefined) === null, "step");
+/* v1.0 起不再有「本回合改动记录」这条会话事件定义 —— 上面那条「不注册任何定义」已经把它钉死了。 */
 
 console.log(failures === 0 ? `\n全部通过（共 ${total} 项）` : `\n${failures} 项失败（共 ${total} 项）`);
 if (failures > 0) process.exitCode = 1;

@@ -1543,13 +1543,16 @@ for (const entry of noBridgeCtx.effects) if (typeof entry.dispose === "function"
       "取消路径没接上用量说明",
     );
 
-    /* M2：按钮副行给出「本回合 N 个文件改动」，数字来自已经读到的那次请求（不新增宿主通道）。 */
+    /* v1.0：入口不再依赖会话级改动清单（api/changes.summary）与副行里的「本回合 N 个文件改动」。
+       实测那套判断在真机上会 404 / 被撤销，读不到只能 fail-open，于是入口「有时出现、有时不出现」。 */
     check(
-      "v0.12.4（M2）：按钮副行用上本回合改动文件数（data.total 不再被压成布尔值丢掉）",
-      pickerSource.includes('"data-ocr-tail-count"') &&
-        /setChangeCount\(data && Number\.isSafeInteger\(data\.total\)/.test(pickerSource) &&
-        /tail\.changes/.test(pickerSource),
-      "副行没有改动文件数，或数字来源被丢掉",
+      "v1.0：按钮不再依赖会话级改动清单（无 CHANGES_SUMMARY_ROUTE / TURN_CHANGES_KIND / changeCount / data-ocr-tail-count）",
+      !/CHANGES_SUMMARY_ROUTE/.test(pickerSource) &&
+        !/TURN_CHANGES_KIND/.test(pickerSource) &&
+        !/changeCount/.test(pickerSource) &&
+        !/changesFeedReady/.test(pickerSource) &&
+        !pickerSource.includes('"data-ocr-tail-count"'),
+      "还残留会话级改动清单依赖",
     );
 
     /* M3：按钮失败文案必须有去处 —— 不许只显示「评审没能启动。」 */
